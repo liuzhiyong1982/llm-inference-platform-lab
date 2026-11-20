@@ -606,6 +606,8 @@ D1 用到的 flag 逐项解释：
 | `--result-filename` | `d1-c${C}-时间戳.json` | 输出文件名，带并发和时间戳避免覆盖 | 重复跑加 `-run2` |
 | `--metadata` | `gpu=... vllm=...` | 任意 key=value 写进 JSON，做实验溯源 | 新 shell 里 `VLLM_VERSION` 可能为空，先 export |
 
+`--percentile-metrics` 和 `--metric-percentiles` 是笛卡尔积：前者选**指标**（`ttft`/`tpot`/`itl`/`e2el`），后者选**百分位点**（`50`/`95`/`99`）。只写 `--metric-percentiles 50,99` 不会让 TPOT 自动有 P50/P99，必须同时在 `--percentile-metrics` 里列出 `tpot`。JSON 字段是 `p50_ttft_ms`、`p99_tpot_ms` 这种；`mean_*`、`median_*` 是独立字段。
+
 本次没用、但值得知道的 flag：
 
 - `--request-rate`：默认 `inf`，即闭路压测；给有限值会按到达率发请求（配合 `--burstiness` 控制 Poisson/均匀）。
