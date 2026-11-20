@@ -561,6 +561,15 @@ for C in 1 4 16 64; do
 done
 ```
 
+`--dataset-name random` 发的**不是自然语言**，是合成 token 序列：
+
+- 从词表中排除 special tokens，按 `(offset + index + arange(1024)) % vocab_size` 取一段滑动窗口；
+- decode 成字符串后再 re-encode、截断，保证每条正好 1024 个 token（不同 tokenizer 的合并规则会让原始 ID 数变化）；
+- 每个请求的起点不同，避免 100/1000 条完全一样；
+- 实测 c=1：`total_input_tokens=102400`、`input_lens` 全为 1024、`output_lens` 全为 256。
+
+所以它测的是“固定长度下的计算性能”，不代表真实文本分布，也没有天然的共享前缀；要测 prefix cache 得显式加 `--random-prefix-len`。
+
 D1 用到的 flag 逐项解释：
 
 | flag | 我们传的值 | 作用 | 注意 |
