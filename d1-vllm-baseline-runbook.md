@@ -86,7 +86,14 @@ vastai search offers -n \
 | `-o 'dph'` | 按总价升序；字段加 `-` 后缀是降序 |
 | `--storage 40` | 让 `dph_total` 把 40GB 盘的小时费算进去 |
 
-> **driver 和 CUDA 的关系**：容器里的 vLLM 自带 CUDA runtime 和 PyTorch，host 只提供 driver。`cuda_vers`（Max CUDA）是 driver 能支持的最高 runtime 版本，所以它是「能不能跑」的天花板，不是镜像里装的版本。CUDA 11 起有 minor version compatibility（12.x runtime 能跑在支持 12.0 的 driver 上），但**不能跨大版本**。`v0.34.0` 镜像声明 `CUDA_VERSION=13.0.2`、`NVIDIA_REQUIRE_CUDA=cuda>=13.0`，所以 host 的 Max CUDA 必须 ≥ 13.0；driver 的具体版本号只在排查已知 bug 时才需要看。镜像已经拉到本地后可以这样核对：
+> **GPU / driver / CUDA / 镜像的关系**：容器里的 vLLM 自带 CUDA runtime 和 PyTorch，host 只提供 driver。`cuda_vers`（Max CUDA）是 driver 能支持的最高 runtime 版本，所以它是「能不能跑」的天花板，不是镜像里装的版本。再往上追一层，GPU 架构决定的是 driver 的**下限**（driver 必须认识这张卡）和镜像必须包含的 arch（L4 = sm_89），不是 driver 的上限；反过来老卡会被新 driver 分支逐步淘汰，那才是上限。
+>
+> 所以完整约束是两条，缺一不可：
+>
+> 1. 镜像的 `CUDA_VERSION` ≤ driver 的 Max CUDA，且**不跨大版本**（CUDA 11 起有 minor version compatibility，12.x runtime 能跑在支持 12.0 的 driver 上）；
+> 2. GPU 的 compute capability 在镜像的编译列表里（`TORCH_CUDA_ARCH_LIST`），否则会报 `no kernel image is available`，这跟 CUDA 版本无关。`v0.34.0` 的列表是 `7.5 8.0 8.6 8.9 9.0 10.0 12.0`，L4 的 8.9 在里面。
+>
+> `v0.34.0` 镜像声明 `CUDA_VERSION=13.0.2`、`NVIDIA_REQUIRE_CUDA=cuda>=13.0`，所以 host 的 Max CUDA 必须 ≥ 13.0；driver 的具体版本号只在排查已知 bug 时才需要看。镜像已经拉到本地后可以这样核对：
 >
 > ```bash
 > docker image inspect vllm/vllm-openai:v0.34.0 \
