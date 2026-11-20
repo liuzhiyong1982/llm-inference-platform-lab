@@ -293,7 +293,7 @@ block 16 token = 2.25 MiB
 
 ### 11. 收尾
 
-- [ ] 停 GPU 采样（`kill $(cat /workspace/gpu_smi.pid)`）
+- [ ] 停 GPU 采样（`kill $(cat /workspace/gpu_smi.pid)`；run2 用 `gpu_smi_run2.pid`）
 - [ ] 4 个 baseline JSON + 诊断 JSON + run2 JSON
 - [ ] `gpu_util.csv`（必要时 `gpu_util_run2.csv`）
 - [ ] 加载耗时 / KV cache / 最大并发
