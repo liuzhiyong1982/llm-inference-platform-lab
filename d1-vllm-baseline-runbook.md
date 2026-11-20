@@ -187,6 +187,18 @@ ssh -i ~/.ssh/<你的私钥> -p 34388 root@ssh8.vast.ai
 1. 实例状态是 `running`。`stopped` 时连不上，先 `vastai start instance <instance_id>`，再等镜像拉完。
 2. Vast 账号/实例里注册的公钥，和 `-i` 指向的私钥配对。本机没有默认 `id_rsa`/`id_ed25519` 时必须显式 `-i`；公钥没注册就：
 
+> **Vast 会自动 tmux**：镜像的 `~/.bashrc` 末尾有 `tmux attach -t ssh_tmux || tmux new-session -s ssh_tmux`，所以**每个新 SSH 都会进入同一个 tmux 会话**，看到的是同一个前台进程（比如 vLLM 日志）。这不是 SSH 复用，是 Vast 故意的。在 tmux 里：
+>
+> ```bash
+> Ctrl-b c        # 新建窗口，得到干净 shell
+> Ctrl-b 0 / 1    # 按编号切换窗口
+> Ctrl-b d        # 脱离会话，进程继续跑（断线不会杀 vLLM）
+> tmux ls         # 列出会话
+> tmux attach -t ssh_tmux
+> ```
+>
+> 想禁用自动 tmux（每个 SSH 独立 shell，但断线会杀前台进程）：`touch ~/.no_auto_tmux` 后重连。长压测不要禁用。
+
 ```bash
 # 目的：把本机公钥注册到 Vast 账号（一次即可；已注册过会提示重复，可跳过）
 vastai create ssh-key "$(cat ~/.ssh/<你的公钥>.pub)"
@@ -619,6 +631,7 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | `401` / `Invalid API key` | key 没设或已失效 | 重新生成后 `vastai set api-key <key>` |
 | `ssh://root@host:port: No such file or directory` | 把 `ssh-url` 输出的 URI 直接粘进了 shell | 用 `ssh -i <私钥> -p <port> root@<host>` |
 | `Permission denied (publickey)` | 账号/实例里的公钥和本机私钥不配对；或本机没有默认 key 却没写 `-i` | `vastai attach ssh <id> "$(cat ~/.ssh/xxx.pub)"`；连接时显式 `-i`；`ssh -v` 看 offered key |
+| 新 SSH 会话被 vLLM 日志占住 | Vast 的 `.bashrc` 自动 attach 到同一个 tmux（`ssh_tmux`） | `Ctrl-b c` 开新窗口；`Ctrl-b d` 脱离；`touch ~/.no_auto_tmux` 可禁用 |
 | `Connection refused` / 超时 | 实例 `stopped` 或还在 `loading` | `vastai start instance <id>`；`vastai show instance <id>` 等到 `running` |
 | `python: command not found` | 镜像里只有 `python3` | 所有命令改用 `python3`；不要额外装 python |
 | `df: /workspace: No such file or directory` | 该镜像没有预建 `/workspace`，`/` 就是容器盘 | `mkdir -p /workspace`；用 `df -h /` 确认容量 |
