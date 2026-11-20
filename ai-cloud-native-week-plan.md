@@ -398,6 +398,45 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 - 可选：给 vLLM/llm-d 提一个小 PR（docs/test/benchmark 都算）。
 - **验收：** 3 个 artifact + 简历 v2 + 10 个已投 + 答上 ≥8/10 题。
 
+### 为什么推理平台要 K8s（以及什么时候不要）
+
+一句话：**K8s 不提升单卡指标，它把"性能问题"换成"容量、隔离、交付问题"。** 单卡上只能调参，集群里才能加副本、改路由、隔离 noisy neighbor。
+
+**K8s 提供的是协调机制，而协调的前提是存在多个需要协调的对象。** 三个维度各对应一类选择：
+
+| 维度 | 对应的选择 | 该维度 = 1 时消失的东西 |
+|---|---|---|
+| 副本数 | 放哪、流量给谁、怎么发布 | 调度、负载均衡、滚动更新、扩缩、装箱 |
+| 异构 | 谁和谁不能同节点、谁更急 | 节点池/亲和性、优先级、装箱 |
+| 团队数 | 谁可以用多少 | 配额、公平性、隔离、RBAC |
+
+三个都是 1（1 卡、1 模型、1 团队）时，K8s 只是一个昂贵的进程管理器。但**这不是严格乘法**：1 个团队、100 个同构副本时它仍然值（滚动更新、故障转移、装箱），只是调度/多租户那一半用不上。副本数是硬门槛，异构和团队数是加分项。
+
+**四个只有集群才存在的收益：**
+
+1. **扩缩是突破单卡上限的唯一手段。** D1 已经挖到头：c=16→64 吞吐只 +18%，TTFT P99 11.7s→55.5s，SLO goodput 0.077 req/s。再要容量只能横向。但 LLM 不能用 CPU 扩缩——GPU 推理 CPU 占用低且不随负载线性变化，要看 `vllm:num_requests_waiting` / KV 使用率 / TTFT P99；且模型加载就要 69s，反应式扩缩通常来不及，尖峰过去副本才 ready。所以 D3 真正要测的是"从 0 到 ready 多少秒"，不是"KEDA 能不能扩"。
+2. **权重分发决定扩缩是否可行。** 推理每次扩容都要把 5.7GB（AWQ）到 16.4GB（FP16）权重加十几 GB 镜像落到节点上。节点本地缓存 / initContainer / 预拉取，决定扩容是秒级还是分钟级——这是"K8s + 推理"真正交叉的地方，也是 D3 的实测项。
+3. **路由只在多副本时才存在。** llm-d EPP 的 prefix-cache-aware 路由，前提是"多副本 + 网关"；单进程没有路由问题。D4 的全部收益建立在 D3 的集群之上——引擎侧的 prefix cache 要靠平台侧的路由才变成集群级命中率。
+4. **配额与准入。** GPU 是最容易被一个团队占满的资源。Kueue 的 ClusterQueue/优先级/抢占把"抢卡"从人际冲突变成策略；Kyverno 兜底拒绝没带 quota label 的 GPU workload（D5）。
+
+**最容易在滚动更新时踩到的：** D1 的 c=64 最大延迟 179.3s、中位 123.4s（`results/d1-c64-*.json`），而 K8s 默认 `terminationGracePeriodSeconds` 是 30s[54]、Deployment 默认 `maxUnavailable` 25%[55]。不配 `preStop` + 足够长的 grace period，每次发布都会截断在途请求；单副本时 25% 就是 100% 不可用。这类问题在 `docker run` 时不存在，一上集群全冒出来。
+
+**它不解决什么：**
+
+| 不解决 | 原因 |
+|---|---|
+| 单卡 TTFT/TPOT | 同一张卡、同一 power limit，指标不变 |
+| SLO 容量 | 0.077 req/s 是卡的上限，不是编排的上限 |
+| 模型质量 | AWQ 掉点要靠质量门 |
+| 冷启动物理下限 | 权重传输 + 69s 加载只能缓存，不能消除 |
+| 排队本身 | 副本不够只是把队列挪个地方 |
+
+**K8s ≠ 省钱。** LLM 的 scale-to-zero 一次冷启动几十秒到几分钟，只适合低频/可容忍延迟的负载；稳态省的是装箱率和闲置，不是靠缩到 0。
+
+**D3 只测三个数**（"能部署"没有区分度）：冷启动（镜像已缓存但权重现拉 vs 节点本地缓存，差多少秒）、扩容曲线（KEDA 1→N 期间 P99 是先恶化还是立刻变好）、驱逐行为（删一个副本时在途请求的命运，用 179s 最大延迟反推 grace period）。
+
+**反转条件：** 单卡、单模型、单团队、流量平稳 → `systemd` + `docker` + `nginx` 更诚实，控制面、CNI、device plugin、镜像仓库、监控栈全是净成本。**能说清"这里不该上 K8s"比会写 Deployment 更能证明懂它。**
+
 ### 为什么是 Kueue 而不是 Volcano（以及什么时候反转）
 
 Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、2022 进孵化），核心差异是 **gang scheduling**（8 卡任务要么全起、要么不起）、层级 fairshare 队列与 HyperNode 拓扑感知[18][19]；它已经在往"AI 原生统一调度"扩，甚至自带推理栈 Kthena[20]。但——
@@ -658,3 +697,5 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 [51] https://jobs.ashbyhq.com/cerebras/ef15b7be-2fa3-4343-81aa-47ef65171af0/application — Cerebras — Staff Software Engineer, Inference Platform (Toronto)
 [52] https://docs.vllm.ai/en/latest/benchmarking/cli/ — vLLM Benchmark CLI (per-request metrics, percentiles, ignore-eos)
 [53] https://docs.vllm.ai/en/latest/cli/serve/ — vLLM serve CLI
+[54] https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/ — Pod Lifecycle: terminationGracePeriodSeconds (默认 30s) — Kubernetes docs
+[55] https://kubernetes.io/docs/concepts/workloads/controllers/deployment/ — Deployments: rolling update maxUnavailable / maxSurge 默认 25% — Kubernetes docs
