@@ -1068,9 +1068,22 @@ print(good, good / d["duration"], d["request_goodput"])
 - 采样：`nvidia-smi` 每秒一次；每轮的 util 取该轮 `[date - duration, date]` 窗口内的均值和 P95。
 - `power.draw` / `power.limit` / `clocks.sm`：判断是否被功耗墙限制；`SW Power Cap: Active` 就是限功耗。
 - `vllm:num_preemptions_total`：Prometheus counter，压测前后相减；>0 说明 KV cache 不够，序列被换出/重算。
-- `server_queue_times`（秒）：服务端调度排队，请求还没被调度。
-- `server_ttfts`（秒）：从被调度到首 token，包含 chunked prefill 的多步调度。
-- 同一请求：`client_ttft ≈ server_queue + server_ttft + 前端/网络/tokenization`。残差不要硬塞进 prefill。
+| 字段 | 哪一侧 | 含义 | 单位 |
+|---|---|---|---|
+| `queue_times` | 客户端 bench | 等待并发槽位、还没发出去的时间 | 秒 |
+| `server_queue_times` | 服务端 | 调度器排队，请求还没被调度 | 秒 |
+| `server_ttfts` | 服务端 | 从被调度到首 token，含 chunked prefill 的多步调度 | 秒 |
+| `ttfts` | 客户端 | 从发出请求到收到首个流式 token | 秒 |
+
+同一请求近似：
+
+```
+client_ttft ≈ server_queue_time + server_ttft + 前端/网络开销
+```
+
+前端开销包括 tokenization、chat template、multimodal 预处理、detokenization、传输。残差不要硬塞进 prefill。
+
+`--enable-per-request-metrics` 只额外提供 `server_queue_times` / `server_ttfts` 这两个 per-request 字段（仅 `openai`、`vllm`、`openai-chat` backend 有；拿不到时为 `null`）。它**不**提供 GPU util/power，也不改变 nvidia-smi 的指标；而且会加服务端 CPU 开销，尤其高并发时，所以只用于诊断跑，不用于 headline。
 
 ### 6. 指标来源：vLLM vs nvidia-smi
 
