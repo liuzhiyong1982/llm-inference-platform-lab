@@ -1100,7 +1100,67 @@ print(good, good / d["duration"], d["request_goodput"])
 
 生产里不要长期 `nvidia-smi` 轮询，用 **DCGM exporter + Prometheus + Grafana**；vLLM 的指标直接抓 `/metrics`。
 
-### 7. 常见误读
+### 7. 客户端指标怎么抓
+
+`vllm bench serve` **不会**把客户端指标暴露成 HTTP 接口；它只写两个地方：
+
+1. **stdout**：结束时打印的汇总表，给人看；
+2. **JSON 文件**：加 `--save-result` 才会写，机器读；再加 `--save-detailed` 才有 per-request 数组。
+
+推荐这样跑：
+
+```bash
+vllm bench serve \
+  ... \
+  --save-result --save-detailed \
+  --result-dir ./results \
+  --result-filename "d1-c${C}-$(date +%Y%m%d-%H%M%S).json" \
+  --metadata gpu=l4-24gb vllm="$VLLM_VERSION" concurrency="$C" n="$N" \
+  2>&1 | tee "./results/d1-c${C}-stdout.log"
+```
+
+- `--save-result`：写汇总 JSON（没有它，终端一关就没了）；
+- `--save-detailed`：写入 `ttfts`、`latencies`、`output_lens` 等 per-request 数组，文件会大很多；
+- `--result-dir` / `--result-filename`：输出路径和文件名；
+- `--append-result`：追加到已有 JSON，适合分段跑；
+- `--disable-tqdm`：关进度条，stdout 日志更干净；
+- `tee`：同时保留人类可读的汇总，方便回看。
+
+JSON 字段分组：
+
+| 组 | 字段 |
+|---|---|
+| 汇总 | `completed`、`failed`、`duration`、`request_throughput`、`output_throughput`、`total_token_throughput`、`request_goodput` |
+| 延迟汇总 | `mean_*`、`median_*`、`p50_*`、`p95_*`、`p99_*`（TTFT/TPOT/ITL/E2EL） |
+| 逐请求 | `ttfts`、`latencies`、`output_lens`、`input_lens`、`start_times`、`generated_texts` |
+| 其他 | `itls`（所有请求的 gap **展平**成一个列表）、`errors`、`metadata`、`date`（结束时间） |
+
+注意：没有 `tpots` 数组；TPOT 要用 `latencies`、`ttfts`、`output_lens` 逐条重算。`itls` 是展平的，不能直接和 `ttfts` 一一对应。
+
+批量读取：
+
+```python
+import json, glob
+
+for f in sorted(glob.glob("results/d1-c*.json")):
+    d = json.load(open(f))
+    if "concurrency" not in d:      # 跳过 diagnostic 等
+        continue
+    print("%-40s c=%2s n=%4s out=%6.1f TTFT p99=%7.0f TPOT p95=%6.1f goodput=%.4f" % (
+        f.split("/")[-1], d["concurrency"], d["num_prompts"],
+        d["output_throughput"], d["p99_ttft_ms"], d["p95_tpot_ms"],
+        d["request_goodput"]))
+```
+
+如果忘了 `tee`，但还在 tmux 里，可以事后抓屏：
+
+```bash
+tmux capture-pane -p -t ssh_tmux:2 -S -300 > /workspace/results/client-stdout.log
+```
+
+不过 JSON 才是权威来源，stdout 只用于人看。
+
+### 8. 常见误读
 
 | 误读 | 正确理解 |
 |---|---|
