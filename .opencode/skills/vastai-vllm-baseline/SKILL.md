@@ -1,6 +1,6 @@
 ---
 name: Vast.ai vLLM Baseline
-description: Rent a single L4 on Vast.ai and produce a reproducible vLLM serving baseline (TTFT/TPOT/throughput, GPU util, preemption, cost), including version compatibility, SSH/tmux, model download, benchmark and diagnostic runs.
+description: Rent a single L4 on Vast.ai and produce a reproducible vLLM serving baseline (TTFT/TPOT/throughput, GPU util, preemption, cost), including version compatibility, SSH/tmux, model download, benchmark and diagnostic runs, and metric/goodput interpretation.
 ---
 
 # Vast.ai vLLM Baseline
@@ -41,12 +41,39 @@ GPU 架构 (L4 = sm_89)
 
 ### 指标口径
 
-- **TTFT**：请求发出到首 token。闭路压测里包含服务端排队，不只是 prefill。
-- **TPOT / ITL**：decode 阶段每个输出 token 的间隔。
-- **output tok/s**：decode 吞吐，不是总 token 吞吐。
-- **goodput**：满足 SLO（如 TTFT ≤ 2s、TPOT ≤ 100ms）的请求速率。
-- **preemption**：vLLM 因 KV cache 不足把在跑序列换出/重算；`vllm:num_preemptions_total`。
-- **host preemption**：Vast interruptible 实例被暂停，和上面不是一回事。
+**单请求**
+
+| 指标 | 定义 / 公式 |
+|---|---|
+| TTFT | 请求发出到首 token；闭路压测含服务端排队，不只是 prefill |
+| ITL | 相邻流式 chunk 的间隔；标准解码 1 token/chunk，ITL≈TPOT |
+| TPOT | `(e2el - ttft) / (output_tokens - 1)`；output=1 时按 0 |
+| E2EL | 端到端延迟 |
+
+**聚合**
+
+- `request_throughput = completed / duration`
+- `output_throughput = sum(output_tokens) / duration`（不含 prefill）
+- `total_token_throughput = (input + output) / duration`
+- `goodput = good_completed / duration`，单位 **req/s，不是百分比**
+- 达标比例 = `goodput / request_throughput`
+- `duration` 是墙钟时长，包含 ramp-up、排队和尾部，不是延迟之和
+
+**goodput 是逐请求 AND**：`ttft <= SLO_ttft` 且 `tpot <= SLO_tpot`（配了 e2el 也要满足）。`--goodput ttft:2000 tpot:100` 单位是 ms，内部转秒。P95 达标 ≠ goodput 高；goodput 要求每一条都达标。
+
+**百分位**：对 per-request 数组算；P50=中位数，mean≠median；**百分位不能相加**，要先把同一请求的两项相加再算 P99。
+
+**指标来源**
+
+| 来源 | 指标 |
+|---|---|
+| `vllm bench serve`（客户端） | TTFT/TPOT/ITL/E2EL、throughput、goodput、百分位 |
+| vLLM `/metrics` | 抢占、running/waiting、KV cache 使用率、prefix cache |
+| vLLM 启动日志 | 加载耗时、KV cache 大小、最大并发 |
+| vLLM per-request（opt-in） | `server_queue_times`、`server_ttfts`（秒） |
+| nvidia-smi / NVML | util、显存、功耗、温度、clock、driver/CUDA |
+
+两对易混：客户端 TTFT ≠ `server_ttfts`；`utilization.gpu` ≠ `vllm:gpu_cache_usage_perc`（前者是有 kernel 在跑的时间占比，后者是 KV 块使用率）。
 
 ## 流程
 
@@ -221,6 +248,30 @@ vllm bench serve \
 - v0.34 **不再默认 `temperature=0`**；跨次复现要显式加 `--temperature 0`。
 - 每轮前 `reset_prefix_cache`，每轮换 seed；轮间 `sleep 30` 排空队列。
 
+客户端指标只写两处：stdout 和 JSON。必须 `--save-result`；要 per-request 数组再加 `--save-detailed`。JSON 里**没有 `tpots` 数组**，TPOT 用 `latencies`/`ttfts`/`output_lens` 重算；`itls` 是所有 gap 展平后的列表。`--result-dir`/`--result-filename` 控制路径，`tee` 保留 stdout。
+
+### 8.1 KV cache 与容量
+
+Qwen3-8B：36 层、8 KV head、head_dim 128、FP16 KV：
+
+```
+每 token KV = 2 × 36 × 8 × 128 × 2B = 144 KiB
+block 16 token = 2.25 MiB
+91,648 tokens = 5,728 blocks ≈ 12.6 GiB
+11.19x = 91,648 / 8,192（假设每条吃满 8k）
+```
+
+我们实际 1024+256：
+
+```
+1,280 tokens = 80 blocks
+91,648 / 1,280 = 71.6  → KV 上限约 71
+但 --max-num-seqs 64 先生效 → 实际 64
+64 × 1,280 = 81,920 < 91,648 → c=64 抢占为 0
+```
+
+**SLO 容量看 goodput，不看 KV 上限。** 这台 40W L4（SLO：TTFT≤2s、TPOT≤100ms）：c=1 100%、c=4 25%、c=16 0.2%、c=64 0%，所以 SLO 安全吞吐约 **0.077 req/s**，不是 71 路并发。
+
 ### 9. 诊断跑
 
 只在需要拆“排队 vs prefill”时做：
@@ -228,9 +279,13 @@ vllm bench serve \
 1. 停服务；
 2. 同样参数重启，多一个 `--enable-per-request-metrics`；
 3. c=16、200 条，`--save-detailed`；
-4. 读 JSON 里的 `server_queue_times` / `server_ttfts`。
+4. 读 JSON 里的 `server_queue_times` / `server_ttfts`（**秒**）。
 
-口径：`server_queue_times` 是服务端排队；`server_ttfts` 是调度到首 token（prefill），**不是 decode**；decode 看 TPOT/ITL。字段不存在就写“无法拆分”，不要硬凑。
+它只加这两个 per-request 字段，不提供 GPU util/power；只有 `openai` / `vllm` / `openai-chat` backend 有，拿不到是 `null`；会增加服务端 CPU 开销，所以 baseline 不开，诊断数字不和 headline 混。
+
+近似：`client_ttft ≈ server_queue_time + server_ttft + 前端/网络`。
+`queue_times`（客户端）是等并发槽位的时间，和 `server_queue_times` 不是一回事。
+`server_ttfts` 是从调度到首 token，包含 chunked prefill 的多步调度，不是纯 prefill 计算；decode 看 TPOT/ITL。字段不存在就写“无法拆分”，不要硬凑。
 
 ### 10. 重复跑
 
@@ -270,12 +325,16 @@ vllm bench serve \
 | `du -sh` 只有 4.4M | Xet 用符号链接 | `du -shL`；`df -h /` 看真实占用 |
 | `qwen3-8b is not a local folder` | bench 拿 `--model` 找 tokenizer | 加 `--tokenizer Qwen/Qwen3-8B-AWQ` |
 | 抢占 > 0 | KV cache 不足 | 降并发/上下文，或升 `gpu-memory-utilization` |
+| goodput 当百分比 | 它是 **req/s** | 比例 = `goodput / request_throughput` |
+| `server_queue_times` 当 ms | JSON 里是**秒** | P99 算完 ×1000 再和客户端 TTFT 比 |
+| P99 相加 | 百分位不可加 | 先把同一请求的 queue+prefill 相加，再算 P99 |
+| 把 KV 上限 71 当容量 | KV 上限 ≠ SLO 容量 | 看 goodput 曲线；这台 40W L4 约 0.077 req/s |
 | 吞吐远低于公开数字 | host power limit 40W、邻居噪声 | 记录 `power.limit`；换 72W host 重跑 baseline |
 | 两个代码块粘在一起 | 缺换行，`export` 变成 `mkdir` 参数 | 一次只粘一个代码块 |
 
 ## 下一步学习路径
 
-- **D2 参数**：`max-num-seqs`、chunked prefill、prefix caching、AWQ vs FP16 + 质量门。一次一个变量，同 host，先 c=16 找拐点。
+- **D2 参数**：`max-num-seqs`、chunked prefill、prefix caching、AWQ vs FP16 + 质量门。一次一个变量，同 host，先 c=16 找拐点；执行细节见 `d2-vllm-tuning-runbook.md`。参数网格可以用 `vllm bench sweep serve` 编排（run 之间会清 server cache）。D2 比的是 **goodput 曲线**，不是“最大并发”。
 - **D3 K8s**：k3s + Deployment；initContainer 现下 vs node-local 缓存测冷启动；KEDA 按 `num_requests_waiting` 扩缩。
 - **D4 路由**：2×L4，llm-d EPP prefix-cache 路由 vs round-robin，共享长前缀看 P99 和命中率。
 - **D5 策略**：Kueue 配额 + Kyverno 校验，留下被拒 manifest 日志。
