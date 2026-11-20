@@ -970,6 +970,44 @@ Vast 是 marketplace 定价：L4 on-demand 大约 **$0.10–0.45/h**，常见 $0
 
 按 $0.35/h × 4h ≈ **$1.4/天**；加诊断/重复跑约 **$2**。$15 预算够 D1–D2，但**别让实例 Stop 着放一个月**——40GB 存储挂一个月的费用可能超过重新下模型。
 
+## 附：KV cache 与并发估算
+
+以 Qwen3-8B（36 层、8 个 KV head、head_dim 128、FP16 KV）为例：
+
+```
+每 token KV = 2(K,V) × 36 层 × 8 KV head × 128 × 2 B
+            = 147,456 B = 144 KiB
+每个 block（默认 16 token）= 147,456 × 16 = 2.25 MiB
+91,648 tokens = 5,728 blocks ≈ 12.6 GiB
+```
+
+vLLM 日志里的两个数：
+
+- `GPU KV cache size: 91,648 tokens`：按 `gpu-memory-utilization` 扣掉权重和激活后，剩下的显存能放多少 KV token；
+- `Maximum concurrency for 8,192 tokens per request: 11.19x`：`91,648 / 8,192 = 11.19`，假设每条请求都吃满 8k 上下文。
+
+按我们实际的 1024 输入 + 256 输出：
+
+```
+每条请求 = 1,280 tokens = 80 blocks
+91,648 / 1,280 = 71.6  → KV 上限约 71 条
+但 --max-num-seqs 64 先生效 → 实际最多 64 条
+64 × 1,280 = 81,920 < 91,648 → 所以 c=64 抢占为 0
+```
+
+**这三个“最大并发”要分清**：KV 上限（71）、服务端 batch 上限（64）、SLO 安全并发（见下）。
+
+Goodput 是“满足 SLO 的请求速率”，不是百分比；达标比例 = `request_goodput / request_throughput`：
+
+| c | request_throughput | goodput | 达标比例 | TTFT P50 | TPOT P95 |
+|---|---|---|---|---|---|
+| 1 | 0.0766 | 0.0766 | 100% | 1,038 ms | 47.4 ms |
+| 4 | 0.2318 | 0.0579 | 25% | 2,914 ms | 63.2 ms |
+| 16 | 0.4371 | 0.00087 | 0.2% | 3,222 ms | 137.0 ms |
+| 64 | 0.5190 | 0 | 0% | 7,033 ms | 469.7 ms |
+
+SLO 是 TTFT ≤ 2,000 ms 且 TPOT ≤ 100 ms。c=1 全部达标；c=4 只有 25%（TTFT 先崩）；c=16 起 TPOT 也超了。所以这台 40W L4 的“SLO 安全容量”约 **0.077 req/s**，对应 c≈1–4，而不是 KV 上限 71。换 SLO（比如只看 P95、把 TPOT 放宽到 150ms）容量会变，必须写清口径。
+
 ## 参考
 
 - vLLM Benchmark CLI：<https://docs.vllm.ai/en/latest/benchmarking/cli/>
