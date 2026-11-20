@@ -460,6 +460,7 @@ vllm bench serve \
   --endpoint /v1/completions \
   --host 127.0.0.1 --port 8000 \
   --model qwen3-8b \
+  --tokenizer Qwen/Qwen3-8B-AWQ \
   --dataset-name random \
   --random-input-len 1024 \
   --random-output-len 256 \
@@ -514,6 +515,7 @@ for C in 1 4 16 64; do
     --endpoint /v1/completions \
     --host 127.0.0.1 --port 8000 \
     --model qwen3-8b \
+    --tokenizer Qwen/Qwen3-8B-AWQ \
     --dataset-name random \
     --random-input-len 1024 \
     --random-output-len 256 \
@@ -543,6 +545,7 @@ done
 
 关键 flag 说明：
 
+- `--tokenizer Qwen/Qwen3-8B-AWQ`：`--model qwen3-8b` 只是请求里的 served name，bench 加载 tokenizer 时需要真实 repo；不写会报 `OSError: qwen3-8b is not a local folder and is not a valid model identifier`。
 - `--ignore-eos`：强制生成到 `--random-output-len`，否则模型提前 EOS，output tok/s 和 TPOT 不可比。
 - `--metric-percentiles 50,95,99`：默认只报 P99；README 表要 P50/P95，必须显式加。
 - `--percentile-metrics ttft,tpot,itl,e2el`：把 TPOT/ITL/E2EL 的百分位也输出。
@@ -591,6 +594,7 @@ vllm bench serve \
   --endpoint /v1/completions \
   --host 127.0.0.1 --port 8000 \
   --model qwen3-8b \
+  --tokenizer Qwen/Qwen3-8B-AWQ \
   --dataset-name random \
   --random-input-len 1024 \
   --random-output-len 256 \
@@ -671,6 +675,7 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | `CUDA driver version is insufficient for CUDA runtime version` | host 的 Max CUDA 低于镜像的 `CUDA_VERSION` | destroy 换 host，或换更低 CUDA 的镜像 tag；**不要在容器里装 driver** |
 | `Connection refused` | 服务还在加载模型（8B AWQ 约 30–90 秒） | 看 Terminal A 日志等到 `Uvicorn running` |
 | `404 model not found` | `--served-model-name` 和请求里的 `model` 不一致 | 统一用 `qwen3-8b` |
+| `OSError: qwen3-8b is not a local folder...` | bench 拿 `--model` 去加载 tokenizer，但它是 served name | bench 加 `--tokenizer Qwen/Qwen3-8B-AWQ` |
 | smoke test 返回一堆 thinking | Qwen3 默认 `enable_thinking=True` | prompt 加 `/no_think`，或 `chat_template_kwargs: {"enable_thinking": false}` |
 | `unrecognized arguments: --enable-per-request-metrics` | vLLM 版本较旧 | 跳过第 6 节；或换更新的 vLLM 镜像（不要盲目升级 CUDA 栈） |
 | `unrecognized arguments: --ignore-eos` / `--metric-percentiles` | bench CLI 版本较旧 | `vllm bench serve --help` 对一遍；换镜像 |
