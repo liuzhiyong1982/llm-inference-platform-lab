@@ -152,6 +152,22 @@ vastai scp-url <instance_id>   # scp 用的 host:port
 vastai logs <instance_id>      # 起不来时先看这个
 ```
 
+`ssh-url` 输出的是 `ssh://root@ssh8.vast.ai:34388` 这种 URI，**不能直接粘进 bash**（会被当成命令名，报 `No such file or directory`）。要拆成：
+
+```bash
+ssh -i ~/.ssh/<你的私钥> -p 34388 root@ssh8.vast.ai
+```
+
+两个前提：
+
+1. 实例状态是 `running`。`stopped` 时连不上，先 `vastai start instance <instance_id>`，再等镜像拉完。
+2. Vast 账号/实例里注册的公钥，和 `-i` 指向的私钥配对。本机没有默认 `id_rsa`/`id_ed25519` 时必须显式 `-i`；公钥没注册就：
+
+```bash
+vastai create ssh-key "$(cat ~/.ssh/<你的公钥>.pub)"
+vastai attach ssh <instance_id> "$(cat ~/.ssh/<你的公钥>.pub)"
+```
+
 ### 1.5 进容器后的 preflight
 
 进容器后先跑：
@@ -471,6 +487,9 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | `vastai: command not found` | 没装，或 conda 的 bin 不在 PATH | `pip install vastai`；确认 `which vastai`；临时可用 `python -m vastai` |
 | 装 vastai 报 `~rllib3` / `conda-libmamba-solver` 冲突 | pip 残留 + 既有 conda 版本冲突，与 vastai 无关 | 忽略；`vastai --version` 有输出即成功 |
 | `401` / `Invalid API key` | key 没设或已失效 | 重新生成后 `vastai set api-key <key>` |
+| `ssh://root@host:port: No such file or directory` | 把 `ssh-url` 输出的 URI 直接粘进了 shell | 用 `ssh -i <私钥> -p <port> root@<host>` |
+| `Permission denied (publickey)` | 账号/实例里的公钥和本机私钥不配对；或本机没有默认 key 却没写 `-i` | `vastai attach ssh <id> "$(cat ~/.ssh/xxx.pub)"`；连接时显式 `-i`；`ssh -v` 看 offered key |
+| `Connection refused` / 超时 | 实例 `stopped` 或还在 `loading` | `vastai start instance <id>`；`vastai show instance <id>` 等到 `running` |
 | `search offers` 返回空 | 门槛太严，或 `duration` 单位写错（是天，不是小时） | 逐条放宽 `inet_down`/`reliability`；`duration>0.25` 表示 6 小时 |
 | `torch.OutOfMemoryError` / 启动就 OOM | `gpu-memory-utilization` 太高，或 `max-model-len` 太大 | 降到 0.85 → 0.80；`--max-model-len 4096` |
 | `CUDA error: no kernel image is available` | 镜像/vLLM 的 CUDA 与 driver 不匹配 | 换匹配的镜像 tag；先 `nvidia-smi` 看 driver 支持的 CUDA |
