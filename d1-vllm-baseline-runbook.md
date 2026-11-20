@@ -203,6 +203,16 @@ export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
 mkdir -p /workspace/hf /workspace/results
 ```
 
+`export` 只对当前 shell 生效，而后面要开 Terminal A/B/C。写进 `~/.bashrc` 一次，避免每个窗口忘设 `HF_HOME` 导致重复下载 5GB：
+
+```bash
+cat >> ~/.bashrc <<'EOF'
+export HF_HOME=/workspace/hf
+export HF_HUB_ENABLE_HF_TRANSFER=1
+EOF
+source ~/.bashrc
+```
+
 > 版本不匹配是这一步最常见的坑：driver 太旧会在加载模型时报 CUDA error。`nvidia-smi` 右上角的 CUDA Version 就是 offer 卡上的 **Max CUDA**；`v0.34.0` 镜像要求 ≥ **13.0**（镜像里是 13.0.2）。租之前就核对，别等进容器才发现。
 
 ---
