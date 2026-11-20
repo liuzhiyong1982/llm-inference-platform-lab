@@ -997,7 +997,15 @@ vLLM 日志里的两个数：
 
 **这三个“最大并发”要分清**：KV 上限（71）、服务端 batch 上限（64）、SLO 安全并发（见下）。
 
-Goodput 是“满足 SLO 的请求速率”，不是百分比；达标比例 = `request_goodput / request_throughput`：
+Goodput 是“满足 SLO 的请求速率”，不是百分比。vLLM 的算法（`vllm/benchmarks/serve.py`）：
+
+```
+good_completed = 满足【所有】SLO 的成功请求数
+request_goodput = good_completed / benchmark_duration   # req/s，和 request_throughput 同一分母
+达标比例 = request_goodput / request_throughput
+```
+
+单请求的 SLO 判定是逐条 AND：`ttft <= SLO_ttft` 且 `tpot <= SLO_tpot`（若配了 e2el 也要满足）。TPOT 按 `(e2el - ttft) / (output_tokens - 1)` 算；output=1 时按 0 处理。所以 goodput 是“逐请求严格达标”，不是“P95 达标 × 吞吐”。
 
 | c | request_throughput | goodput | 达标比例 | TTFT P50 | TPOT P95 |
 |---|---|---|---|---|---|
