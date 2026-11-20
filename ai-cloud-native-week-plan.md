@@ -363,6 +363,14 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 
 - D1：4 个并发点 baseline + README 表 + 一句话归因（按 `d1-vllm-baseline-runbook.md`）。
 - D2：`max-num-seqs`、chunked prefill on/off、prefix caching 有/无、AWQ vs FP16 + 质量门。
+- **D2 对比规矩（避免把噪声当优化）：**
+  - 一次只动一个变量；模型、输入/输出长度、并发点、宿主（含 power limit）、采样方式全部固定。
+  - 每个配置至少重复 2 次，报中位数/范围，不报单次最好值。
+  - 只和**同一台机器**的 D1 baseline 比；换 host（尤其 40W vs 72W）必须重跑 baseline。
+  - 不必每个配置都跑 4 个并发点：先用 c=16 找拐点、c=64 看吞吐上限，最优配置再补 c=1/4/16/64。
+  - 每个配置记录：`max-num-seqs`、chunked prefill、prefix caching、量化格式、TTFT P50/P95/P99、TPOT P95、output tok/s、goodput、preemptions。
+  - 结论写成「哪个旋钮、动了多少、哪个指标变了多少、为什么」，不是「调到最快」。
+  - D3–D5 也各有 baseline：冷启动 naive vs cache、round-robin vs EPP、无策略 vs Kueue/Kyverno。
 - 固定方法学：SLO、样本数、warmup、重复次数、开环/闭环、成本公式、货币。
 - 写 1 篇公开 writeup；列 10 家目标公司 + 5 个真实 JD。
 - **验收：** 4 个 baseline JSON + 1 张调参表 + 1 篇 writeup + 5 次信息面/招聘方沟通。
