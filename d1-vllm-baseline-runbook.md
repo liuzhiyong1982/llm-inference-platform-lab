@@ -813,6 +813,8 @@ vllm bench serve \
 
 4. 在 JSON 里找 `server_queue_times` / `server_ttfts`；P99 用 per-request 数组自己算，或看 bench 输出。
 
+> **单位是秒，不是毫秒**（vLLM 文档明确写了 seconds）。算完 P99 要 ×1000 再和客户端 TTFT（ms）对比；否则会把 0.012 当成 0.012ms。数组里可能有 `null`（该请求没拿到服务端指标），算分位数前先过滤。
+
 **口径必须说清：**
 
 - `server_queue_times` = 服务端调度排队时间。
