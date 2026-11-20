@@ -1,7 +1,9 @@
-# 从 DevOps 到 AI Infra：高薪路径 + 休假周执行表
+# 从 DevOps 到 AI Infra：A 线（Inference Platform）路线 + 季度执行表
 
 > 2026-11-20 · 为 Andrew 定制 · 目标函数：**薪资**，不是"学会"
 > 本文是唯一版本（替代更早的一周计划与 12 周版），后续调整都改这里。
+>
+> **2026-11-20 校准（Calgary / PR / A 线）**：执行策略 = **A 线专精，B 线就业**（不是 A-only，也不是 B-only）；不再按 12/14 周倒排，改用季度 gate；Calgary 本地以 B/C 线为主，A 线走 remote Canada / relocation；citizenship 是 US 通道的加速器，不是前提。详见 §0.6。
 
 ---
 
@@ -15,6 +17,8 @@
 | **Inference** | $160–230K | $225–315K | $360–530K | 同上[11] |
 | ML Infrastructure / ML Platform | $150–220K | $210–295K | $340–490K | 同上[11] |
 | MLOps | $135–195K | $185–260K | $300–425K | 同上[11] |
+
+> 下面是**美国 top lab 的 base band**，作为 ceiling 锚，不是加拿大起步价。加拿大本地 base 通常明显更低，remote-US 岗位也常按 local band/EOR 计价；校准见 §0.6。
 
 同一个 "Platform Engineer" 头衔，公司之间的差距比方向之间的差距大得多：Anthropic 的 platform engineer band 是 **$316.9–429.2K**，OpenAI 是 **$258.9–419.2K**，而全站中位是 $198.6K[12]。前沿实验室的 Inference Infrastructure：Anthropic Staff/Senior **$320–485K**、OpenAI Inference-Performance **$266–500K**（base，不含 equity）[10]。
 
@@ -51,6 +55,50 @@
 
 **但这个风险对你的方向反而是利好的一半：** 一旦进入紧缩周期，先被砍的是探索性项目和应用层团队；**成本优化、容量规划、多租户隔离、推理效率这类"省钱型"平台岗最后才被砍**，因为它们直接对着账单。你要练的恰好是这一半。
 
+## 0.6 执行校准（2026-11-20：Calgary / PR / A 线）
+
+**执行策略：A 线专精，B 线就业。不是 A-only，也不是 B-only。** 这里说的 A 线是 vLLM/SGLang、KV cache、batching、量化、llm-d 路由、K8s 服务化、性能方法论；不是 CUDA/Triton/算子优化的 ML Performance/Kernel 线。前者和 DevOps 背景重叠 30–40%，后者重叠更低。
+
+**为什么不是 A-only，也不是 B-only：**
+
+| 维度 | A 线：Inference Platform | B 线：AI/ML Platform |
+|---|---|---|
+| 岗位量 | 少，senior-heavy，集中在 AI 公司/neocloud | 更多、更分散：银行/电信/零售/企业 AI 都有 |
+| 地理 | Toronto/remote/US 为主；Calgary 本地几乎没有 | Calgary 本地有 B 线；remote Canada 更多 |
+| 薪资上限 | 更高（稀缺性 + 性能直接对账单） | 中高，但低于 A 线上限 |
+| 入门门槛 | 高：2–3 个深度项目 + 性能方法论 | 中：DevOps/K8s 可直接平移 |
+| 技能半衰期 | 框架相关部分短；性能/分布式/排障长 | 平台部分长；但容易同质化成“通用 DevOps + AI 标签” |
+| 主要风险 | A-only 路窄；AI capex 波动时岗位更集中 | B-only 溢价低；容易被当通用平台工程师 |
+| 代表 title | Inference Engineer / Model Serving / Inference Platform | AI Platform / ML Platform / MLOps / GPU Cloud |
+
+**结论：A 线更有上限，B 线更有活路；最有前途的是交集——B 线就业 + A 线专精。** B 线不是“失败后的备胎”，而是就业基本盘；A 线是溢价和差异化。每季度保留两个 artifact：一个 B 线（K8s/GPU/成本/多租户），一个 A 线（benchmark/KV cache/routing）。这样任何一边市场变冷，另一边简历仍然可用。
+
+A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/技术写作 + 能讲清 vLLM scheduler/KV cache/prefix caching/llm-d EPP 的取舍。B-only 则要避免只做 MLflow/Kubeflow 接线，必须至少有一个推理性能或 GPU 平台深度项目。
+
+**Calgary 现实（2026-11 招聘快照，投递前核官网）：**
+
+- 本地主要是 B/C 线：Neo Financial（Lead MLOps）、Katalyst（GPU 基础设施）、XYZ Reality（AI Platform）、Benevity（Senior Staff AI/ML）、Yotta Labs（GPU Cloud Platform Engineer）、Eleks（MLOps/LLMOps Architect，Alberta 优先）、Robots and Pencils（Staff AI Platform Engineer，Remote Canada）。
+- 最接近 A 线的是 Yotta Labs：GPU 集群/多集群 K8s，不是模型性能。
+- 不是 A 线：Groq（Data Center Technician，硬件运维）、GeoSoftware（HPC）、Meta/Bell（数据中心建设/运营）。
+- 远程 A 线（senior/staff 门槛）：Cohere（Senior/Staff Back-End, Inference，Canada remote，$205–315K/yr，聚合站需核官网）[49]、Shopify（Senior Staff ML Inference，Remote Americas）[50]、Cerebras（Staff Inference Platform，Toronto onsite）[51]。
+- 结论：A 线从 Calgary 走，主路径是 remote Canada 或 relocation；本地跳槽大概率是 B 线。
+
+**PR / citizenship：** PR 在加拿大自由工作，但没有美国工作授权。现在能走加拿大实体/remote-Canada、少数美国公司的 EOR contractor、或加拿大公司的美国团队内部转岗（L-1 通常需海外任职满一年）。拿到 citizenship 后 TN 是最快通道；TN 的 "Engineer" 类别对学位/P.Eng 有要求，platform/DevOps title 可能更适合 "Computer Systems Analyst"。找移民律师确认，不要把"拿到护照"当成自动美国工作许可。等待期间不要停，先用加拿大 remote 岗位积累 A 线经验。
+
+**时间分配（A 线版）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。DRA、Volcano、Kubeflow、PD 分离深挖降为 30 分钟概念，不进入验收。
+
+**季度 gate（不再按 12/14 周倒排）：**
+
+| 阶段 | 时间 | 目标 | 产出 |
+|---|---|---|---|
+| Q1 | 0–3 月 | 基线 + 方法学 | D1/D2 报告 + 1 篇公开 writeup + 目标公司清单 |
+| Q2 | 3–6 月 | 引擎深度 + 路由 | KV 压力/量化质量 + llm-d 路由 P99 + 第 2 篇 |
+| Q3 | 6–9 月 | 生产化 + 故障 | K8s/冷启动/Kueue/Kyverno + 故障日志 + 第 3 篇 |
+| Q4 | 9–12 月 | 市场验证 | 10–20 个申请 + mock interview + 小开源贡献 |
+| 第 2 年 | 12–24 月 | 身份/市场扩展 | citizenship + A 线岗位或内部转岗 + US relocation |
+
+每周 6–8h 是节奏，不是承诺；每季度一个 gate：有 artifact、有申请、有面试反馈，才进入下一阶段。
+
 ## 1. 证书：该考的其实只有 1–2 个
 
 先说清作用边界：**证书过 ATS/HR 的筛选，不过技术面。** 它的价值是"关键词匹配 + 低成本完成感"，不是能力证明。所以策略是**用最少小时拿到关键词**，绝不能用休假周的产出时间换。
@@ -63,7 +111,7 @@
 | **CKNE**（Certified Kubernetes Network Engineer） | 2026-11 刚发布，可考 | AI 集群的 RDMA/RoCE/InfiniBand 是热点，但方向偏网络 | 🔶 备选，等他明确投"AI 集群网络"岗再考 |
 | **KAIA（Kubernetes AI Associate）/ CKIE（Certified Kubernetes Inference Engineer）** | **2027 年推出，尚未公布考纲、价格、日期**[17] | **这是你的时间窗口**：CNCF 把"Kubernetes 推理工程"正式确认为一个独立职业方向。等考纲发布时，你已经有一年的一手实验——你就是第一批 | 🎯 **按它的方向准备，不按它的日期焦虑** |
 
-**最关键的一条：CKIE 的存在本身就是一个市场信号。** CNCF 在 2026-11-10 宣布要把"Certified Kubernetes Inference Engineer"做成独立认证[17]——说明这类岗位的职责边界已经稳定到可以出考纲了。你 12 周路线图里练的东西（GPU 调度、权重分发、扩缩、路由、配额），正是那个考纲会覆盖的东西。**2027 年考纲出来时，你不是去"学"，是去"对答案"。**
+**最关键的一条：CKIE 的存在本身就是一个市场信号。** CNCF 在 2026-11-10 宣布要把"Certified Kubernetes Inference Engineer"做成独立认证[17]——说明这类岗位的职责边界已经稳定到可以出考纲了。你路线图里练的东西（GPU 调度、权重分发、扩缩、路由、配额），正是那个考纲会覆盖的东西。**2027 年考纲出来时，你不是去"学"，是去"对答案"。**
 
 ---
 
@@ -93,6 +141,8 @@
 2. **AI SRE / Production Engineering for ML（C 线）**：重叠 50%，需求新、供给少，但岗位数量还不稳定
 3. **Inference Platform（A 线）**：重叠 30–40%，需要 2–3 个真项目才够格；薪资上限最高
 
+**主目标按 2026-11-20 校准：A 线专精，B 线就业，不做 A-only，也不做 B-only。** 理由见 §0.6：A 线岗位少、senior-heavy；B 线 AI 公司的平台岗是就业基本盘，内部转 A 线比外部直接进更容易。
+
 **判断一个 JD 属于哪条线，只看它有没有这三组词：** 引擎（vLLM/SGLang/Triton）、性能（TTFT/P99/tokens-s/量化）、并行（TP/PP/EP）。有 = A 线；只有 K8s/GPU/成本/多租户 = B 线。
 
 ### Run:ai / KAI Scheduler：3 小时，学概念不学平台
@@ -116,7 +166,7 @@
 
 **不要做：** 不要学它的 UI 与商业版特性（开源版没有，学了也没用）；不要把它当默认答案（AI 公司内部栈里 Kueue 仍是中性默认，Run:ai 是 NVIDIA 生态加分项）。
 
-**放在 14 周计划的 W4–W5**，和 Kueue 同一周学——一次学两个，面试时"Kueue 和 KAI 怎么选"是极好的加分题。
+**放在 Q3 的 4 小时里**，和 Kueue 同一周学——一次学两个，面试时"Kueue 和 KAI 怎么选"是极好的加分题。
 
 #### 附：GPU 共享五种方案（面试原题，一张表答完）
 
@@ -147,9 +197,9 @@
 | neocloud（CoreWeave / Lambda / Crusoe）、AI 数据中心运维、阿尔伯塔在建的数据中心项目 | **高**——岗位日常就是 Slurm + BCM + Run:ai + MIG，这张证几乎是岗位说明书的复刻 |
 | AI 公司的 inference platform（vLLM / KServe / llm-d / Kueue） | **低到中**——Fleet Command、BCM、DGX 那部分用不上；只有 K8s 管理、Slurm、MIG 三段可迁移 |
 
-**两个现实障碍：** ① 三个 lab 必须在 BCM 环境里做，没有 NVIDIA 硬件就只能靠官方课程提供的 lab 环境练，风险高；② $500 + 约 20–30 小时，等于你 12 周预算的三分之一。
+**两个现实障碍：** ① 三个 lab 必须在 BCM 环境里做，没有 NVIDIA 硬件就只能靠官方课程提供的 lab 环境练，风险高；② $500 + 约 20–30 小时，等于你一个季度学习预算的三分之一。
 
-**决策建议：** 先回答"我到底投 neocloud/数据中心，还是 AI 公司的平台岗"，再决定要不要花这 $500。如果投前者，这张证优先级高于 CKIE；如果投后者，把这笔钱换成 30 小时 GPU 租用 + 六个数字，回报高得多。
+**决策建议：** 先回答"我到底投 neocloud/数据中心，还是 AI 公司的平台岗"，再决定要不要花这 $500。如果投前者，这张证优先级高于 CKIE；如果投后者，把这笔钱换成 30 小时 GPU 租用 + 核心性能数字，回报高得多。
 
 ### NCA-AIIO 到底值不值：按官方考纲权重算
 
@@ -181,28 +231,32 @@
 
 **所以顺序改一下：CKIE 是目标证，NCA-AIIO 只是可选的补盲小任务。**
 
-但 CKIE 的现实约束要说清：2027 年推出，**考纲、价格、日期全都未公布**[17]。也就是说现在只能"按领域准备"，不能"按考纲准备"。好消息是这两件事在你的 12 周计划里是同一件事。
+但 CKIE 的现实约束要说清：2027 年推出，**考纲、价格、日期全都未公布**[17]。也就是说现在只能"按领域准备"，不能"按考纲准备"。好消息是这两件事在你的路线图里是同一件事。
 
 **今天就能做的三件事**
 
 1. **订阅发布通知**（30 秒）：[KAIA & CKIE Notify Me](https://training.linuxfoundation.org/kaia-ckie-notify-me/)[41]
 2. **申请当 SME（出题专家）**：同一页面在招募 subject matter experts 参与"define, write, and review"两份考卷[41]。这是最有杠杆的一步——报名成本为零，一旦入选，你会在考纲公开前就看到它考什么，简历上还会多一行"参与 CNCF 认证出题"。即使因为推理经验还不满被拒，也不损失什么。
-3. **把 12 周计划标注成"CKIE 预科"**：考纲出来后你只需要"对答案"，不需要"从头学"。
+3. **把路线图标注成"CKIE 预科"**：考纲出来后你只需要"对答案"，不需要"从头学"。
 
 **最终认证组合：** 现在可选 NCA-AIIO（$125，补硬件盲区）→ 2027 考 CKIE（目标证）→ 跳过 KAIA（Associate 级，对你太浅）与 CKNE（网络方向）→ CKA 仅在你连一个 K8s 认证都没有时补。
 
-## 1.6 阿尔伯塔本地入口（真实 JD，不是推断）
+## 1.6 Calgary 本地入口（真实 JD，不是推断）
 
-你的观察是对的：**没有一份 JD 写着"要求 NCP-AIO"**。证书在加拿大几乎不出现在招聘要求里。但阿尔伯塔有一批岗位在真实使用 GPU 集群 / Slurm，而且其中两份几乎是照你的背景写的：
+你的观察是对的：**没有一份 JD 写着"要求 NCP-AIO"**。证书在加拿大几乎不出现在招聘要求里。但 Calgary/阿尔伯塔有一批岗位在真实使用 GPU 集群 / Slurm，而且其中两份几乎是照你的背景写的。**先分清线：这些主要是 B/C 线，不是 A 线 inference platform。**
 
-| 公司 | 岗位 | 关键要求 | 你的差距 |
-|---|---|---|---|
-| **Eleks** | Infrastructure/GPU Cluster/Platform Operations Lead（Remote Canada，**明确偏好 Calgary/Edmonton**）[44] | 8+ 年基础设施/平台运维、**GPU 集群管理**、强 K8s、NVIDIA GPU/CUDA 生态、Azure/AWS/GCP、存储网络 HPC、Terraform、运维领导力 | **只差"GPU 集群"这一条**——正是 12 周计划要做的；零证书要求 |
-| **GeoSoftware** | Senior HPC and Platform Engineer（Calgary，hybrid，2026-11-02 发布）[45] | 同一套科学计算负载跑在 workstation / **Slurm 或 PBS** / Databricks / 云 batch 之上；checkpoint-restart；构建与交付流水线 | **Slurm/PBS**——你 BCM 已装，缺的只是 Slurm |
-| **Groq** | Data Center Technician（Calgary，onsite，2026-10-09）[46] | 数据中心现场硬件运维，2+ 年 | 层级低于你，说明本地已有 AI 芯片公司在招人 |
-| **Meta / Bell AI Fabric** | Sturgeon County 1GW 数据中心（2026-07 开工，投资超 CAD$13B）[47]；Bell 七个高密度数据中心 | 建设期为主，运营岗 2027–2028 释放 | 时间差正好：那时你已有 1–2 年 GPU 平台经验 |
+| 公司 | 岗位 | 线 | 关键要求 | 你的差距 |
+|---|---|---|---|---|
+| **Eleks** | Infrastructure/GPU Cluster/Platform Operations Lead（Remote Canada，**明确偏好 Calgary/Edmonton**）[44] | B | 8+ 年基础设施/平台运维、**GPU 集群管理**、强 K8s、NVIDIA GPU/CUDA 生态、Azure/AWS/GCP、存储网络 HPC、Terraform、运维领导力 | **只差"GPU 集群"这一条**；零证书要求 |
+| **GeoSoftware** | Senior HPC and Platform Engineer（Calgary，hybrid，2026-11-02 发布）[45] | B/C | 同一套科学计算负载跑在 workstation / **Slurm 或 PBS** / Databricks / 云 batch 之上；checkpoint-restart；构建与交付流水线 | **Slurm/PBS**——你 BCM 已装，缺的只是 Slurm |
+| **Groq** | Data Center Technician（Calgary，onsite，2026-10-09）[46] | C | 数据中心现场硬件运维，2+ 年 | 层级低于你；**不要把它当 A 线入口** |
+| **Meta / Bell AI Fabric** | Sturgeon County 1GW 数据中心（2026-07 开工，投资超 CAD$13B）[47]；Bell 七个高密度数据中心 | C | 建设期为主，运营岗 2027–2028 释放 | 设施/硬件运维，不是模型服务 |
 
-**结论：本地不缺"要证书的公司"，缺的是"要 GPU 集群 + Slurm 经验的人"。** 证书不给你面试，Slurm 和 GPU 集群给你面试。
+**本地 B 线（2026-11 快照，投递前核官网）：** Neo Financial（Lead MLOps）、Katalyst（GPU 基础设施）、XYZ Reality（AI Platform）、Benevity（Senior Staff AI/ML）、Yotta Labs（GPU Cloud Platform Engineer）、Robots and Pencils（Staff AI Platform Engineer，Remote Canada）。Yotta 最接近 A 线，但仍偏 GPU 集群/多集群 K8s。
+
+**A 线远程/多伦多（senior/staff 门槛）：** Cohere（Senior/Staff Back-End, Inference，Canada remote，$205–315K/yr，聚合站需核官网）[49]、Shopify（Senior Staff ML Inference，Remote Americas）[50]、Cerebras（Staff Inference Platform，Toronto onsite）[51]。
+
+**结论：** Calgary 本地不缺"要 GPU 集群 + Slurm 经验的人"，但缺 A 线 inference platform 岗；A 线主路径是 remote Canada 或 relocation。证书不给你面试，GPU 集群/推理性能证据给你面试。
 
 ### 用一个周末把 Slurm 补上（BCM 已装 = 你已经有一半）
 
@@ -239,7 +293,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 个人 IP 的中文课（小乙那类 K8s/运维开发课）价值在"机制讲得密 + 有人答疑"，风险在"没有公开大纲、渠道靠私聊、更新不可控"。买前只问三件事：
 
 1. **有公开目录吗？** 是否明确写了 device plugin / MIG / time-slicing / GPU 共享（HAMi）/ DCGM 监控 / 动手实验。写不出目录 = 不要买。
-2. **能按模块买吗？总时长 ≤15 小时吗？** 几十小时的体系课会直接吃掉你 12 周预算。
+2. **能按模块买吗？总时长 ≤15 小时吗？** 几十小时的体系课会直接吃掉你一个季度的预算。
 3. **价格 ≤ 你两小时工资吗？** 超过就是在为"被讲一遍"付费，而你要的是能被追问的理解。
 
 **如果只买一门，买 K8s 机制 / Operator 开发，不要买"GPU 平台"那门。** 前者是跨公司、跨栈的长期资产；后者半年就过期——国内的 vGPU/HAMi 方案和北美的 vLLM + llm-d + Kueue 栈不是一回事。
@@ -259,53 +313,82 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 | | 冲刺版（7 天出成果） | **点火版（推荐，有工作时用）** |
 |---|---|---|
 | 休假周投入 | 6 天 × 3–4h | **2 天 × 4h，其余真休息** |
-| 休假周产出 | 六个数字 + 一张对比图 | **repo + 第一个数字（baseline）** |
-| 后续节奏 | — | 每周 6h（两晚 + 周六上午），14 周 |
-| 适合 | 在职但想三个月内换 | 在职、想 6 个月内换到更好的 |
+| 休假周产出 | 核心 4 个数字 + 一张对比图 | **repo + 第一个数字（baseline）** |
+| 后续节奏 | — | 每周 6–8h，按季度 gate 推进 |
+| 适合 | 在职但想三个月内换 | 在职、想 12–24 个月换到更好的 |
 
-**为什么推荐点火版：** 你有工作，休假烧成第二个工作周，第二周就会崩。而"拿到第一个数字 + 把 repo 建起来"这个动作，已经把最难的部分（启动惯性）解决了；剩下的靠每周 6 小时滚 14 周。
+**为什么推荐点火版：** 你有工作，休假烧成第二个工作周，第二周就会崩。而"拿到第一个数字 + 把 repo 建起来"这个动作，已经把最难的部分（启动惯性）解决了；剩下的靠每周 6–8 小时按季度滚。
 
 **防拖三条机制（比计划本身重要）：**
 1. **固定时段**：周二、周四 21:00–22:30，周六 09:00–12:00。写进日历，不靠意志力。
 2. **每两周一个可见产出**：repo 里必须多一个能跑的东西或一组数字。没有产出的一周，下周一补，不许顺延。
 3. **每四周一个 gate**：还在学吗？有产出吗？要不要换方向？——允许停，但要在 gate 上停，不许无声消失。
 
-## 3. 休假周执行表（冲刺版；点火版只做 D1–D2）
+## 3. 可选 intensive（7 天冲刺；不是主路径）
+
+> 这一节是可选冲刺，不是主路径。你有工作、按季度走；**D1 以 `d1-vllm-baseline-runbook.md` 为准**。点火版只做 D1–D2，下面的全周验收不适用。
 
 > **开工前（这个周末，6–8 小时）：先把 Slurm 做掉。**
 > 它不需要 GPU、不用等租卡、BCM 你已经装好，而且它是 GeoSoftware 那类本地岗位的入场词、也是 NCP-AIO 三个 lab 里的两个。放在休假日之前做完，休假整周就能专心做 inference——两件事不在同一周抢时间。
 
-**一周的唯一目标：一个 repo、六个数字、一张 llm-d 对比图、一次 10 分钟讲解。** 不是"学完什么"。
+**冲刺周的唯一目标：一个 repo、核心 4 个数字 + 2 个对比、一张 llm-d 对比图、一次 10 分钟讲解。** 不是"学完什么"。
 
 预算：GPU 租用 ≈ $10–15（按秒计费，单卡 L4/A10；Day 4 临时开 2 卡约 1 小时）。Azure 侧配额为 0，不要等审批。
 
 | 天 | 时长 | 干什么 | 当天必须落地 |
 |---|---|---|---|
-| **D1** | 4h | 租 L4；`vllm serve` 8B 量化模型；跑并发 1/4/16/64 的压测；同时把 DL.AI 那门 vLLM 短课当手册过一遍[14] | baseline 表：TTFT P50/P95/P99、output tok/s、GPU util |
-| **D2** | 3h | 三个旋钮逐个开：prefix caching、chunked prefill、`max-num-seqs`；AWQ vs FP16 对照；读 KV cache / batching 那两节[15] | 一张对照表 + 一句话结论（吞吐 +x%，TTFT −y%） |
+| **D1** | 4h | 按 `d1-vllm-baseline-runbook.md` 跑 baseline；短课当手册，时间不够就跳过[14] | 4 个 baseline JSON + README 表 + 一句话归因 |
+| **D2** | 3h | `max-num-seqs`、chunked prefill on/off、prefix caching 有/无（用 `--no-enable-prefix-caching` + `--random-prefix-len` 构造共享前缀）；AWQ vs FP16 + 质量门；读 KV cache / batching 那两节[15] | 一张对照表 + 一句话结论（吞吐 +x%，TTFT −y%，质量 Δ） |
 | **D3** | 3h | k3s + vLLM Deployment；**权重分发实测**：initContainer 现下 vs node-local 缓存，测冷启动秒数；KEDA 按 `vllm:num_requests_waiting` 扩缩 | 冷启动对比（秒）+ 扩容曲线 |
 | **D4** | 4h | **llm-d 日**：租 2×L4，按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字 |
 | **D5** | 3h | Kueue `ClusterQueue` 两团队配额[9] + Kyverno 强制 GPU workload 带 priorityClass / quota label；跑"抢卡"演示 | 两条被拒 manifest 日志（这是你独有的交叉点） |
 | **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试 |
 | **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单 |
 
-**验收（不达标就是失败，不许自我安慰）**
-- [ ] `make bench` 一键复现
+**冲刺版验收（可选；只做 D1 不要用这张表）**
+- [ ] `make bench` 一键复现（尚未实现；做 D3 时补）
 - [ ] 3 张图：throughput vs concurrency / TTFT P99 / llm-d 路由前后 P99
 - [ ] 2 条策略拒绝日志（Kyverno + Kueue）
 - [ ] 冷启动：带缓存 ____ s vs 不带 ____ s
-- [ ] 6 个数字全部填上
+- [ ] 核心 4 个数字 + 2 个对比全部填上
 - [ ] 10 分钟讲得完，且能被追问 3 层
 
 ---
 
-## 4. 12 周路线（休假周之后的节奏：每周 8h = 周二/周四晚各 2h + 周六 4h）
+## 4. 季度 gate 路线（每周 6–8h；不再按 12/14 周倒排）
 
-| 阶段 | 周 | 主题 | 验收 |
-|---|---|---|---|
-| Phase 1 | W2–W5 | GPU 资源语义：time-slicing vs MIG[8] → DRA（v1.35 起 Stable，你集群 1.36 可用）[6] → Kueue 配额与抢占[9] → Kyverno 准入即代码 | 4 份策略 + 一张隔离性对比表 |
-| Phase 2 | W6–W9 | serving 平台化：W6 KServe `LLMInferenceService` 与它生成的资源关系[4]；**W7 llm-d 的四个概念**（EPP / InferencePool 契约 / prefix-cache 路由 / PD 分离什么时候不划算）[13]；W8 权重分发四种方案 + 冷启动矩阵；W9 DCGM + vLLM metrics + SLO + $/1M tokens 归属 | 一条 well-lit path 跑通 + 一张 SLO 面板 |
-| Phase 3 | W10–W12 | 面试化：六个数字定稿、10 分钟讲解录音、10 道必答题自测、把 `uat-mobility-aks-01` 写成 case study、3 个 JD 逐条映射、开始投 | 答上 ≥8 题 + 简历 v2 + 5 个已投 |
+> 时间表见 §0.6；这里只定义每个 gate 的内容和验收。**不要为了赶周次牺牲深度。**
+
+### Q1（0–3 月）：基线 + 方法学
+
+- D1：4 个并发点 baseline + README 表 + 一句话归因（按 `d1-vllm-baseline-runbook.md`）。
+- D2：`max-num-seqs`、chunked prefill on/off、prefix caching 有/无、AWQ vs FP16 + 质量门。
+- 固定方法学：SLO、样本数、warmup、重复次数、开环/闭环、成本公式、货币。
+- 写 1 篇公开 writeup；列 10 家目标公司 + 5 个真实 JD。
+- **验收：** 4 个 baseline JSON + 1 张调参表 + 1 篇 writeup + 5 次信息面/招聘方沟通。
+
+### Q2（3–6 月）：引擎深度 + 路由
+
+- KV cache 压力实验：并发拉到 preemption，记录抢占次数、TTFT 拐点、吞吐塌陷。
+- `max-num-batched-tokens` / chunked prefill 的取舍；量化质量 delta。
+- llm-d prefix-cache routing：共享长前缀，对比 round-robin vs EPP 的 P99 和命中率。
+- 源码阅读：vLLM scheduler / KV cache / prefix caching；llm-d EPP。
+- **验收：** 2 个深度 artifact + 第 2 篇 writeup + 5–10 个申请。
+
+### Q3（6–9 月）：生产化 + 故障
+
+- k3s + vLLM Deployment；权重分发：initContainer 现下 vs node-local cache，测冷启动。
+- Kueue `ClusterQueue` 两团队配额 + Kyverno 一条 GPU 准入策略；保留 2 条拒绝日志。
+- DCGM + vLLM `/metrics` + SLO 面板 + `$/1M tokens` 归属。
+- 故障 lab：OOM、KV cache 打满/抢占、pod kill、node drain、权重下载超时、driver 不匹配；每条记录“症状 → 命令 → 判据 → 处置”。
+- **验收：** 生产级 manifest + 2 条策略日志 + 故障日志 + SLO 面板。
+
+### Q4（9–12 月）：市场验证
+
+- 3 个 artifact 定稿；简历 v2；10 分钟讲解录音；10 道必答题自测。
+- 选 3 个真实 JD 逐条映射到证据；投 10–20 个 A/B 线岗位。
+- 可选：给 vLLM/llm-d 提一个小 PR（docs/test/benchmark 都算）。
+- **验收：** 3 个 artifact + 简历 v2 + 10 个已投 + 答上 ≥8/10 题。
 
 ### 为什么是 Kueue 而不是 Volcano（以及什么时候反转）
 
@@ -374,7 +457,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 
 ## 工具优先级表（遇到「要不要学 X」先查这张表）
 
-**三问过滤法**，三问全过才动手：① 它在你目标岗位的 JD 里出现过吗？② 它能不能产出六个数字之一？③ 学它 ≤6 小时吗？
+**三问过滤法**，三问全过才动手：① 它在你目标岗位的 JD 里出现过吗？② 它能不能产出核心数字之一？③ 学它 ≤6 小时吗？
 
 | 层级 | 工具 | 时间 | 为什么 / 边界 |
 |---|---|---|---|
@@ -394,7 +477,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | | SGLang / Triton / Kthena / Slurm | 0 | 知道名字和适用边界即可 |
 | **跳过** | 传统 `InferenceService` 深挖、Kubeflow Pipelines 实操、MLflow/W&B 深挖 | — | 除非你转 MLOps 线（供给最过剩那条） |
 
-**W10 就开始投，不要等"准备好"。** 面试是最便宜的缺口检测。
+**Q2（约第 6 个月）就开始投，不要等"准备好"。** 面试是最便宜的缺口检测；拿到 JD 反馈再决定 Q3 补什么。
 
 ---
 
@@ -439,14 +522,21 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 
 **面试标准答案（一句话 + 一个数字）：** "单模型单机时裸机更快，K8s 的价值在多模型、多租户和弹性；我们量过，走 Service 比 hostNetwork 多约 __ms 的 P99，所以推理热路径走 hostNetwork + 网关直连。"
 
-## 5. 六个数字（缺一个 writeup 就不成立）
+## 5. 四个核心数字 + 两个对比（A 线版）
 
-1. 冷启动：____ s（node-local cache）/ ____ s（initContainer 现下）
-2. TTFT P99 @ 16 并发：____ ms
-3. 单卡 output throughput：____ tok/s
-4. 单卡可稳定支撑并发：____
-5. $/1M output tokens（含 GPU 闲置摊销）：$____
-6. 优化前后：吞吐 +__% / TTFT −__%
+核心 4 个（缺一个 writeup 不成立）：
+
+1. TTFT P50/P95/P99 @ c=1/16/64（c=4 可选）：____ ms
+2. output tok/s + goodput @ SLO：____ tok/s / ____ req/s
+3. TPOT/ITL P95：____ ms
+4. $/1M output tokens（含 GPU 闲置摊销）：$____
+
+两个对比（加分，不替代核心）：
+
+5. 冷启动：____ s（node-local cache）/ ____ s（initContainer 现下）
+6. 质量/路由：AWQ vs FP16 质量 delta ____；prefix-cache 路由 P99 改善 ____%
+
+**方法学必须一起写：** 样本数、warmup、重复次数、开环/闭环、SLO 定义、GPU 单价/利用率、货币（CAD/USD）。没有这些，数字不可复核。
 
 ---
 
@@ -469,13 +559,19 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 - PD 分离在什么情况下**不划算**？（低并发、模型小、网络带宽不够搬 KV、集群没有第二个 GPU 池——大多数团队死在这条）
 - wide EP 解决什么？（MoE 模型的专家并行，单机放不下时跨节点切专家）
 
+### A 线源码阅读（每周 1h，不要求写 kernel）
+
+- **vLLM**：scheduler、KV cache manager、prefix caching、chunked prefill。目标：画出一次请求从 HTTP 到 scheduler 到 GPU 的路径。
+- **llm-d**：EPP、InferencePool、prefix-cache routing。目标：说清“为什么不是 round-robin”，以及命中率怎么测。
+- 每读一块，写 5 行笔记 + 一个能被追问的问题；不要只收藏链接。
+
 ---
 
 ## 7. 怎么讲你的 DevOps 背景（不是道歉，是卖点）
 
 > 我一直在做多租户平台的可靠性与治理：策略即代码、GitOps 收敛、密钥与身份、升级与回滚。现在我把同一套方法用到 GPU 上——配额、优先级、抢占、成本归属，以及模型服务的 SLO。**原型能跑的人很多，能把它做成 7×24 有人负责的服务的人很少，那是我的位置。**
 
-证据三件套：Kyverno 收敛 runbook、GPU 配额策略集、六个性能数字。
+证据三件套：Kyverno 收敛 runbook、GPU 配额策略集、4 个核心性能数字 + 2 个对比。
 
 ---
 
@@ -488,14 +584,18 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 - ❌ 先补 ML 理论再碰 GPU（顺序反了）
 - ❌ 等 CKIE 考纲出来再开始学（2027 出考纲，你现在就该会）
 - ❌ 把休假排满不留休息日
+- ❌ A-only：A 线岗位少，B 线是就业基本盘；不要拒绝 AI 公司的平台岗
+- ❌ 把 Data Center Technician / 纯 MLOps 当 A 线入口；它们可以糊口，但不积累推理性能证据
+- ❌ 没有 SLO/样本量就报 P99；用 random 数据测 prefix caching
+- ❌ 在 PR 阶段假设美国 remote 随便投；先确认身份/EOR/岗位所在地
 
 ---
 
 ## 9. 如果只有 90 分钟
 
-租一张 L4 → `vllm serve` 8B 量化模型 → 16 并发压一次 → 把 **TTFT P99** 和 **output tok/s** 抄进 README。
+租一张 L4 → 按 `d1-vllm-baseline-runbook.md` 起 8B 量化模型 → 16 并发压一次 → 把 **TTFT P99** 和 **output tok/s** 抄进 README。
 
-两个数字 > 四十小时视频。有了第一个数字，后面 11 周才有参照系。
+两个数字 > 四十小时视频。有了第一个数字，后面几个季度才有参照系。
 
 ---
 
@@ -545,3 +645,8 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 [46] https://www.jobs.ca/groq-94cbc6bcd84a/jobs/data-center-technician-calgary-ab-65643ce30a3c — Groq — Data Center Technician, Calgary AB
 [47] https://datacenters.atmeta.com/2026/07/hello-sturgeon-county — Meta — Sturgeon County data centre (1GW)
 [48] https://developer.nvidia.com/blog/nvidia-runai-is-now-open-source-as-part-of-nvidia-dsx-ai-factory-platform — NVIDIA Run:ai Is Now Open Source (NVIDIA Technical Blog, 2026-10-13)
+[49] https://jobiba.com/job/senior-staff-software-engineer-back-end-inference-cohere-c7b0d6ec — Cohere — Senior/Staff Software Engineer (Back-End), Inference (aggregator; verify official careers page)
+[50] https://www.shopify.com/careers/senior-staff-engineer-ml-inference_59a0b690-182f-465f-9059-b6ce3874fb62 — Shopify — Senior Staff Engineer, ML Inference (Remote Americas)
+[51] https://jobs.ashbyhq.com/cerebras/ef15b7be-2fa3-4343-81aa-47ef65171af0/application — Cerebras — Staff Software Engineer, Inference Platform (Toronto)
+[52] https://docs.vllm.ai/en/latest/benchmarking/cli/ — vLLM Benchmark CLI (per-request metrics, percentiles, ignore-eos)
+[53] https://docs.vllm.ai/en/latest/cli/serve/ — vLLM serve CLI
