@@ -473,6 +473,15 @@ vllm bench serve \
 
 等 10 秒，让队列排空、GPU 频率稳定。
 
+**warmup 到底在预热什么**（结果丢弃，不进 README）：
+
+- 首次真实 batch 的 lazy init / 内存池首次分配；
+- GPU 从空闲低频爬到工作频率（这台 L4 还有 40W 功耗墙，爬坡更明显）；
+- 温度、风扇、功耗墙触发点进入稳态；
+- HTTP 连接、tokenizer 加载等客户端一次性开销。
+
+它不负责填 KV cache / prefix cache：每轮正式跑前会 `reset_prefix_cache`，且每轮换 `seed`，缓存不会跨轮复用。`sleep 30` 是排空上一轮尾请求，和 warmup 是两件事。
+
 ### 5.3 四轮基线（Terminal C）
 
 `--num-prompts` 按并发调整：c=1/4 用较少样本省时间；c=16/64 需要更多样本，否则 P99 没有统计意义。
