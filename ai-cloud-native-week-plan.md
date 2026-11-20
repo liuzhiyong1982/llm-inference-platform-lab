@@ -485,8 +485,8 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 
 | 渠道 | 价格（USD/GPU-h） | 计费 | 适合你 | 注意 |
 |---|---|---|---|---|
-| **RunPod**（Community Cloud） | ~$0.44 | 按秒 | **首选**，开箱有 vLLM 镜像，无配额审批 | Community 是第三方机房，偶有中断；重要实验用 Secure（~$0.59） |
-| **Vast.ai** | ~$0.36 起 | 按秒 | 最便宜 | 机器质量参差，挑信誉高的 host，先跑 10 分钟验证 |
+| **Vast.ai** | ~$0.10–0.45（常见 $0.25–0.35） | 按秒 | **首选**（你实际使用的平台） | 租 **on-demand**，不要 interruptible；挑 reliability ≥ 99%、`Max CUDA` ≥ 12.1、`inet down` ≥ 500 Mbps 的 host |
+| **RunPod**（Community Cloud） | ~$0.44 | 按秒 | 备选，开箱有 vLLM 镜像 | Community 是第三方机房，偶有中断；重要实验用 Secure（~$0.59） |
 | **Jarvislabs** | ~$0.44 按需 / ~$0.29 spot | 按小时 | 想省心、界面友好 | 区域在美/印，从卡尔加里延迟可接受 |
 | **Google Cloud（Montréal）** | ~$0.62 | 按秒 | 数据要留在加拿大 | 需要 L4 quota，新项目可能要先申请 |
 | **AWS（Montréal，g6 实例）** | 略高于 GCP | 按秒 | 同上 | 同样要 quota |
@@ -495,8 +495,8 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 **选它的理由（L4 的定位）：** 24GB 显存、72W、300GB/s 带宽——典型的"小模型高并发推理卡"。8B 模型 FP16 刚好塞得下（16GB 权重 + 少量 KV cache 紧张），8B AWQ（约 5–6GB）就很宽裕，能跑到有意义的并发。它**没有 NVLink**，不适合做 TP=2 的大模型实验——那一步临时开 2×L4 或 A100 40GB 一小时就够。
 
 **不浪费钱的六条：**
-1. 按秒计费 + **Stop 不 Delete**（保留磁盘和已下载权重）
-2. 挂一个持久卷存模型，别每次重下 8–16GB
+1. 按秒计费；Vast 的 **Stop** 保留容器盘但继续收存储费、且不保证能重启，**Destroy** 才停止计费
+2. 结果先 `scp` 回本地并 push，再决定 Stop（D2 在 24h 内）还是 Destroy（隔几天）；不要长期 Stop 着挂存储费
 3. 直接用 `vllm/vllm-openai` 镜像，省掉装 CUDA/PyTorch 的两小时
 4. 先开 1 小时验证能跑通，再决定要不要长开
 5. 设一个 $15 预算上限，周末复盘花了多少、换到几个数字

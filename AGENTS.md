@@ -22,8 +22,8 @@
 ## 硬约束
 
 - **禁止在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**（见计划「不要做」一节：污染共享环境、触发 Coder→Reviewer SOP、花公司钱）。该集群只能作为简历 case study 来写。
-- 所有压测在租用的单卡 L4 上做（RunPod Community ≈ $0.44/h，总预算 $15）。
-- 租用机操作：`HF_HOME=/workspace/hf`，模型放持久卷；结束用 **Stop，不要 Terminate**，否则权重和卷会丢。
+- 所有压测在 **Vast.ai** 租用的单卡 L4 上做；租 **on-demand**，不要 interruptible（会被 pause，基线作废），总预算 $15。
+- 租用机操作：`HF_HOME=/workspace/hf`；容器盘 ≥ 40GB（创建后不能扩容）。Vast 的 Stop 会继续收存储费且不保证能重启，**结果先 `scp` 回本地并 push**，再决定 Stop（D2 在 24h 内）还是 Destroy（隔几天）。
 - 实验脚本和结果必须进 git：「机器是租的，数字是你的」。
 
 ## vLLM 版本坑
