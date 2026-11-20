@@ -362,7 +362,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 ### Q1（0–3 月）：基线 + 方法学
 
 - D1：4 个并发点 baseline + README 表 + 一句话归因（按 `d1-vllm-baseline-runbook.md`）。
-- D2：`max-num-seqs`、chunked prefill on/off、prefix caching 有/无、AWQ vs FP16 + 质量门。
+- D2：`max-num-seqs`、chunked prefill on/off、prefix caching 有/无、AWQ vs FP16 + 质量门；执行细节见 `d2-vllm-tuning-runbook.md`。
 - **D2 对比规矩（避免把噪声当优化）：**
   - 一次只动一个变量；模型、输入/输出长度、并发点、宿主（含 power limit）、采样方式全部固定。
   - 每个配置至少重复 2 次，报中位数/范围，不报单次最好值。
