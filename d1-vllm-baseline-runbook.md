@@ -93,7 +93,7 @@ vastai search offers -n \
 > 1. 镜像的 `CUDA_VERSION` ≤ driver 的 Max CUDA，且**不跨大版本**（CUDA 11 起有 minor version compatibility，12.x runtime 能跑在支持 12.0 的 driver 上）；
 > 2. GPU 的 compute capability 在镜像的编译列表里（`TORCH_CUDA_ARCH_LIST`），否则会报 `no kernel image is available`，这跟 CUDA 版本无关。`v0.34.0` 的列表是 `7.5 8.0 8.6 8.9 9.0 10.0 12.0`，L4 的 8.9 在里面。
 >
-> `v0.34.0` 镜像声明 `CUDA_VERSION=13.0.2`、`NVIDIA_REQUIRE_CUDA=cuda>=13.0`，所以 host 的 Max CUDA 必须 ≥ 13.0；driver 的具体版本号只在排查已知 bug 时才需要看。镜像已经拉到本地后可以这样核对：
+> `v0.34.0` 镜像里的 `CUDA_VERSION=13.0.2` 是**镜像内 CUDA runtime/toolkit 的版本**（不是 driver；`NV_CUDA_CUDART_VERSION=13.0.96-1` 是其中 cudart 包的版本号，编号规则不同），`NVIDIA_REQUIRE_CUDA=cuda>=13.0` 是容器启动时由 runtime 校验的约束。所以 host 的 Max CUDA 必须 ≥ 13.0；driver 的具体版本号只在排查已知 bug 时才需要看。镜像已经拉到本地后可以这样核对：
 >
 > ```bash
 > docker image inspect vllm/vllm-openai:v0.34.0 \
