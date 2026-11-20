@@ -48,7 +48,10 @@ Vast 是 marketplace，host 质量差异很大。挑 offer 的硬条件：
 网页 UI 的默认列表按热门卡排序，满屏是 RTX 4090/5090；**L4 不属于 RTX 分类**，它是 Ada 数据中心卡。UI 的 GPU 筛选框要直接输入 `L4`，而且默认搜索带 `verified=true`，会把大量 L4 host 藏掉。所以用 CLI 更可靠。
 
 ```bash
+# 安装 Vast.ai 的 CLI（只是本地 Python 包，不占 GPU、不产生费用）
 pip install -q vastai
+
+# 验证 CLI 可用；有版本号输出即成功，安装时的 pip/conda 警告可忽略
 vastai --version          # 2026-11 实测 1.11.2
 ```
 
@@ -57,6 +60,8 @@ vastai --version          # 2026-11 实测 1.11.2
 API key 在 <https://cloud.vast.ai/manage-keys/> 生成，然后：
 
 ```bash
+# 把 API key 写入 ~/.config/vastai/vast_api_key，后续 vastai 命令自动读取
+# key 在 https://cloud.vast.ai/manage-keys/ 生成；不要提交进 git，也不要贴到聊天里
 vastai set api-key <你的key>
 ```
 
@@ -65,6 +70,11 @@ key 存在 `~/.config/vastai/vast_api_key`，**不要提交进 git，也不要�
 ### 1.2 搜 L4
 
 ```bash
+# 目的：列出当前可租、且满足 D1 硬条件的 L4 单卡，按含盘总价从低到高排。
+# -n 关掉默认 query（默认带 verified=true），否则大量 unverified 的 L4 host 不会出现。
+# 引号里是筛选条件：L4 / 单卡 / 可租 / reliability>=98% / Max CUDA>=13.0（镜像要求）/
+# 下载>=500 Mbps / 可用磁盘>=40GB / 最长租期>0.25 天（=6 小时）。
+# -o dph 按 dph_total 升序；--storage 40 让总价把 40GB 容器盘的小时费算进去。
 vastai search offers -n \
   'gpu_name=L4 num_gpus=1 rentable=true reliability>=0.98 cuda_vers>=13.0 inet_down>=500 disk_space>=40 duration>0.25' \
   -o 'dph' --storage 40 --limit 20
@@ -96,6 +106,8 @@ vastai search offers -n \
 > `v0.34.0` 镜像里的 `CUDA_VERSION=13.0.2` 是**镜像内 CUDA runtime/toolkit 的版本**（不是 driver；`NV_CUDA_CUDART_VERSION=13.0.96-1` 是其中 cudart 包的版本号，编号规则不同），`NVIDIA_REQUIRE_CUDA=cuda>=13.0` 是容器启动时由 runtime 校验的约束。所以 host 的 Max CUDA 必须 ≥ 13.0；driver 的具体版本号只在排查已知 bug 时才需要看。镜像已经拉到本地后可以这样核对：
 >
 > ```bash
+> # 目的：读出镜像内置的 CUDA runtime 版本（CUDA_VERSION）和启动校验条件（NVIDIA_REQUIRE_CUDA）
+> # 不需要 GPU；镜像 pull 到本地后就能跑，用来核对 host 的 Max CUDA 够不够
 > docker image inspect vllm/vllm-openai:v0.34.0 \
 >   --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'CUDA_VERSION|NVIDIA_REQUIRE_CUDA'
 > ```
@@ -129,6 +141,9 @@ vastai search offers -n \
 ### 1.3 创建实例
 
 ```bash
+# 目的：用 1.2 选中的 offer_id 创建实例，默认就是 on-demand。
+# 不要加 --bid_price：那会把实例变成 interruptible，被 pause 的那轮基线直接作废。
+# 参数从上到下：固定镜像 tag、40GB 容器盘、SSH 启动方式、映射 8000 端口、打个标签方便找。
 vastai create instance <offer_id> \
   --image vllm/vllm-openai:v0.34.0 \
   --disk 40 \
@@ -146,15 +161,24 @@ vastai create instance <offer_id> \
 ### 1.4 连上实例
 
 ```bash
-vastai show instances          # 看 status 是否 running
-vastai ssh-url <instance_id>   # 给出 ssh 命令/端口
-vastai scp-url <instance_id>   # scp 用的 host:port
-vastai logs <instance_id>      # 起不来时先看这个
+# 目的：确认实例已经 running；stopped/loading 时 SSH 一定连不上
+vastai show instances
+
+# 目的：拿到 SSH 的 host 和端口；输出是 ssh://... URI，不能直接当命令执行
+vastai ssh-url <instance_id>
+
+# 目的：拿 scp 用的 host:port；实例重启后端口可能变，第 10 节拉结果前重新取
+vastai scp-url <instance_id>
+
+# 目的：实例起不来/容器反复重启时，看容器里的启动日志定位原因
+vastai logs <instance_id>
 ```
 
 `ssh-url` 输出的是 `ssh://root@ssh8.vast.ai:34388` 这种 URI，**不能直接粘进 bash**（会被当成命令名，报 `No such file or directory`）。要拆成：
 
 ```bash
+# 目的：登录容器。-i 指定私钥（本机没有默认 id_rsa/id_ed25519 时必填），
+# -p 是 ssh-url 里的端口，root@ 后面是 ssh-url 里的主机名。
 ssh -i ~/.ssh/<你的私钥> -p 34388 root@ssh8.vast.ai
 ```
 
@@ -164,7 +188,10 @@ ssh -i ~/.ssh/<你的私钥> -p 34388 root@ssh8.vast.ai
 2. Vast 账号/实例里注册的公钥，和 `-i` 指向的私钥配对。本机没有默认 `id_rsa`/`id_ed25519` 时必须显式 `-i`；公钥没注册就：
 
 ```bash
+# 目的：把本机公钥注册到 Vast 账号（一次即可；已注册过会提示重复，可跳过）
 vastai create ssh-key "$(cat ~/.ssh/<你的公钥>.pub)"
+
+# 目的：把同一把公钥注入已经创建好的实例（创建时选错 key 时用），几秒后生效
 vastai attach ssh <instance_id> "$(cat ~/.ssh/<你的公钥>.pub)"
 ```
 
@@ -173,12 +200,25 @@ vastai attach ssh <instance_id> "$(cat ~/.ssh/<你的公钥>.pub)"
 进容器后先跑：
 
 ```bash
-mkdir -p /workspace          # 有些镜像/启动方式下没有这个目录；/ 就是 40GB 容器盘
+# 目的：有些镜像/启动方式没有预建 /workspace；/ 就是 40GB 容器盘，建目录统一路径
+mkdir -p /workspace
+
+# 目的：确认 GPU 型号/显存/driver 与订单一致（应看到 NVIDIA L4、23034 MiB）
 nvidia-smi
-df -h /                      # 确认容器盘是 40GB，不要用 /workspace 之外的挂载
-python3 -V                   # vLLM 镜像里只有 python3，没有 python
+
+# 目的：确认容器盘容量是 40G，并确认权重会写到这个盘
+df -h /
+
+# 目的：确认 Python 版本；镜像只有 python3，没有 python
+python3 -V
+
+# 目的：确认 vLLM 版本和镜像 tag 一致（应为 0.34.0），后续 flag 核对以它为准
 python3 -c "import vllm; print(vllm.__version__)"
+
+# 目的：确认 torch 的 CUDA 版本和 GPU compute capability；应输出 cu 13.0 / (8, 9)
 python3 -c "import torch; print('torch', torch.__version__, 'cu', torch.version.cuda)"
+
+# 目的：确认 bench 子命令能加载；成功会打印 bench CLI ok
 vllm bench serve --help >/dev/null && echo "bench CLI ok"
 ```
 
@@ -187,8 +227,11 @@ vllm bench serve --help >/dev/null && echo "bench CLI ok"
 检查今天要用的 flag 是否存在（版本不对就换镜像，不要盲目 `pip install -U vllm`）：
 
 ```bash
-# v0.34.0 的 help 按 ConfigGroup 分组，--help 只显示目录；必须加 =all
+# 目的：确认服务端支持 per-request metrics（第 6 节诊断跑用）和 prefix caching 开关。
+# 注意：v0.34.0 的 help 按 ConfigGroup 分组，--help 只显示目录，必须加 =all。
 vllm serve --help=all | grep -E "enable-per-request-metrics|prefix-caching"
+
+# 目的：确认压测 CLI 支持固定输出长度、百分位、详细结果和 goodput；缺哪个就调整 D1 命令。
 vllm bench serve --help=all | grep -E "ignore-eos|metric-percentiles|percentile-metrics|save-detailed|goodput"
 ```
 
@@ -197,19 +240,30 @@ vllm bench serve --help=all | grep -E "ignore-eos|metric-percentiles|percentile-
 设置环境变量：
 
 ```bash
+# 目的：模型缓存放 /workspace/hf，避免写满根盘；所有终端都要指向同一个目录
 export HF_HOME=/workspace/hf
-export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# 目的：启用 Xet 高速传输。hub 2.4.0 默认走 Xet，旧的 HF_HUB_ENABLE_HF_TRANSFER 已弃用
+export HF_XET_HIGH_PERFORMANCE=1
+
+# 目的：把 vLLM 版本写进压测 JSON 的 metadata，保证结果可追溯
 export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+
+# 目的：预建权重和结果目录；后面的 serve/bench 都依赖这两个路径
 mkdir -p /workspace/hf /workspace/results
 ```
 
 `export` 只对当前 shell 生效，而后面要开 Terminal A/B/C。写进 `~/.bashrc` 一次，避免每个窗口忘设 `HF_HOME` 导致重复下载 5GB：
 
 ```bash
+# 目的：把 HF 路径写进 ~/.bashrc，Terminal A/B/C 新开 shell 也能找到同一份缓存；
+# 否则每个窗口都要手动 export，忘了就会把 5GB 权重重复下一遍。
 cat >> ~/.bashrc <<'EOF'
 export HF_HOME=/workspace/hf
-export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_XET_HIGH_PERFORMANCE=1
 EOF
+
+# 目的：让当前 shell 立即生效，不用退出重登
 source ~/.bashrc
 ```
 
@@ -222,15 +276,27 @@ source ~/.bashrc
 先把权重下完，避免把“下载慢”误判成“服务起不来”：
 
 ```bash
-pip install -q hf_transfer
+# 目的：把 Qwen3-8B-AWQ 的完整快照（权重 + config + tokenizer）下到 $HF_HOME/hub。
+# v0.34.0 自带 huggingface_hub 2.4.0，走 Xet 传输；旧版 hub 才需要 hf_transfer。
+# snapshot_download 支持断点续传，中断后重跑会接着下，不会从头开始。
 python3 - <<'PY'
 from huggingface_hub import snapshot_download
 snapshot_download("Qwen/Qwen3-8B-AWQ")
 PY
-du -sh "$HF_HOME/hub/models--Qwen--Qwen3-8B-AWQ"
+
+# 目的：确认实际占用约 5.7GB。
+# 注意：Xet 布局下快照里是符号链接，du 不加 -L 只会统计链接本身（会看到 4.4M，不是没下完）。
+du -shL "$HF_HOME/hub/models--Qwen--Qwen3-8B-AWQ"
+
+# 目的：确认整个 HF 缓存（含共享 blob 存储）的真实占用
+du -sh "$HF_HOME/hub"
 ```
 
-模型约 4.8GB。若提示 gated/401，先 `huggingface-cli login`；Qwen3-8B-AWQ 通常是公开的。
+模型约 5.7GB（`du -L` 口径）。若提示 gated/401，先 `hf auth login`（旧版命令是 `huggingface-cli login`）；Qwen3-8B-AWQ 通常是公开的。
+
+下载日志里出现 `unauthenticated requests` 说明在匿名限速（实测 3.4MB/s）。有 HF token 可以 `export HF_TOKEN=hf_xxx` 提速，但**不要写进 git**。
+
+**为什么 `du -sh` 只有 4.4M**：hub 2.4.0 的 Xet 布局把真实权重放在 `$HF_HOME/hub/blobs/`，快照目录里是符号链接；`du` 默认不跟随符号链接，`du -L` 才统计目标文件。`df -h /` 显示已用 5.8G，说明数据确实在盘上，不是没下完。
 
 Vast 的容器盘在 Stop 后保留、Destroy 时删除，所以**不需要额外 Volume**；Volume 只能挂回同一台物理机，换 host 就作废。权重放 `/workspace/hf` 即可，D2 换机器就重下（10–20 分钟）。
 
@@ -241,7 +307,19 @@ Vast 的容器盘在 Stop 后保留、Destroy 时删除，所以**不需要额�
 另开一个终端（Terminal A），前台起服务并落日志：
 
 ```bash
+# 目的：进 /workspace，保证日志和结果都落在容器盘上
 cd /workspace
+
+# 目的：前台起 OpenAI 兼容服务，stdout/stderr 同时写终端和 /workspace/vllm.log。
+# 参数逐个说明：
+#   Qwen/Qwen3-8B-AWQ              模型 repo；HF_HOME 已指向缓存，不会重复下载
+#   --served-model-name qwen3-8b   请求里的 model 必须叫这个名字，否则 404
+#   --max-model-len 8192           上下文上限 8k，控制 KV cache 占用（原生 32k，D1 不用）
+#   --gpu-memory-utilization 0.90  权重 + KV cache 最多占 90% 显存
+#   --max-num-seqs 64              同时在跑的序列上限，D2 要调的旋钮
+#   --disable-log-requests         压测时不逐条打请求日志，避免日志 I/O 干扰吞吐
+#   --host 0.0.0.0 --port 8000     监听所有网卡，Vast 端口映射后才能从实例外访问
+#   2>&1 | tee vllm.log            保存日志，后面 grep 加载耗时/KV cache/最大并发
 vllm serve Qwen/Qwen3-8B-AWQ \
   --served-model-name qwen3-8b \
   --max-model-len 8192 \
@@ -265,6 +343,11 @@ vllm serve Qwen/Qwen3-8B-AWQ \
 等到日志出现 `Uvicorn running` / `Application startup complete`，然后记录三件事：
 
 ```bash
+# 目的：从启动日志抓 4 个要写进 README 的数字：
+#   Loading model       模型加载耗时
+#   GPU KV cache size   KV cache 容量（能缓存多少 token）
+#   Maximum concurrency 1024/256 输入输出下的最大并发
+#   Application startup 服务真正可用的时间点
 grep -E "Loading model|GPU KV cache size|Maximum concurrency|Application startup" /workspace/vllm.log
 ```
 
@@ -277,10 +360,14 @@ grep -E "Loading model|GPU KV cache size|Maximum concurrency|Application startup
 两条都通，才能进压测：
 
 ```bash
+# 目的：确认服务已起来、模型名是 qwen3-8b；返回 200 + JSON 才能继续
 curl -s http://127.0.0.1:8000/v1/models | python3 -m json.tool | head -30
 ```
 
 ```bash
+# 目的：走 chat 端点做端到端 smoke test，确认 chat template、生成、JSON 返回都正常。
+# /no_think 关掉 Qwen3 默认的 thinking，避免 64 个 token 全花在推理过程上。
+# temperature=0 让输出确定，便于复现。
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -300,6 +387,8 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 再确认 completions 端点：
 
 ```bash
+# 目的：确认压测要用的 /v1/completions 端点可用。
+# bench 的 random 数据集直接发 token IDs 到这个端点，不经过 chat template。
 curl -s http://127.0.0.1:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3-8b","prompt":"hello","max_tokens":16}' \
@@ -313,8 +402,12 @@ curl -s http://127.0.0.1:8000/v1/completions \
 ### 5.1 开 GPU 采样（Terminal B）
 
 ```bash
+# 目的：每秒采一次 GPU 指标，后台写入 CSV；压测结束后用它算 util 均值和 P95。
+# 采集项：时间戳、GPU 利用率、显存占用、功耗、温度、SM 频率。
 nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw,temperature.gpu,clocks.sm \
   --format=csv -l 1 > /workspace/gpu_util.csv 2>&1 &
+
+# 目的：记下后台采样进程的 PID，第 10 节用它停止采样
 echo $! > /workspace/gpu_smi.pid
 ```
 
@@ -323,7 +416,11 @@ echo $! > /workspace/gpu_smi.pid
 ### 5.2 Warmup（丢弃，不计入结果）
 
 ```bash
+# 目的：建 warmup 目录；这轮结果丢弃，不参与 README 统计
 mkdir -p /workspace/results/warmup
+
+# 目的：10 条请求、并发 1，让 CUDA kernel 完成首次编译、GPU 频率稳定。
+# 输入/输出长度与正式跑一致（1024/256），保证预热的是同一套 kernel。
 vllm bench serve \
   --backend openai \
   --endpoint /v1/completions \
@@ -346,9 +443,11 @@ vllm bench serve \
 `--num-prompts` 按并发调整：c=1/4 用较少样本省时间；c=16/64 需要更多样本，否则 P99 没有统计意义。
 
 ```bash
+# 目的：进 /workspace，结果 JSON 统一写到 ./results
 cd /workspace
 mkdir -p results
 
+# 目的：依次跑 4 个并发点；每个并发点单独一个 JSON，README 表格一行
 for C in 1 4 16 64; do
   case $C in
     1)  N=100 ;;
@@ -357,14 +456,19 @@ for C in 1 4 16 64; do
     64) N=1000 ;;
   esac
 
+  # 目的：按并发选样本数；低并发省时间，高并发要更多样本 P99 才有统计意义
   echo "=== concurrency=$C n=$N ==="
 
-  # 清 prefix cache（若端点不存在，忽略；每轮不同 seed 也会换 prompt）
+  # 目的：清掉上一轮的 prefix cache，避免缓存命中把 TTFT 压低（端点不存在时忽略）
   curl -s -X POST http://127.0.0.1:8000/reset_prefix_cache >/dev/null || true
 
+  # 目的：记录压测前的抢占计数；和 AFTER 相减得到本轮发生了几次 KV cache 抢占
   BEFORE=$(curl -s http://127.0.0.1:8000/metrics \
     | awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}')
 
+  # 目的：跑当前并发点的基线。固定输入 1024 / 输出 256 且 ignore-eos，
+  # 保证 4 个并发点的数字可比；--save-detailed 保留 per-request 数组供复算。
+  # --seed $C 让每轮换 prompt，配合 reset_prefix_cache 避免跨轮缓存污染。
   vllm bench serve \
     --backend openai \
     --endpoint /v1/completions \
@@ -385,10 +489,14 @@ for C in 1 4 16 64; do
     --result-filename "d1-c${C}-$(date +%Y%m%d-%H%M%S).json" \
     --metadata gpu=l4-24gb vllm="$VLLM_VERSION" concurrency="$C" n="$N" input_len=1024 output_len=256 ignore_eos=true
 
+  # 目的：再读一次抢占计数，和 BEFORE 相减得到本轮增量
   AFTER=$(curl -s http://127.0.0.1:8000/metrics \
     | awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}')
 
+  # 目的：打印本轮抢占次数；>0 说明 KV cache 不够，序列被换出过
   echo "preemptions delta: $((AFTER-BEFORE))"
+
+  # 目的：等队列排空、GPU 频率回落，避免上一轮的尾请求污染下一轮
   sleep 30
 done
 ```
@@ -418,6 +526,9 @@ done
 2. 用同样的命令重启，只多一个 flag：
 
 ```bash
+# 目的：与 baseline 相同的启动参数，只多 --enable-per-request-metrics。
+# 它让服务端记录每个请求的 server_queue_times / server_ttfts，用来拆解排队 vs prefill。
+# 它会给 headline 数字增加 CPU 开销，所以只用于诊断，不用于正式基线。
 vllm serve Qwen/Qwen3-8B-AWQ \
   --served-model-name qwen3-8b \
   --max-model-len 8192 \
@@ -433,6 +544,8 @@ vllm serve Qwen/Qwen3-8B-AWQ \
 3. 跑一次 c=16、200 prompts：
 
 ```bash
+# 目的：诊断跑 c=16、200 条，和 baseline 完全同口径（1024/256、ignore-eos、同百分位），
+# 这样 server_queue_times / server_ttfts 才能和 baseline 的 TTFT 直接对照。
 vllm bench serve \
   --backend openai \
   --endpoint /v1/completions \
@@ -521,7 +634,8 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | `unrecognized arguments: --ignore-eos` / `--metric-percentiles` | bench CLI 版本较旧 | `vllm bench serve --help` 对一遍；换镜像 |
 | `reset_prefix_cache` 404 | 该版本没有这个端点 | 忽略；每轮不同 `--seed` 已能换 prompt；必要时重启服务 |
 | P99 抖动巨大 | 有其他进程占卡 / 抢占 / Vast host 邻居噪声 | `nvidia-smi` 看进程；看 `vllm:num_preemptions_total`；重复跑 c=16/64；仍抖就换 host |
-| 下载模型极慢 | 没开 hf_transfer / host 带宽差 | 见第 2 节；下次租 `inet down` ≥ 500 Mbps 的 host |
+| 下载模型极慢 | 匿名限速 / host 带宽差 | 设 `HF_TOKEN`；下次租 `inet down` ≥ 500 Mbps 的 host |
+| 下载完 `du -sh` 只有 4.4M | hub 2.4 的 Xet 布局用符号链接，`du` 默认不跟随 | 用 `du -shL`；`df -h /` 看到 5.8G 就说明下全了 |
 | `KeyError: 'qwen3'` | transformers 太旧 | 换新版 vLLM 镜像（内置新 transformers） |
 | `quantization` / AWQ 相关报错 | 镜像不识别该量化格式 | 先试 `--quantization awq`；仍失败换新版 vLLM 镜像，不要临时改模型格式 |
 | 实例一直 `scheduling` / 容器反复重启 | host 没 GPU 资源，或镜像 entrypoint 直接退出 | 等 2–3 分钟；不行就 destroy 换 host；把 entrypoint 覆盖成 `/bin/bash` |
@@ -536,28 +650,40 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 ## 10. 收工（40 分钟）
 
 ```bash
-# 1. 停 GPU 采样
+# 1. 目的：停掉 5.1 启动的 nvidia-smi 后台采样；PID 文件不在了也不报错
 kill "$(cat /workspace/gpu_smi.pid)" 2>/dev/null || true
 
-# 2. 确认结果
+# 2. 目的：确认 4 个 baseline JSON（+ 可选诊断 JSON）都在，且大小不是 0
 ls -lh /workspace/results/
 
-# 3. 提交（没有 remote 就先本地 commit，不要卡在 push）
-git add -A
-git commit -m "D1: vLLM baseline on L4 (concurrency 1/4/16/64)"
-git push
+# 3. 目的：确认日志里仍能抓到加载耗时 / KV cache / 最大并发，写 README 要用
+grep -E "Loading model|GPU KV cache size|Maximum concurrency" /workspace/vllm.log
 ```
 
 **结果必须拉回本地，不能只留在实例盘。** 先拿连接信息，再在本地机器执行：
 
 ```bash
-vastai scp-url <instance_id>    # 输出 ssh/scp 用的 host 和端口，以它为准
+# 目的：拿 scp 的 host/port；实例重启后端口会变，以这次输出为准
+vastai scp-url <instance_id>
 ```
 
 ```bash
+# 目的：把 4 个 baseline JSON + 诊断 JSON 拉回本地（-r 递归目录）
 scp -P <ssh_port> -r root@<host>:/workspace/results ./results
+
+# 目的：拉回 GPU 采样，后面算 util 均值和 P95
 scp -P <ssh_port> root@<host>:/workspace/gpu_util.csv ./gpu_util.csv
+
+# 目的：拉回服务日志，保留加载耗时/KV cache/报错现场
 scp -P <ssh_port> root@<host>:/workspace/vllm.log ./vllm.log
+```
+
+```bash
+# 目的：在本地仓库提交结果；不要在容器里 git commit，容器里没有这个 repo
+cd ~/liuzhiyong1982-org/llm-inference-platform-lab
+git add results gpu_util.csv vllm.log
+git commit -m "D1: vLLM baseline on L4 (concurrency 1/4/16/64)"
+git push
 ```
 
 **Vast 的 Stop 和 RunPod 不是一回事：**
