@@ -147,6 +147,7 @@ vastai logs <instance_id>      # 起不来时先看这个
 nvidia-smi
 df -h /workspace
 python -c "import vllm; print(vllm.__version__)"
+python -c "import torch; print('torch', torch.__version__, 'cu', torch.version.cuda)"
 vllm bench serve --help >/dev/null && echo "bench CLI ok"
 ```
 
