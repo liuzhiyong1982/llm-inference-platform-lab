@@ -623,9 +623,142 @@ D1 用到的 flag 逐项解释：
 
 它和 Vast 的 interruptible 实例被 host 暂停**不是一回事**：前者是 vLLM 内部的显存调度，后者是整台实例被 marketplace 抢占。D1 里 c=64 的 KV 需求约 `64 × (1024+256) = 81,920` tokens，小于 91,648 的 KV 容量，所以预期抢占为 0。
 
-### 5.4 如果还有时间：重复 c=16/64
+### 5.4 重复 c=16/64（可选，约 20–50 分钟）
 
-单次跑不足以区分“参数效果”和“Vast host 抖动 / 邻居噪声”。时间允许就把 c=16/64 再跑一遍，`--result-filename` 加 `-run2`；README 里报两次的中位数/范围。**没时间就注明“single run，P99 仅指示性”。**
+单次跑不足以区分“真实差异”和“Vast host 抖动 / 邻居噪声”。时间允许就把 c=16/64 再跑一遍，报两次的中位数/范围；没时间就在 README 注明“single run，P99 仅指示性”。
+
+时间预算：c=16（n=500）约 19 分钟；c=64（n=1000）约 32 分钟。只做 c=16 就把下面的 `for C in 16 64` 改成 `for C in 16`。
+
+**前提：必须用 baseline 配置。**
+
+- 如果当前跑的是 §6 的诊断服务（带 `--enable-per-request-metrics`），先在 Terminal A 按 `Ctrl-C` 停掉；
+- 重复跑不能带这个 flag，否则 per-request metrics 的 CPU 开销会污染数字。
+
+#### 5.4.1 重启 baseline 服务
+
+```bash
+# 目的：用与 D1 baseline 完全相同的参数重启，唯一区别是不带 --enable-per-request-metrics。
+# 日志写到 vllm-run2.log，保留原来的 vllm.log 不动。
+cd /workspace
+vllm serve Qwen/Qwen3-8B-AWQ \
+  --served-model-name qwen3-8b \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.90 \
+  --max-num-seqs 64 \
+  --disable-log-requests \
+  --host 0.0.0.0 \
+  --port 8000 \
+  2>&1 | tee /workspace/vllm-run2.log
+```
+
+等 `Application startup complete`，再确认服务可用：
+
+```bash
+# 目的：确认 8000 端口通、模型名是 qwen3-8b；返回 JSON 才继续
+curl -s http://127.0.0.1:8000/v1/models | head -c 200
+```
+
+#### 5.4.2 重开 GPU 采样
+
+第一轮的采样进程在 §10 才停；如果已经停了，重复跑前要重新开一份，写到单独 CSV，避免覆盖 `gpu_util.csv`：
+
+```bash
+# 目的：每秒采一次 GPU 指标，写到 gpu_util_run2.csv；重复跑期间不要关这个窗口
+nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw,temperature.gpu,clocks.sm \
+  --format=csv -l 1 > /workspace/gpu_util_run2.csv 2>&1 &
+
+# 目的：记录 PID，重复跑结束后用它停采样
+echo $! > /workspace/gpu_smi_run2.pid
+```
+
+#### 5.4.3 跑重复轮次
+
+`--seed` 保持和第一轮相同（16/64），这样两次的 prompt 集合一致，差异只来自 host/run 噪声；文件名加 `-run2`。
+
+```bash
+# 目的：进 /workspace，结果仍写 ./results
+cd /workspace
+export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+
+# 目的：只重复 c=16 和 c=64；其他并发点不动
+for C in 16 64; do
+  case $C in
+    16) N=500 ;;
+    64) N=1000 ;;
+  esac
+
+  echo "=== run2 concurrency=$C n=$N ==="
+
+  # 清 prefix cache，避免和第一轮共用缓存
+  curl -s -X POST http://127.0.0.1:8000/reset_prefix_cache >/dev/null || true
+
+  # 记录本轮开始前的抢占计数
+  BEFORE=$(curl -s http://127.0.0.1:8000/metrics \
+    | awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}')
+
+  # 与 5.3 完全相同的 bench 参数，只改文件名和 metadata 的 run=2
+  vllm bench serve \
+    --backend openai \
+    --endpoint /v1/completions \
+    --host 127.0.0.1 --port 8000 \
+    --model qwen3-8b \
+    --tokenizer Qwen/Qwen3-8B-AWQ \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 256 \
+    --num-prompts "$N" \
+    --max-concurrency "$C" \
+    --ignore-eos \
+    --seed "$C" \
+    --percentile-metrics ttft,tpot,itl,e2el \
+    --metric-percentiles 50,95,99 \
+    --goodput ttft:2000 tpot:100 \
+    --save-result --save-detailed \
+    --result-dir ./results \
+    --result-filename "d1-c${C}-run2-$(date +%Y%m%d-%H%M%S).json" \
+    --metadata gpu=l4-24gb vllm="$VLLM_VERSION" concurrency="$C" n="$N" run=2 input_len=1024 output_len=256 ignore_eos=true
+
+  AFTER=$(curl -s http://127.0.0.1:8000/metrics \
+    | awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}')
+
+  echo "preemptions delta: $((AFTER-BEFORE))"
+  sleep 30
+done
+```
+
+#### 5.4.4 停采样并对比两次结果
+
+```bash
+# 目的：停掉 5.4.2 的采样；PID 文件不在了也不报错
+kill "$(cat /workspace/gpu_smi_run2.pid)" 2>/dev/null || true
+
+# 目的：确认 run2 的 JSON 都在
+ls -lh /workspace/results/*run2*.json
+```
+
+用下面的脚本把第一轮和 run2 放在一起，打印每个指标的两次值与中位数：
+
+```bash
+python3 - <<'PY'
+import glob, json, statistics
+
+for c, n in ((16, 500), (64, 1000)):
+    rows = []
+    for f in glob.glob(f"/workspace/results/d1-c{c}-*.json"):
+        d = json.load(open(f))
+        if int(d["num_prompts"]) == n:      # 排除 diagnostic 的 200 条
+            rows.append((f.split("/")[-1], d))
+
+    print(f"=== c={c} runs={len(rows)} ===")
+    for key in ("output_throughput", "p50_ttft_ms", "p95_ttft_ms",
+                "p99_ttft_ms", "p95_tpot_ms"):
+        vals = [d[key] for _, d in rows]
+        med = statistics.median(vals)
+        print(f"{key:18s} {['%.2f' % v for v in vals]} median={med:.2f}")
+PY
+```
+
+README 里报两次的中位数和范围（min–max）。如果两次差异超过 10–15%，在结论里注明“host 噪声较大，P99 仅指示性”，不要把它当成参数效果。
 
 ---
 
