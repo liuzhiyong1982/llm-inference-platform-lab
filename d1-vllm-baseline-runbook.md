@@ -109,7 +109,7 @@ vastai search offers -n \
 | 镜像 CUDA runtime | 13.0.2 | `CUDA_VERSION` |
 | torch 编译用的 CUDA | 13.0 | `torch.version.cuda` |
 
-判断：`13.0.2 ≤ 13.2`、同为 13 大版本，且 sm_89 在 `TORCH_CUDA_ARCH_LIST` 里 → 能跑。这里 `13.0.2` 和 `13.2` 不是同一个东西：前者是镜像里的 runtime 版本，后者是 host driver 支持的上限；`.0.2` 是 toolkit 的 patch 号，`13.0.96-1` 则是 cudart 包的编号，不要混着比。
+判断：`13.0.2 ≤ 13.2`、同为 13 大版本，且 sm_89 在 `TORCH_CUDA_ARCH_LIST` 里 → 能跑。`sm_89` 是 compute capability 8.9 的编译目标写法（Ada 架构：L4 / L40S / RTX 4090），**不是 CUDA 版本**。这里 `13.0.2` 和 `13.2` 不是同一个东西：前者是镜像里的 runtime 版本，后者是 host driver 支持的上限；`.0.2` 是 toolkit 的 patch 号，`13.0.96-1` 则是 cudart 包的编号，不要混着比。
 
 反例：同一台 L4，如果 driver 只到 Max CUDA **12.4**，镜像还是 `v0.34.0`（runtime 13.0.2）→ 13.0 > 12.4 且跨大版本，容器启动时会被 `NVIDIA_REQUIRE_CUDA=cuda>=13.0` 拦下，或者加载时报 `CUDA driver version is insufficient for CUDA runtime version`。处置：换 `cuda_vers>=13.0` 的 host，或换 cu124 的镜像 tag；**不要在容器里 `pip install` 降级 torch**。
 
