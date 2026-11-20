@@ -481,7 +481,10 @@ vllm bench serve \
 
 ```bash
 export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+echo "$VLLM_VERSION"   # 应输出 0.34.0；空值说明 export 没执行
 ```
+
+> 两个代码块要分开粘。连在一起会变成 `mkdir ... warmupexport VLLM_VERSION=...`，结果只创建两个目录，`export` 根本没执行。
 
 ```bash
 # 目的：进 /workspace，结果 JSON 统一写到 ./results
