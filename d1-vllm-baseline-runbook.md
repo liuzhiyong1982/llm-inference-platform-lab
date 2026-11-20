@@ -316,7 +316,7 @@ Vast 的容器盘在 Stop 后保留、Destroy 时删除，所以**不需要额�
 
 ## 3. 起服务（10 分钟）
 
-另开一个终端（Terminal A），前台起服务并落日志：
+另开一个终端（Terminal A），前台起服务并落日志。Vast 的 tmux 新窗口会自动 source `~/.bashrc`；如果沿用旧 shell，先 `source ~/.bashrc` 确认 `HF_HOME=/workspace/hf`：
 
 ```bash
 # 目的：进 /workspace，保证日志和结果都落在容器盘上
@@ -364,6 +364,13 @@ grep -E "Loading model|GPU KV cache size|Maximum concurrency|Application startup
 ```
 
 把 **模型加载耗时、GPU KV cache size、Maximum concurrency for 1024/256 tokens** 抄到第 7 节的表下面。面试写 writeup 时要用。
+
+服务起来后先做个快速健康检查（不产生压测结果，只确认端口和模型名）：
+
+```bash
+# 目的：确认 8000 端口通、模型名是 qwen3-8b；返回 JSON 才继续
+curl -s http://127.0.0.1:8000/v1/models | head -c 200
+```
 
 ---
 
@@ -634,6 +641,7 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | 新 SSH 会话被 vLLM 日志占住 | Vast 的 `.bashrc` 自动 attach 到同一个 tmux（`ssh_tmux`） | `Ctrl-b c` 开新窗口；`Ctrl-b d` 脱离；`touch ~/.no_auto_tmux` 可禁用 |
 | `Connection refused` / 超时 | 实例 `stopped` 或还在 `loading` | `vastai start instance <id>`；`vastai show instance <id>` 等到 `running` |
 | `python: command not found` | 镜像里只有 `python3` | 所有命令改用 `python3`；不要额外装 python |
+| 日志里出现 `HF_HUB_ENABLE_HF_TRANSFER` deprecated | hub 2.4 改用 Xet，旧变量失效 | `sed -i 's/^export HF_HUB_ENABLE_HF_TRANSFER=1$/export HF_XET_HIGH_PERFORMANCE=1/' ~/.bashrc` |
 | `df: /workspace: No such file or directory` | 该镜像没有预建 `/workspace`，`/` 就是容器盘 | `mkdir -p /workspace`；用 `df -h /` 确认容量 |
 | `vllm ... --help \| grep` 什么都 grep 不到 | v0.34.0 的 help 按 ConfigGroup 分组 | 用 `--help=all`，不是版本缺 flag |
 | `search offers` 返回空 | 门槛太严，或 `duration` 单位写错（是天，不是小时） | 逐条放宽 `inet_down`/`reliability`；`duration>0.25` 表示 6 小时 |
