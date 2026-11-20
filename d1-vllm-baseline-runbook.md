@@ -1072,7 +1072,35 @@ print(good, good / d["duration"], d["request_goodput"])
 - `server_ttfts`（秒）：从被调度到首 token，包含 chunked prefill 的多步调度。
 - 同一请求：`client_ttft ≈ server_queue + server_ttft + 前端/网络/tokenization`。残差不要硬塞进 prefill。
 
-### 6. 常见误读
+### 6. 指标来源：vLLM vs nvidia-smi
+
+| 指标 | 谁产生 | 怎么拿 |
+|---|---|---|
+| 客户端 TTFT / TPOT / ITL / E2EL | `vllm bench serve`（客户端测） | JSON 的 `ttfts` / `tpots` / `itls` / `latencies`，或 `p*_*_ms` |
+| request / output / total throughput | `vllm bench serve`（客户端算） | `request_throughput` / `output_throughput` / `total_token_throughput` |
+| goodput、达标比例 | `vllm bench serve` 后处理 | `request_goodput`；比例自己除 |
+| P50/P95/P99、mean/median | `vllm bench serve` 后处理 | `p50_*` / `mean_*` 等 |
+| `server_queue_times` / `server_ttfts` | **vLLM 服务端**（需 opt-in） | 启动加 `--enable-per-request-metrics`，bench JSON 里的两个数组（秒） |
+| 抢占次数 | **vLLM `/metrics`** | `vllm:num_preemptions_total` |
+| running / waiting 请求数 | **vLLM `/metrics`** | `vllm:num_requests_running` / `vllm:num_requests_waiting` |
+| KV cache 使用率 | **vLLM `/metrics`** | `vllm:gpu_cache_usage_perc`（0–1，只是 KV 块） |
+| prefix cache 命中率 | **vLLM 日志 / `/metrics`** | 日志 `Prefix cache hit rate`，或 prefix cache counters |
+| 模型加载耗时、KV cache 大小、最大并发 | **vLLM 启动日志** | `grep "Loading model\|GPU KV cache size\|Maximum concurrency"` |
+| GPU 利用率 | **nvidia-smi / NVML** | `utilization.gpu` |
+| 显存占用 | **nvidia-smi / NVML** | `memory.used` |
+| 功耗、功耗上限 | **nvidia-smi / NVML** | `power.draw` / `power.limit` |
+| 温度 | **nvidia-smi / NVML** | `temperature.gpu` |
+| SM 频率 | **nvidia-smi / NVML** | `clocks.sm` |
+| driver / Max CUDA / compute cap | **nvidia-smi / NVML** | `driver_version` / 右上角 CUDA Version / `compute_cap` |
+
+容易混的两组：
+
+- `utilization.gpu`（nvidia-smi）≠ `vllm:gpu_cache_usage_perc`（vLLM）。前者是“有 kernel 在跑的时间占比”，后者是“KV cache 块用了多少”。
+- 客户端 TTFT ≠ `server_ttfts`。前者从请求发出算起，包含排队/前端/网络；后者从服务端调度算起。
+
+生产里不要长期 `nvidia-smi` 轮询，用 **DCGM exporter + Prometheus + Grafana**；vLLM 的指标直接抓 `/metrics`。
+
+### 7. 常见误读
 
 | 误读 | 正确理解 |
 |---|---|
