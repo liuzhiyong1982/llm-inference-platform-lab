@@ -173,26 +173,33 @@ vastai attach ssh <instance_id> "$(cat ~/.ssh/<你的公钥>.pub)"
 进容器后先跑：
 
 ```bash
+mkdir -p /workspace          # 有些镜像/启动方式下没有这个目录；/ 就是 40GB 容器盘
 nvidia-smi
-df -h /workspace
-python -c "import vllm; print(vllm.__version__)"
-python -c "import torch; print('torch', torch.__version__, 'cu', torch.version.cuda)"
+df -h /                      # 确认容器盘是 40GB，不要用 /workspace 之外的挂载
+python3 -V                   # vLLM 镜像里只有 python3，没有 python
+python3 -c "import vllm; print(vllm.__version__)"
+python3 -c "import torch; print('torch', torch.__version__, 'cu', torch.version.cuda)"
 vllm bench serve --help >/dev/null && echo "bench CLI ok"
 ```
+
+> 2026-11-20 实测（实例 `61674313`）：L4 23034 MiB、driver 595.99.02、torch 2.14.0+cu130、`torch.version.cuda=13.0`、compute capability `(8, 9)`、24 vCPU / 125GB RAM。`python` 不存在，所有命令用 `python3`。
 
 检查今天要用的 flag 是否存在（版本不对就换镜像，不要盲目 `pip install -U vllm`）：
 
 ```bash
-vllm serve --help | grep -E "enable-per-request-metrics|no-enable-prefix-caching"
-vllm bench serve --help | grep -E "ignore-eos|metric-percentiles|percentile-metrics|save-detailed|goodput"
+# v0.34.0 的 help 按 ConfigGroup 分组，--help 只显示目录；必须加 =all
+vllm serve --help=all | grep -E "enable-per-request-metrics|prefix-caching"
+vllm bench serve --help=all | grep -E "ignore-eos|metric-percentiles|percentile-metrics|save-detailed|goodput"
 ```
+
+> 2026-11-20 在 `v0.34.0` 上实测：上面这些 flag 都存在；`--enable-per-request-metrics` 和 `--disable-per-request-metrics` 是成对出现的，默认关闭。用 `--help` 不加 `=all` 会 grep 不到任何东西，不要误判成版本太旧。
 
 设置环境变量：
 
 ```bash
 export HF_HOME=/workspace/hf
 export HF_HUB_ENABLE_HF_TRANSFER=1
-export VLLM_VERSION=$(python -c "import vllm; print(vllm.__version__)")
+export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
 mkdir -p /workspace/hf /workspace/results
 ```
 
@@ -206,7 +213,7 @@ mkdir -p /workspace/hf /workspace/results
 
 ```bash
 pip install -q hf_transfer
-python - <<'PY'
+python3 - <<'PY'
 from huggingface_hub import snapshot_download
 snapshot_download("Qwen/Qwen3-8B-AWQ")
 PY
@@ -490,6 +497,9 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | `ssh://root@host:port: No such file or directory` | 把 `ssh-url` 输出的 URI 直接粘进了 shell | 用 `ssh -i <私钥> -p <port> root@<host>` |
 | `Permission denied (publickey)` | 账号/实例里的公钥和本机私钥不配对；或本机没有默认 key 却没写 `-i` | `vastai attach ssh <id> "$(cat ~/.ssh/xxx.pub)"`；连接时显式 `-i`；`ssh -v` 看 offered key |
 | `Connection refused` / 超时 | 实例 `stopped` 或还在 `loading` | `vastai start instance <id>`；`vastai show instance <id>` 等到 `running` |
+| `python: command not found` | 镜像里只有 `python3` | 所有命令改用 `python3`；不要额外装 python |
+| `df: /workspace: No such file or directory` | 该镜像没有预建 `/workspace`，`/` 就是容器盘 | `mkdir -p /workspace`；用 `df -h /` 确认容量 |
+| `vllm ... --help \| grep` 什么都 grep 不到 | v0.34.0 的 help 按 ConfigGroup 分组 | 用 `--help=all`，不是版本缺 flag |
 | `search offers` 返回空 | 门槛太严，或 `duration` 单位写错（是天，不是小时） | 逐条放宽 `inet_down`/`reliability`；`duration>0.25` 表示 6 小时 |
 | `torch.OutOfMemoryError` / 启动就 OOM | `gpu-memory-utilization` 太高，或 `max-model-len` 太大 | 降到 0.85 → 0.80；`--max-model-len 4096` |
 | `CUDA error: no kernel image is available` | 镜像/vLLM 的 CUDA 与 driver 不匹配 | 换匹配的镜像 tag；先 `nvidia-smi` 看 driver 支持的 CUDA |
