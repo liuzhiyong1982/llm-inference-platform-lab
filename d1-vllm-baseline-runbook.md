@@ -38,7 +38,7 @@ Vast 是 marketplace，host 质量差异很大。挑 offer 的硬条件：
 |---|---|---|
 | 租用类型 | **On-demand** | interruptible 会被暂停/抢占，压测数字直接作废 |
 | Reliability | ≥ 98%，最好 ≥ 99% | 低信誉 host 会掉线、丢盘 |
-| Max CUDA | ≥ 12.1 | 低于这个 vLLM 镜像跑不起来 |
+| Max CUDA | ≥ 镜像的 `CUDA_VERSION`（`v0.34.0` 是 **13.0.2**，所以填 13.0） | Max CUDA 由 host driver 决定；镜像自带 CUDA runtime，runtime 不能高于这个上限 |
 | Inet down | ≥ 500 Mbps | 要下约 5GB 权重；太慢会拖掉半小时 |
 | Max Duration | > 6h | 别租 1 小时就到期的 offer |
 | 价格 | 记录实际 $/h | 同一张 L4 从 $0.10 到 $0.45 都有，不要按固定价算成本 |
@@ -66,7 +66,7 @@ key 存在 `~/.config/vastai/vast_api_key`，**不要提交进 git，也不要�
 
 ```bash
 vastai search offers -n \
-  'gpu_name=L4 num_gpus=1 rentable=true reliability>=0.98 cuda_vers>=12.1 inet_down>=500 disk_space>=40 duration>0.25' \
+  'gpu_name=L4 num_gpus=1 rentable=true reliability>=0.98 cuda_vers>=13.0 inet_down>=500 disk_space>=40 duration>0.25' \
   -o 'dph' --storage 40 --limit 20
 ```
 
@@ -78,12 +78,20 @@ vastai search offers -n \
 | `gpu_name=L4` | 精确匹配 L4；不要写成 `L40S` 或 `RTX_4090` |
 | `num_gpus=1` | 单卡；D1 只测单卡 |
 | `reliability>=0.98` | host 历史可用率 |
-| `cuda_vers>=12.1` | offer 卡上的 **Max CUDA**，不是 driver 当前版本 |
+| `cuda_vers>=13.0` | offer 卡上的 **Max CUDA**，由 host driver 推导（等于 `nvidia-smi` 右上角那行），不是装的 toolkit 版本 |
+| `driver_version>=580` | 可选；只有要规避已知 driver bug 或做精确复现时才加，平时用 `cuda_vers` 就够 |
 | `inet_down>=500` | Mbps，下载权重用 |
 | `disk_space>=40` | host 可用磁盘 GB；实际分配仍看 `--disk` |
 | `duration>0.25` | 单位是**天**，`0.25` = 6 小时 |
 | `-o 'dph'` | 按总价升序；字段加 `-` 后缀是降序 |
 | `--storage 40` | 让 `dph_total` 把 40GB 盘的小时费算进去 |
+
+> **driver 和 CUDA 的关系**：容器里的 vLLM 自带 CUDA runtime 和 PyTorch，host 只提供 driver。`cuda_vers`（Max CUDA）是 driver 能支持的最高 runtime 版本，所以它是「能不能跑」的天花板，不是镜像里装的版本。CUDA 11 起有 minor version compatibility（12.x runtime 能跑在支持 12.0 的 driver 上），但**不能跨大版本**。`v0.34.0` 镜像声明 `CUDA_VERSION=13.0.2`、`NVIDIA_REQUIRE_CUDA=cuda>=13.0`，所以 host 的 Max CUDA 必须 ≥ 13.0；driver 的具体版本号只在排查已知 bug 时才需要看。镜像已经拉到本地后可以这样核对：
+>
+> ```bash
+> docker image inspect vllm/vllm-openai:v0.34.0 \
+>   --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'CUDA_VERSION|NVIDIA_REQUIRE_CUDA'
+> ```
 
 2026-11-20 的 L4 行情快照（只用于判断量级，**租之前必须重新跑上面的命令**）：
 
@@ -151,7 +159,7 @@ export VLLM_VERSION=$(python -c "import vllm; print(vllm.__version__)")
 mkdir -p /workspace/hf /workspace/results
 ```
 
-> 版本不匹配是这一步最常见的坑：driver 太旧会在加载模型时报 CUDA error。记下 `nvidia-smi` 右上角的 CUDA Version；vLLM 镜像要求 ≥ 12.x。Vast 的 offer 卡上会写 `Max CUDA`，租之前就核对，别等进容器才发现。
+> 版本不匹配是这一步最常见的坑：driver 太旧会在加载模型时报 CUDA error。`nvidia-smi` 右上角的 CUDA Version 就是 offer 卡上的 **Max CUDA**；`v0.34.0` 镜像要求 ≥ **13.0**（镜像里是 13.0.2）。租之前就核对，别等进容器才发现。
 
 ---
 
@@ -445,6 +453,7 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 | `search offers` 返回空 | 门槛太严，或 `duration` 单位写错（是天，不是小时） | 逐条放宽 `inet_down`/`reliability`；`duration>0.25` 表示 6 小时 |
 | `torch.OutOfMemoryError` / 启动就 OOM | `gpu-memory-utilization` 太高，或 `max-model-len` 太大 | 降到 0.85 → 0.80；`--max-model-len 4096` |
 | `CUDA error: no kernel image is available` | 镜像/vLLM 的 CUDA 与 driver 不匹配 | 换匹配的镜像 tag；先 `nvidia-smi` 看 driver 支持的 CUDA |
+| `CUDA driver version is insufficient for CUDA runtime version` | host 的 Max CUDA 低于镜像的 `CUDA_VERSION` | destroy 换 host，或换更低 CUDA 的镜像 tag；**不要在容器里装 driver** |
 | `Connection refused` | 服务还在加载模型（8B AWQ 约 30–90 秒） | 看 Terminal A 日志等到 `Uvicorn running` |
 | `404 model not found` | `--served-model-name` 和请求里的 `model` 不一致 | 统一用 `qwen3-8b` |
 | smoke test 返回一堆 thinking | Qwen3 默认 `enable_thinking=True` | prompt 加 `/no_think`，或 `chat_template_kwargs: {"enable_thinking": false}` |
