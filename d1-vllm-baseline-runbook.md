@@ -24,7 +24,7 @@
 
 ---
 
-## 1. 前置检查（10 分钟）
+## 1. 租机器 + 前置检查（30 分钟）
 
 - [ ] Vast.ai 账号已充值；预算上限 **$15**（Vast 是预付费，余额见底会自动停实例）
 - [ ] GPU：**NVIDIA L4 24GB**，租 **on-demand**，不要 interruptible
@@ -43,7 +43,88 @@ Vast 是 marketplace，host 质量差异很大。挑 offer 的硬条件：
 | Max Duration | > 6h | 别租 1 小时就到期的 offer |
 | 价格 | 记录实际 $/h | 同一张 L4 从 $0.10 到 $0.45 都有，不要按固定价算成本 |
 
-镜像用 `vllm/vllm-openai:<tag>`（tag 与要跑的 vLLM 版本一致）。在 Vast 上把启动方式设为 **SSH / Jupyter**，或把 entrypoint 覆盖成 `/bin/bash`——这个镜像默认 entrypoint 会直接尝试起 server，没参数就退出，容器会反复重启。
+### 1.1 装 CLI、配 API key
+
+网页 UI 的默认列表按热门卡排序，满屏是 RTX 4090/5090；**L4 不属于 RTX 分类**，它是 Ada 数据中心卡。UI 的 GPU 筛选框要直接输入 `L4`，而且默认搜索带 `verified=true`，会把大量 L4 host 藏掉。所以用 CLI 更可靠。
+
+```bash
+pip install -q vastai
+vastai --version          # 2026-11 实测 1.11.2
+```
+
+> 安装时出现 `~rllib3` / `~equests` 临时目录删除失败、`conda-libmamba-solver requires conda>=24.11` 的报错都可以忽略——前者是 pip 残留，后者是环境里既有的 conda 版本冲突，和 vastai 无关。只要 `vastai --version` 有输出就算成功。
+
+API key 在 <https://cloud.vast.ai/manage-keys/> 生成，然后：
+
+```bash
+vastai set api-key <你的key>
+```
+
+key 存在 `~/.config/vastai/vast_api_key`，**不要提交进 git，也不要贴到聊天/issue 里**。
+
+### 1.2 搜 L4
+
+```bash
+vastai search offers -n \
+  'gpu_name=L4 num_gpus=1 rentable=true reliability>=0.98 cuda_vers>=12.1 inet_down>=500 disk_space>=40 duration>0.25' \
+  -o 'dph' --storage 40 --limit 20
+```
+
+每个字段对应上面的门槛：
+
+| 参数 | 含义 |
+|---|---|
+| `-n` | 去掉默认 query；默认带 `verified=true`，会把 unverified 的 L4 host 过滤掉 |
+| `gpu_name=L4` | 精确匹配 L4；不要写成 `L40S` 或 `RTX_4090` |
+| `num_gpus=1` | 单卡；D1 只测单卡 |
+| `reliability>=0.98` | host 历史可用率 |
+| `cuda_vers>=12.1` | offer 卡上的 **Max CUDA**，不是 driver 当前版本 |
+| `inet_down>=500` | Mbps，下载权重用 |
+| `disk_space>=40` | host 可用磁盘 GB；实际分配仍看 `--disk` |
+| `duration>0.25` | 单位是**天**，`0.25` = 6 小时 |
+| `-o 'dph'` | 按总价升序；字段加 `-` 后缀是降序 |
+| `--storage 40` | 让 `dph_total` 把 40GB 盘的小时费算进去 |
+
+2026-11-20 的 L4 行情快照（只用于判断量级，**租之前必须重新跑上面的命令**）：
+
+| offer id | 地区 | $/h | reliability | inet down | Max CUDA | 可用磁盘 | 最长天数 |
+|---|---|---|---|---|---|---|---|
+| 49589443 | Hong Kong | 0.104 | 98.6% | 106 Mbps | 13.4 | 286 GB | 29 |
+| 58330911 | Japan | 0.104 | 98.0% | 61 Mbps | 13.4 | 302 GB | 19 |
+| **59651491** | **California** | **0.252** | **98.9%** | **768 Mbps** | **13.2** | **1003 GB** | **17** |
+| 57462232 | Texas | 0.350 | 98.5% | 912 Mbps | 13.2 | 427 GB | 15 |
+| 57478835 | Arizona | 0.350 | 98.5% | 912 Mbps | 13.2 | 450 GB | 15 |
+| 58034037 | Utah | 0.431 | 98.5% | 938 Mbps | 13.2 | 236 GB | 26 |
+
+香港/日本那两台 $0.104 的因为 `inet_down` 只有 61–106 Mbps，会被 `inet_down>=500` 过滤掉——省下的几毛钱不值得拿下载时间和邻居噪声去换。
+
+### 1.3 创建实例
+
+```bash
+vastai create instance <offer_id> \
+  --image vllm/vllm-openai:v0.34.0 \
+  --disk 40 \
+  --ssh \
+  --env '-p 8000:8000' \
+  --label d1-l4-baseline
+```
+
+- **默认就是 on-demand**；只有加 `--bid_price` 才会变成 interruptible。基线跑绝对不要加。
+- `--disk 40`：容器盘创建后不能扩容，一开始就给够。
+- `--ssh`：以 SSH 方式启动，避开 `vllm/vllm-openai` 默认 entrypoint 无参数直接退出、容器反复重启的问题。仍然反复重启时再加 `--entrypoint /bin/bash`。
+- `--env '-p 8000:8000'`：端口映射；只在实例内压测可以不写，但写了方便从本地 smoke test。
+- 镜像用固定 tag，不要 `latest`：`latest` 指向 nightly，flag 会漂、基线不可复现。2026-11 的 stable 是 `v0.34.0`；如果 `vllm bench serve --help` 缺 1.5 节要查的 flag，再换 tag。
+
+### 1.4 连上实例
+
+```bash
+vastai show instances          # 看 status 是否 running
+vastai ssh-url <instance_id>   # 给出 ssh 命令/端口
+vastai scp-url <instance_id>   # scp 用的 host:port
+vastai logs <instance_id>      # 起不来时先看这个
+```
+
+### 1.5 进容器后的 preflight
 
 进容器后先跑：
 
@@ -357,6 +438,11 @@ GPU util 的取法：在 `gpu_util.csv` 里取每轮压测窗口的 `utilization
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
+| 网页 UI 只看到 4090/5090，找不到 L4 | L4 是数据中心卡，不在 RTX 分类；默认搜索还带 `verified=true` | GPU 筛选框直接输入 `L4`；或用 1.2 节的 CLI 命令（`-n` 去掉默认条件） |
+| `vastai: command not found` | 没装，或 conda 的 bin 不在 PATH | `pip install vastai`；确认 `which vastai`；临时可用 `python -m vastai` |
+| 装 vastai 报 `~rllib3` / `conda-libmamba-solver` 冲突 | pip 残留 + 既有 conda 版本冲突，与 vastai 无关 | 忽略；`vastai --version` 有输出即成功 |
+| `401` / `Invalid API key` | key 没设或已失效 | 重新生成后 `vastai set api-key <key>` |
+| `search offers` 返回空 | 门槛太严，或 `duration` 单位写错（是天，不是小时） | 逐条放宽 `inet_down`/`reliability`；`duration>0.25` 表示 6 小时 |
 | `torch.OutOfMemoryError` / 启动就 OOM | `gpu-memory-utilization` 太高，或 `max-model-len` 太大 | 降到 0.85 → 0.80；`--max-model-len 4096` |
 | `CUDA error: no kernel image is available` | 镜像/vLLM 的 CUDA 与 driver 不匹配 | 换匹配的镜像 tag；先 `nvidia-smi` 看 driver 支持的 CUDA |
 | `Connection refused` | 服务还在加载模型（8B AWQ 约 30–90 秒） | 看 Terminal A 日志等到 `Uvicorn running` |
@@ -393,7 +479,11 @@ git commit -m "D1: vLLM baseline on L4 (concurrency 1/4/16/64)"
 git push
 ```
 
-**结果必须拉回本地，不能只留在实例盘。** 在本地机器执行（SSH 端口和主机从 Vast 实例页抄）：
+**结果必须拉回本地，不能只留在实例盘。** 先拿连接信息，再在本地机器执行：
+
+```bash
+vastai scp-url <instance_id>    # 输出 ssh/scp 用的 host 和端口，以它为准
+```
 
 ```bash
 scp -P <ssh_port> -r root@<host>:/workspace/results ./results
@@ -431,6 +521,8 @@ scp -P <ssh_port> root@<host>:/workspace/vllm.log ./vllm.log
 
 Vast 是 marketplace 定价：L4 on-demand 大约 **$0.10–0.45/h**，常见 $0.25–0.35/h；存储按 GB/小时、带宽按 TB 单独计费，host 之间差异很大。
 
+2026-11-20 实测：同时满足 reliability ≥ 98%、inet down ≥ 500 Mbps 的 L4 单卡最低 **$0.252/h**（加州，`--storage 40` 后约 $0.26–0.27/h），所以 4h 实际约 **$1.1**，比按 $0.35/h 估的还低。
+
 按 $0.35/h × 4h ≈ **$1.4/天**；加诊断/重复跑约 **$2**。$15 预算够 D1–D2，但**别让实例 Stop 着放一个月**——40GB 存储挂一个月的费用可能超过重新下模型。
 
 ## 参考
@@ -439,5 +531,8 @@ Vast 是 marketplace 定价：L4 on-demand 大约 **$0.10–0.45/h**，常见 $0
 - vLLM serve CLI：<https://docs.vllm.ai/en/latest/cli/serve/>
 - Qwen3-8B-AWQ 模型卡：<https://huggingface.co/Qwen/Qwen3-8B-AWQ>
 - Vast.ai 计费：<https://docs.vast.ai/guides/instances/pricing>
+- Vast.ai 找机器/租实例：<https://docs.vast.ai/guides/instances/choosing/find-and-rent>
+- Vast.ai `search offers` 参考：<https://docs.vast.ai/api-reference/search/search-offers>
 - Vast.ai 存储类型：<https://docs.vast.ai/guides/instances/storage/types>
+- vLLM 镜像 tag 列表：<https://hub.docker.com/r/vllm/vllm-openai/tags>
 - Vast.ai 实例类型（on-demand vs interruptible）：<https://docs.vast.ai/guides/instances/choosing/instance-types>
