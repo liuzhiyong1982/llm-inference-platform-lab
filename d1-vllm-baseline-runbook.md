@@ -445,6 +445,8 @@ echo $! > /workspace/gpu_smi.pid
 
 如果 `clocks.sm` 报错，删掉这一列重跑；至少保留 utilization/memory/power/temp。
 
+**这个窗口不要关**：`nvidia-smi` 虽然是后台进程，但关闭 tmux window 会向它发 SIGHUP，采样会静默停止。要么留着这个窗口，要么启动时改成 `nohup nvidia-smi ... &`。
+
 ### 5.2 Warmup（丢弃，不计入结果）
 
 ```bash
@@ -473,6 +475,12 @@ vllm bench serve \
 ### 5.3 四轮基线（Terminal C）
 
 `--num-prompts` 按并发调整：c=1/4 用较少样本省时间；c=16/64 需要更多样本，否则 P99 没有统计意义。
+
+新 tmux 窗口不会继承 §1.5 的 `export`，跑循环前先补上，否则 JSON 的 metadata 里 `vllm=` 是空的：
+
+```bash
+export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+```
 
 ```bash
 # 目的：进 /workspace，结果 JSON 统一写到 ./results
