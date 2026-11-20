@@ -100,6 +100,19 @@ vastai search offers -n \
 >   --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'CUDA_VERSION|NVIDIA_REQUIRE_CUDA'
 > ```
 
+**例：加州那台 `59651491` 为什么能跑**
+
+| 层 | 值 | 从哪看 |
+|---|---|---|
+| GPU | L4，sm_89 | `nvidia-smi` 的型号；compute capability 查 NVIDIA 表 |
+| driver 的 Max CUDA | 13.2 | offer 卡的 Max CUDA；进容器后是 `nvidia-smi` 右上角 |
+| 镜像 CUDA runtime | 13.0.2 | `CUDA_VERSION` |
+| torch 编译用的 CUDA | 13.0 | `torch.version.cuda` |
+
+判断：`13.0.2 ≤ 13.2`、同为 13 大版本，且 sm_89 在 `TORCH_CUDA_ARCH_LIST` 里 → 能跑。这里 `13.0.2` 和 `13.2` 不是同一个东西：前者是镜像里的 runtime 版本，后者是 host driver 支持的上限；`.0.2` 是 toolkit 的 patch 号，`13.0.96-1` 则是 cudart 包的编号，不要混着比。
+
+反例：同一台 L4，如果 driver 只到 Max CUDA **12.4**，镜像还是 `v0.34.0`（runtime 13.0.2）→ 13.0 > 12.4 且跨大版本，容器启动时会被 `NVIDIA_REQUIRE_CUDA=cuda>=13.0` 拦下，或者加载时报 `CUDA driver version is insufficient for CUDA runtime version`。处置：换 `cuda_vers>=13.0` 的 host，或换 cu124 的镜像 tag；**不要在容器里 `pip install` 降级 torch**。
+
 2026-11-20 的 L4 行情快照（只用于判断量级，**租之前必须重新跑上面的命令**）：
 
 | offer id | 地区 | $/h | reliability | inet down | Max CUDA | 可用磁盘 | 最长天数 |
