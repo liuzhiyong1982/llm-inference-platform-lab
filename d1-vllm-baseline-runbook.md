@@ -970,6 +970,120 @@ Vast 是 marketplace 定价：L4 on-demand 大约 **$0.10–0.45/h**，常见 $0
 
 按 $0.35/h × 4h ≈ **$1.4/天**；加诊断/重复跑约 **$2**。$15 预算够 D1–D2，但**别让实例 Stop 着放一个月**——40GB 存储挂一个月的费用可能超过重新下模型。
 
+## 附：指标口径与计算
+
+vLLM bench 内部用**秒**记录延迟，输出到终端/JSON 时乘 1000 变成 ms。例外：`server_queue_times`、`server_ttfts` 在 JSON 里仍是秒，`duration` 也是秒。
+
+### 1. 单请求指标
+
+| 指标 | 定义 | 计算 |
+|---|---|---|
+| TTFT | 请求发出到首 token | 直接记录（秒→ms） |
+| ITL | 相邻流式 chunk 的间隔 | 每次 gap；标准解码 1 token/chunk，所以 ITL≈TPOT；投机解码一个 chunk 可能多个 token，ITL 只记 chunk 间隔 |
+| TPOT | 每个输出 token 的时间（不含首 token） | `(e2el - ttft) / (output_tokens - 1)`；`output_tokens = 1` 时按 0 |
+| E2EL | 端到端延迟 | 请求发出到完整响应 |
+
+### 2. 聚合指标
+
+| 指标 | 计算 | JSON 字段 |
+|---|---|---|
+| request throughput | `completed / duration` | `request_throughput` |
+| output throughput | `sum(output_tokens) / duration` | `output_throughput` |
+| total token throughput | `(total_input_tokens + total_output_tokens) / duration` | `total_token_throughput` |
+| goodput | `good_completed / duration` | `request_goodput`（没配 `--goodput` 时为 `null`） |
+| 达标比例 | `goodput / request_throughput` | 自己算 |
+| 百分位 | 对 per-request 数组做 `np.percentile` | `p50_*` / `p95_*` / `p99_*` |
+| 均值/中位数/标准差 | 对 per-request 数组 | `mean_*` / `median_*` / `std_*` |
+
+`duration` 是 benchmark 的**墙钟时长**：从开始压测到最后一条请求结束，包含 ramp-up、排队和尾部，不是所有请求延迟之和。`completed` 只算成功请求，失败的不进分子。
+
+### 3. Goodput 的计算
+
+```
+good_completed = 满足【所有】SLO 的成功请求数
+goodput        = good_completed / duration          # req/s
+达标比例       = goodput / request_throughput
+```
+
+单请求判定是逐条 **AND**：
+
+```
+ttft <= SLO_ttft  且  tpot <= SLO_tpot   （若配了 e2el 也要满足）
+```
+
+`--goodput ttft:2000 tpot:100` 的值是毫秒，代码内部除以 1000 转成秒。所以 SLO 是 `ttft <= 2.0s` 且 `tpot <= 0.1s`。
+
+用 D1 的四个 JSON 反算：
+
+| c | completed | duration (s) | good 条数 | goodput = good/duration | request_throughput | 达标比例 |
+|---|---|---|---|---|---|---|
+| 1 | 100 | 1,305.291 | 100 | 100 / 1,305.291 = **0.076611** | 0.076611 | 100% |
+| 4 | 200 | 862.915 | 50 | 50 / 862.915 = **0.057943** | 0.231773 | 25% |
+| 16 | 500 | 1,143.871 | 1 | 1 / 1,143.871 = **0.000874** | 0.437112 | 0.2% |
+| 64 | 1,000 | 1,927.376 | 0 | 0 / 1,927.376 = **0** | 0.518840 | 0% |
+
+失败原因拆开看（TTFT 和 TPOT 各自是否超标）：
+
+| c | 都达标 | 只有 TTFT 超标 | 只有 TPOT 超标 | 两个都超标 |
+|---|---|---|---|---|
+| 1 | 100 | 0 | 0 | 0 |
+| 4 | 50 | 150 | 0 | 0 |
+| 16 | 1 | 5 | 31 | 463 |
+| 64 | 0 | 0 | 3 | 997 |
+
+c=4 的 25% 就是这么来的：200 条里 150 条 TPOT 合格但 TTFT > 2s，整条不算。c=16 只剩 1 条：TTFT 和 TPOT 同时达标的极少。
+
+单条请求的例子：
+
+| 点 | TTFT | TPOT | TTFT ≤2s | TPOT ≤100ms | 算达标 |
+|---|---|---|---|---|---|
+| c=4 #1 | 895 ms | 63.2 ms | ✅ | ✅ | ✅ |
+| c=4 #2 | 2,839 ms | 55.8 ms | ❌ | ✅ | ❌ |
+| c=16 #1 | 879 ms | 131.4 ms | ✅ | ❌ | ❌ |
+| c=64 #1 | 895 ms | 434.8 ms | ✅ | ❌ | ❌ |
+
+可以自己复算：
+
+```python
+import json
+
+d = json.load(open("results/d1-c4-20261120-190221.json"))
+good = 0
+for ttft, e2el, out in zip(d["ttfts"], d["latencies"], d["output_lens"]):
+    tpot = (e2el - ttft) / (out - 1) if out > 1 else 0.0
+    good += (ttft <= 2.0 and tpot <= 0.1)   # bool 相加就是计数
+print(good, good / d["duration"], d["request_goodput"])
+```
+
+### 4. 百分位与均值
+
+- `P50` 就是中位数；`mean` 和 `median` 不一定相等（c=4 的 mean TTFT 2,348ms < P50 2,914ms，分布左偏）。
+- `P99` 是排序后的第 99 百分位，不是“最慢的那条”，也不等于最大值。
+- 百分位是**逐指标**算的：TTFT 的 P99 和 TPOT 的 P99 来自不同的请求。
+- **百分位不能相加**：`queue P99 + prefill P99` 不等于 `(queue+prefill) P99`；要先把同一请求的两项相加，再对和算 P99。
+
+### 5. GPU 与服务端指标
+
+- `utilization.gpu`：采样窗口内有 kernel 在跑的时间占比，**不是 SM 占用率**。100% 只说明“一直有活干”，不说明效率高；功耗墙下会看到 100% + 低 clock。
+- 采样：`nvidia-smi` 每秒一次；每轮的 util 取该轮 `[date - duration, date]` 窗口内的均值和 P95。
+- `power.draw` / `power.limit` / `clocks.sm`：判断是否被功耗墙限制；`SW Power Cap: Active` 就是限功耗。
+- `vllm:num_preemptions_total`：Prometheus counter，压测前后相减；>0 说明 KV cache 不够，序列被换出/重算。
+- `server_queue_times`（秒）：服务端调度排队，请求还没被调度。
+- `server_ttfts`（秒）：从被调度到首 token，包含 chunked prefill 的多步调度。
+- 同一请求：`client_ttft ≈ server_queue + server_ttft + 前端/网络/tokenization`。残差不要硬塞进 prefill。
+
+### 6. 常见误读
+
+| 误读 | 正确理解 |
+|---|---|
+| goodput 是百分比 | 是 req/s；百分比要除以 request_throughput |
+| goodput 从 P95 算 | 逐请求 AND 判定，和百分位无关 |
+| output tok/s 包含 prefill | 不包含；total token throughput 才包含输入 |
+| TTFT 就是 prefill 时间 | 闭路压测里还包含服务端排队 |
+| P99 可以相加 | 先逐请求相加，再对和算 P99 |
+| duration 是延迟之和 | 是墙钟时长，包含排队和尾部 |
+| mean 等于 P50 | 不一定；分布偏斜时会差很多 |
+
 ## 附：KV cache 与并发估算
 
 以 Qwen3-8B（36 层、8 个 KV head、head_dim 128、FP16 KV）为例：
@@ -997,24 +1111,7 @@ vLLM 日志里的两个数：
 
 **这三个“最大并发”要分清**：KV 上限（71）、服务端 batch 上限（64）、SLO 安全并发（见下）。
 
-Goodput 是“满足 SLO 的请求速率”，不是百分比。vLLM 的算法（`vllm/benchmarks/serve.py`）：
-
-```
-good_completed = 满足【所有】SLO 的成功请求数
-request_goodput = good_completed / benchmark_duration   # req/s，和 request_throughput 同一分母
-达标比例 = request_goodput / request_throughput
-```
-
-单请求的 SLO 判定是逐条 AND：`ttft <= SLO_ttft` 且 `tpot <= SLO_tpot`（若配了 e2el 也要满足）。TPOT 按 `(e2el - ttft) / (output_tokens - 1)` 算；output=1 时按 0 处理。所以 goodput 是“逐请求严格达标”，不是“P95 达标 × 吞吐”。
-
-| c | request_throughput | goodput | 达标比例 | TTFT P50 | TPOT P95 |
-|---|---|---|---|---|---|
-| 1 | 0.0766 | 0.0766 | 100% | 1,038 ms | 47.4 ms |
-| 4 | 0.2318 | 0.0579 | 25% | 2,914 ms | 63.2 ms |
-| 16 | 0.4371 | 0.00087 | 0.2% | 3,222 ms | 137.0 ms |
-| 64 | 0.5190 | 0 | 0% | 7,033 ms | 469.7 ms |
-
-SLO 是 TTFT ≤ 2,000 ms 且 TPOT ≤ 100 ms。c=1 全部达标；c=4 只有 25%（TTFT 先崩）；c=16 起 TPOT 也超了。所以这台 40W L4 的“SLO 安全容量”约 **0.077 req/s**，对应 c≈1–4，而不是 KV 上限 71。换 SLO（比如只看 P95、把 TPOT 放宽到 150ms）容量会变，必须写清口径。
+Goodput 的定义、逐条判定和完整计算示例见上一节。这里只记结论：SLO 是 TTFT ≤ 2,000 ms 且 TPOT ≤ 100 ms，c=1 全部达标、c=4 25%、c=16 0.2%、c=64 0%，所以这台 40W L4 的 SLO 安全容量约 **0.077 req/s**（c=1），而不是 KV 上限 71。换 SLO（比如只看 P95、TPOT 放宽到 150ms）容量会变，必须写清口径。
 
 ## 参考
 
