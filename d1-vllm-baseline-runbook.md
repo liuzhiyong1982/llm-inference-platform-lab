@@ -197,6 +197,19 @@ ssh -i ~/.ssh/<你的私钥> -p 34388 root@ssh8.vast.ai
 > tmux attach -t ssh_tmux
 > ```
 >
+> 清理多余窗口/会话时注意别杀掉 vLLM：
+>
+> ```bash
+> exit                             # 关掉当前空闲窗口（最安全）
+> # 或 Ctrl-b & 然后按 y          # 关当前窗口
+> tmux kill-session -t <name>      # 关指定会话
+> tmux kill-session -a             # 关掉除当前会话外的所有
+> tmux list-clients -t ssh_tmux    # 多个 SSH 是 client，不是 session
+> tmux detach-client -t /dev/pts/N # 踢掉某个 client，不影响会话
+> ```
+>
+> **不要用 `tmux kill-server`**，它会把 `ssh_tmux` 和里面的 vLLM 一起杀掉。vLLM 通常在 window 0，关窗口前先 `Ctrl-b 0` 确认。
+>
 > 想禁用自动 tmux（每个 SSH 独立 shell，但断线会杀前台进程）：`touch ~/.no_auto_tmux` 后重连。长压测不要禁用。
 
 ```bash
