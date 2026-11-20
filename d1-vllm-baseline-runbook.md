@@ -561,15 +561,40 @@ for C in 1 4 16 64; do
 done
 ```
 
-关键 flag 说明：
+D1 用到的 flag 逐项解释：
 
-- `--tokenizer Qwen/Qwen3-8B-AWQ`：`--model qwen3-8b` 只是请求里的 served name，bench 加载 tokenizer 时需要真实 repo；不写会报 `OSError: qwen3-8b is not a local folder and is not a valid model identifier`。
-- `--ignore-eos`：强制生成到 `--random-output-len`，否则模型提前 EOS，output tok/s 和 TPOT 不可比。
-- `--metric-percentiles 50,95,99`：默认只报 P99；README 表要 P50/P95，必须显式加。
-- `--percentile-metrics ttft,tpot,itl,e2el`：把 TPOT/ITL/E2EL 的百分位也输出。
-- `--goodput ttft:2000 tpot:100`：暂定 SLO（TTFT ≤ 2s、TPOT ≤ 100ms）；如果 L4 上太严/太松，D2 再调，但 D1 要固定口径。若当前版本不认识 `--goodput`，删掉这一行，goodput 后面用 per-request 数据补算。
-- `--seed "$C"`：每轮换 prompt，避免重复数据集命中 prefix cache。
-- `--save-detailed`：保留 per-request 数组，后面写 writeup 可复算；文件会比较大，但 4 个点可接受。
+| flag | 我们传的值 | 作用 | 注意 |
+|---|---|---|---|
+| `--backend` | `openai` | 用 OpenAI 兼容 HTTP 客户端打服务端；其他可选 `vllm` 原生、`openai-chat`、embeddings 等 | 选错 backend 会打错 endpoint |
+| `--endpoint` | `/v1/completions` | 请求路径；random 数据集直接发 token IDs，不经过 chat template | chat 模型要用 `/v1/chat/completions`，D1 刻意不用 |
+| `--host` | `127.0.0.1` | 服务地址；实例内回环，避免公网 RTT 污染 | 不要填 Vast 公网 host |
+| `--port` | `8000` | 服务端口，与 `vllm serve --port` 一致 | |
+| `--model` | `qwen3-8b` | 请求体里的 `model` 字段，必须匹配 `--served-model-name` | 不匹配 404；它还会被当作默认 tokenizer 来源 |
+| `--tokenizer` | `Qwen/Qwen3-8B-AWQ` | 加载 tokenizer 的 HF repo 或本地路径，用于编码 prompt、统计 token 数 | 不写会拿 `qwen3-8b` 去 HF 找，报 `not a local folder` |
+| `--dataset-name` | `random` | 随机 token ID 数据集，长度可控、无需下载数据 | 只适合测性能，不能代表真实文本分布 |
+| `--random-input-len` | `1024` | 每条请求的输入 token 数（固定） | 四个并发点必须一致，否则不可比 |
+| `--random-output-len` | `256` | 每条请求的输出 token 数 | 需配合 `--ignore-eos` 才能精确生成 256 |
+| `--num-prompts` | `100/200/500/1000` | 这一轮总共发多少条 | 不是并发；和 `c` 区分 |
+| `--max-concurrency` | `1/4/16/64` | 同时在飞的请求上限（并发档位） | 闭路：有空位才发下一条；不是 GPU batch size |
+| `--ignore-eos` | 开关 | 请求里带 `ignore_eos`，强制生成到 output-len，不被 EOS 截断 | 否则 output tok/s、TPOT 不可比 |
+| `--seed` | `$C` | 控制随机 prompt 采样；每轮换 seed 避免命中 prefix cache | 同 seed 可复现同一批 prompt |
+| `--percentile-metrics` | `ttft,tpot,itl,e2el` | 指定哪些指标输出百分位 | 不写就只报默认指标 |
+| `--metric-percentiles` | `50,95,99` | 指定百分位点 | 默认只有 P99；README 要 P50/P95 |
+| `--goodput` | `ttft:2000 tpot:100` | 定义 SLO（毫秒），统计同时满足 TTFT ≤ 2000 且 TPOT ≤ 100 的请求 | 允许的 key 是 `ttft`/`tpot`/`e2el`；太严会得到 0 |
+| `--save-result` | 开关 | 把汇总结果写成 JSON | 不加只在终端看，无法归档 |
+| `--save-detailed` | 开关 | JSON 里保留 per-request 数组（`ttfts`、`tpot`、`itls`、`latencies` 等） | 文件大，但复算 P99/画图靠它 |
+| `--result-dir` | `./results` | 结果输出目录 | 相对路径基于当前 cwd；我们在 `/workspace` 下跑 |
+| `--result-filename` | `d1-c${C}-时间戳.json` | 输出文件名，带并发和时间戳避免覆盖 | 重复跑加 `-run2` |
+| `--metadata` | `gpu=... vllm=...` | 任意 key=value 写进 JSON，做实验溯源 | 新 shell 里 `VLLM_VERSION` 可能为空，先 export |
+
+本次没用、但值得知道的 flag：
+
+- `--request-rate`：默认 `inf`，即闭路压测；给有限值会按到达率发请求（配合 `--burstiness` 控制 Poisson/均匀）。
+- `--temperature`：v0.34 **不再默认 0**，服务端会用自己的默认值。本次四轮都没显式设，所以横向可比；**跨次复现要加 `--temperature 0`**。
+- `--num-warmups`：bench 内置的预热条数；我们用单独的 §5.2 代替。
+- `--disable-tqdm`：关进度条，脚本日志更干净。
+- `--append-result`：追加到已有 JSON，适合分段跑。
+- `--label` / `--base-url` / `--header` / `--extra-body`：结果标签、直连 URL、自定义 header、额外请求体。
 
 每轮之间等 30 秒；不要连续压，否则队列没排空会污染下一轮。若 `vllm:num_preemptions_total` 取不到，用 `grep -c "PreemptionMode" /workspace/vllm.log` 记录增量。
 
