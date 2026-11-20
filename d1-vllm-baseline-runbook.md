@@ -570,6 +570,16 @@ done
 
 所以它测的是“固定长度下的计算性能”，不代表真实文本分布，也没有天然的共享前缀；要测 prefix cache 得显式加 `--random-prefix-len`。
 
+数据集怎么选：
+
+| `--dataset-name` | 内容 | 适合 | 代价 |
+|---|---|---|---|
+| `random` | 合成定长 token 序列 | 吞吐/延迟基线、并发对比 | 分布不真实、默认无共享前缀 |
+| `sharegpt` | 真实多轮对话 | 真实长度分布、prefix 复用 | 需下载、长度不可控、样本可能不够 |
+| `hf` / `custom` | 自有数据或 HF 数据集 | 贴近业务流量 | 要准备数据、定义长度口径 |
+
+`--random-range-ratio` 默认 `0.0`（长度完全固定）；调大后长度在均值附近波动，更接近真实流量，但四个并发点的可比性会变差。D1 固定为 0。
+
 D1 用到的 flag 逐项解释：
 
 | flag | 我们传的值 | 作用 | 注意 |
@@ -606,6 +616,10 @@ D1 用到的 flag 逐项解释：
 - `--label` / `--base-url` / `--header` / `--extra-body`：结果标签、直连 URL、自定义 header、额外请求体。
 
 每轮之间等 30 秒；不要连续压，否则队列没排空会污染下一轮。若 `vllm:num_preemptions_total` 取不到，用 `grep -c "PreemptionMode" /workspace/vllm.log` 记录增量。
+
+**“抢占”（preemption）是什么**：vLLM 的 KV cache 是固定大小的块池。当新请求要不到空闲块时，调度器会把**已经在跑**的某条序列的 KV 块收走腾地方：要么丢弃、之后重算（recompute），要么换到 CPU 再换回来（swap）。被抢占的请求会多出重算/搬运开销，表现为 ITL/TTFT 尖峰。所以 `num_preemptions_total` 的增量 > 0 是 KV cache 压力的直接信号。
+
+它和 Vast 的 interruptible 实例被 host 暂停**不是一回事**：前者是 vLLM 内部的显存调度，后者是整台实例被 marketplace 抢占。D1 里 c=64 的 KV 需求约 `64 × (1024+256) = 81,920` tokens，小于 91,648 的 KV 容量，所以预期抢占为 0。
 
 ### 5.4 如果还有时间：重复 c=16/64
 
