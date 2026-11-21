@@ -979,11 +979,67 @@ vLLM bench 内部用**秒**记录延迟，输出到终端/JSON 时乘 1000 变�
 | 指标 | 全称 | 定义 | 计算 |
 |---|---|---|---|
 | TTFT | Time To First Token | 请求发出到首 token | 直接记录（秒→ms） |
-| ITL | Inter-Token Latency | 相邻流式 chunk 的间隔 | 每次 gap；标准解码 1 token/chunk，所以 ITL≈TPOT；投机解码一个 chunk 可能多个 token，ITL 只记 chunk 间隔 |
+| ITL | Inter-Token Latency | 相邻流式 chunk 的间隔 | 每次 gap；1 token/chunk 时单请求 `mean(ITL) = TPOT`，聚合口径见 §1.1；投机解码一个 chunk 可能多个 token，ITL 只记 chunk 间隔 |
 | TPOT | Time Per Output Token | 每个输出 token 的时间（不含首 token） | `(e2el - ttft) / (output_tokens - 1)`；`output_tokens = 1` 时按 0 |
 | E2EL | End-to-End Latency | 端到端延迟 | 请求发出到完整响应 |
 
-别名：ITL 在某些工具里叫 **TBT**（Time Between Tokens）；E2EL 常简写 **E2E**。TPOT 与 ITL 的单位都是 ms/token，但统计对象不同——TPOT 是整条请求摊薄，ITL 是相邻 chunk 的瞬时间隔，所以同一请求的 P99 不一定相等。
+别名：ITL 在某些工具里叫 **TBT**（Time Between Tokens）；E2EL 常简写 **E2E**。
+
+### 1.1 TPOT 和 ITL 到底差在哪
+
+**先给结论：单条请求内，TPOT 就是这条请求所有 ITL 的算术平均。** 你觉得“一样”是对的。vLLM 在收到首 token 后，把每个后续 chunk 的间隔 append 进 `itl`，并把 `latency` 记成最后一个 chunk 的时间，所以恒有：
+
+```
+sum(itl) = e2el - ttft
+tpot     = (e2el - ttft) / (output_tokens - 1) = mean(itl)    # 1 token/chunk 时
+```
+
+D1 的 7 个 JSON 都能验证：逐条请求 `mean(itl)` 与 TPOT 的最大差 < 1e-6 ms。
+
+**差别不在单条请求，而在聚合层级：**
+
+| | ITL | TPOT |
+|---|---|---|
+| 样本单位 | 每个 token gap 一个样本 | 每条请求一个数（先对 255 个 gap 求平均） |
+| 样本数 | N × 255 | N |
+| 百分位含义 | “所有 decode step 里最慢的 1% 有多慢” | “平均 decode 速度最慢的 1% 请求有多慢” |
+| 对尖峰 | 保留，直接进尾部 | 被 255 个 gap 摊平 |
+| 用途 | 诊断卡顿/抖动 | SLO、goodput、容量与成本 |
+
+**同一份数据，两个指标会讲出不同的故事**（D1 实测，ms）：
+
+| c | ITL P50 | ITL P99 | ITL P99.9 | TPOT P50 | TPOT P95 |
+|---|---|---|---|---|---|
+| 1 | 47.2 | 48.0 | 48.8 | 47.2 | 47.4 |
+| 4 | 52.0 | 53.4 | 1,027.6 | 56.1 | 63.2 |
+| 16 | 80.0 | 1,082.1 | 2,006.1 | 130.4 | 137.0 |
+| 64 | 205.4 | 2,345.1 | 2,367.0 | 452.8 | 469.7 |
+
+复算（输出等长时 `mean(ITL) == mean(TPOT)`，但百分位不同）：
+
+```python
+import json, numpy as np
+
+d = json.load(open("results/d1-c16-20261120-191732.json"))
+itl  = np.array([x for r in d["itls"] for x in r]) * 1000
+tpot = np.array([(l - t) / (o - 1) for l, t, o in
+                 zip(d["latencies"], d["ttfts"], d["output_lens"])]) * 1000
+print("ITL  p50/p99/p99.9:", np.percentile(itl, [50, 99, 99.9]).round(1))
+print("TPOT p50/p95     :", np.percentile(tpot, [50, 95]).round(1))
+print("mean equal:", np.isclose(itl.mean(), tpot.mean()))
+```
+
+c=1 时两者几乎完全一样（没有排队，每个 gap 基本都在 47ms）。c=64 最说明问题：**一半的 decode step 只要 205ms，但 TPOT 中位数是 453ms。** 因为每条请求的 255 个 gap 里，中位数有 34 个超过 1s（约 2.3s 的调度停顿），平均后整条请求变慢。ITL 中位数说“机器大部分时间其实更快”，TPOT 中位数说“用户实际感受到的平均速度”。两个都对，回答的是不同问题。
+
+c=16 同理：TPOT P95 = 137ms 看起来不算灾难，ITL P99.9 = 2.0s 才暴露“千分之一的 token 卡了 2 秒”；每条请求的 255 个 gap 里中位数有 13 个超过 1s。**TPOT 适合做 SLO/容量，ITL 适合查抖动。**
+
+**什么时候两者真的不相等（不只是聚合不同）：**
+
+- 一个流式 chunk 带多个 token（投机解码、非流式返回、某些后端批量 detokenize）：ITL 记的是 chunk 间隔，TPOT 按 token 数摊，此时 `TPOT < mean(ITL)`；vLLM 源码注释明确说不能用 `len(itl)` 当 output_tokens。
+- `output_tokens = 1`：TPOT 按定义记 0，ITL 是空数组。
+- 请求失败/超时：两边都只统计成功请求，这一点一致。
+
+**对 D1 goodput 的影响**：`--goodput tpot:100` 用的是 per-request TPOT，所以一条请求只要**平均** decode 达标就算过，中间有 5s 停顿也可能合格。D1 的 SLO 容量是偏乐观的口径；要改成“每个 gap 都达标”得自己拿 `itls` 重算，那是另一个 SLO 定义，报告里必须写清。
 
 ### 2. 聚合指标
 
@@ -1091,7 +1147,7 @@ client_ttft ≈ server_queue_time + server_ttft + 前端/网络开销
 
 | 指标 | 谁产生 | 怎么拿 |
 |---|---|---|
-| 客户端 TTFT / TPOT / ITL / E2EL | `vllm bench serve`（客户端测） | JSON 的 `ttfts` / `tpots` / `itls` / `latencies`，或 `p*_*_ms` |
+| 客户端 TTFT / TPOT / ITL / E2EL | `vllm bench serve`（客户端测） | JSON 的 `ttfts` / `itls` / `latencies` / `output_lens`，或 `p*_*_ms`；**没有 `tpots` 数组**，TPOT 要用前三个重算 |
 | request / output / total throughput | `vllm bench serve`（客户端算） | `request_throughput` / `output_throughput` / `total_token_throughput` |
 | goodput、达标比例 | `vllm bench serve` 后处理 | `request_goodput`；比例自己除 |
 | P50/P95/P99、mean/median | `vllm bench serve` 后处理 | `p50_*` / `mean_*` 等 |

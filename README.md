@@ -46,6 +46,8 @@ c=16 / c=64 各跑两轮，表中为两轮中位数，括号内为范围；c=1 /
 - 排队是双峰的：约 90% 请求排队几乎为 0，约 10% 排队数秒，P99 到 9.05s；
 - 服务端首 token 在 c=16 下 P50 已到 3.0s（c=1 时客户端 TTFT 才 1.0s），说明 chunked prefill 与 decode 争抢后，prefill 被拉长；
 - 同一请求相加后的 P99 是 12.74s，客户端 TTFT P99 13.51s，差约 0.8s 是 API 前端/网络开销。
+- decode 也不是匀速：展平 `itls` 后 P50 80ms、P99 1.83s、P99.9 1.99s，但 per-request TPOT P95 只有 133.5ms——每条请求的 255 个 gap 里中位数有 8 个超过 1s，被平均掉了。所以“TPOT 达标”不等于“没有卡顿”。
+- 停顿不是抢占（计数为 0），更像 chunked prefill 的调度步长：一个 iteration 塞进大块 prefill 时，decode 要等这一大步算完。D2 的 `--disable-chunked-prefill` 可以直接验证这个假设。
 
 ## 一句话结论
 

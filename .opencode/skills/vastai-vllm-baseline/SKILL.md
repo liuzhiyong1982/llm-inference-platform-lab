@@ -46,9 +46,16 @@ GPU 架构 (L4 = sm_89)
 | 指标 | 全称 | 定义 / 公式 |
 |---|---|---|
 | TTFT | Time To First Token | 请求发出到首 token；闭路压测含服务端排队，不只是 prefill |
-| ITL | Inter-Token Latency | 相邻流式 chunk 的间隔；标准解码 1 token/chunk，ITL≈TPOT；别名 TBT |
-| TPOT | Time Per Output Token | `(e2el - ttft) / (output_tokens - 1)`；output=1 时按 0 |
+| ITL | Inter-Token Latency | 相邻流式 chunk 的间隔；**单请求内 `mean(ITL) = TPOT`**；别名 TBT |
+| TPOT | Time Per Output Token | `(e2el - ttft) / (output_tokens - 1)`；output=1 时按 0；即该请求 ITL 的算术平均 |
 | E2EL | End-to-End Latency | 端到端延迟；常简写 E2E |
+
+**TPOT vs ITL：同一份数据的两种切法。**
+
+- ITL 是 **token 级分布**（N×255 个样本），TPOT 是 **请求级均值**（N 个样本）。单请求内二者相等，聚合后的百分位不是一回事。
+- ITL 保留尖峰，TPOT 把尖峰摊平：D1 c=16 的 ITL P99.9 = 2.0s，而 TPOT P95 只有 137ms（每条请求 255 个 gap 里中位数有 13 个 >1s）；c=64 的 ITL P50 = 205ms，TPOT P50 = 453ms（中位数 34 个 gap >1s）。
+- **查抖动看 ITL，算 SLO/容量看 TPOT。** `--goodput tpot:100` 用 per-request TPOT，平均达标即算过，中间有秒级停顿也可能合格——这是偏乐观的口径。
+- 一个 chunk 多个 token（投机解码/非流式）时 `TPOT < mean(ITL)`，ITL 只是 chunk 间隔。
 
 **聚合**
 
