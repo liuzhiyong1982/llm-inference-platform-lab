@@ -976,12 +976,14 @@ vLLM bench 内部用**秒**记录延迟，输出到终端/JSON 时乘 1000 变�
 
 ### 1. 单请求指标
 
-| 指标 | 定义 | 计算 |
-|---|---|---|
-| TTFT | 请求发出到首 token | 直接记录（秒→ms） |
-| ITL | 相邻流式 chunk 的间隔 | 每次 gap；标准解码 1 token/chunk，所以 ITL≈TPOT；投机解码一个 chunk 可能多个 token，ITL 只记 chunk 间隔 |
-| TPOT | 每个输出 token 的时间（不含首 token） | `(e2el - ttft) / (output_tokens - 1)`；`output_tokens = 1` 时按 0 |
-| E2EL | 端到端延迟 | 请求发出到完整响应 |
+| 指标 | 全称 | 定义 | 计算 |
+|---|---|---|---|
+| TTFT | Time To First Token | 请求发出到首 token | 直接记录（秒→ms） |
+| ITL | Inter-Token Latency | 相邻流式 chunk 的间隔 | 每次 gap；标准解码 1 token/chunk，所以 ITL≈TPOT；投机解码一个 chunk 可能多个 token，ITL 只记 chunk 间隔 |
+| TPOT | Time Per Output Token | 每个输出 token 的时间（不含首 token） | `(e2el - ttft) / (output_tokens - 1)`；`output_tokens = 1` 时按 0 |
+| E2EL | End-to-End Latency | 端到端延迟 | 请求发出到完整响应 |
+
+别名：ITL 在某些工具里叫 **TBT**（Time Between Tokens）；E2EL 常简写 **E2E**。TPOT 与 ITL 的单位都是 ms/token，但统计对象不同——TPOT 是整条请求摊薄，ITL 是相邻 chunk 的瞬时间隔，所以同一请求的 P99 不一定相等。
 
 ### 2. 聚合指标
 

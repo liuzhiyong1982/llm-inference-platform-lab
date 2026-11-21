@@ -43,12 +43,12 @@ GPU 架构 (L4 = sm_89)
 
 **单请求**
 
-| 指标 | 定义 / 公式 |
-|---|---|
-| TTFT | 请求发出到首 token；闭路压测含服务端排队，不只是 prefill |
-| ITL | 相邻流式 chunk 的间隔；标准解码 1 token/chunk，ITL≈TPOT |
-| TPOT | `(e2el - ttft) / (output_tokens - 1)`；output=1 时按 0 |
-| E2EL | 端到端延迟 |
+| 指标 | 全称 | 定义 / 公式 |
+|---|---|---|
+| TTFT | Time To First Token | 请求发出到首 token；闭路压测含服务端排队，不只是 prefill |
+| ITL | Inter-Token Latency | 相邻流式 chunk 的间隔；标准解码 1 token/chunk，ITL≈TPOT；别名 TBT |
+| TPOT | Time Per Output Token | `(e2el - ttft) / (output_tokens - 1)`；output=1 时按 0 |
+| E2EL | End-to-End Latency | 端到端延迟；常简写 E2E |
 
 **聚合**
 
