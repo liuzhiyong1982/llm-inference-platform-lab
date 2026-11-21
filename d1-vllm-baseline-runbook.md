@@ -1189,13 +1189,76 @@ tmux capture-pane -p -t ssh_tmux:2 -S -300 > /workspace/results/client-stdout.lo
 
 ## 附：KV cache 与并发估算
 
-以 Qwen3-8B（36 层、8 个 KV head、head_dim 128、FP16 KV）为例：
+一句话：**每个 token、每一层、每个 KV head，都要存一份 K 和一份 V。**
+
+### 1. 逐项拆解
+
+以 Qwen3-8B 为例：36 层、32 个 query head、**8 个 KV head**（GQA）、head_dim 128、FP16 KV。
 
 ```
-每 token KV = 2(K,V) × 36 层 × 8 KV head × 128 × 2 B
-            = 147,456 B = 144 KiB
-每个 block（默认 16 token）= 147,456 × 16 = 2.25 MiB
-91,648 tokens = 5,728 blocks ≈ 12.6 GiB
+① 一个 token 在一层里
+   K: 8 head × 128 维 = 1,024 个数
+   V: 8 head × 128 维 = 1,024 个数
+   → 2,048 个数（这就是 2(K,V) 的意思：K 和 V 各一份）
+
+② 乘 36 层（每层有独立的 K/V 权重）
+   2,048 × 36 = 73,728 个数 / token
+
+③ 乘字节数（FP16 = 2 B）
+   73,728 × 2 = 147,456 B = 144 KiB / token
+
+④ 按 block 分配（默认 16 token/block）
+   144 KiB × 16 = 2,304 KiB = 2.25 MiB / block
+
+⑤ 从总 token 数换算 block 和 GiB
+   91,648 / 16 = 5,728 blocks
+   5,728 × 2.25 MiB = 12,888 MiB = 12.59 GiB
+```
+
+通用公式（换任何模型都能用）：
+
+```
+KV B/token = 2 × layers × kv_heads × head_dim × dtype_bytes
+```
+
+### 2. 为什么是 8 个 head，不是 32
+
+Qwen3-8B 有 32 个 query head，但只有 8 个 KV head，每 4 个 query head 共享一组 K/V，这就是 GQA（Grouped Query Attention）。如果按 32 个 KV head 算（MHA），每 token 是 **576 KiB**，4 倍——91,648 token 要 50 GiB，24GB 卡放不下。**GQA 存在的意义就是压 KV cache。**
+
+### 3. 91,648 不是模型常数
+
+它是 vLLM 启动时量出来的：
+
+```
+可用 KV 显存 = 24GB × gpu-memory-utilization − 权重 − 激活 − CUDA context
+91,648 tokens = 可用 KV 字节 / 144 KiB
+```
+
+换卡、换量化、改 `gpu-memory-utilization`，这个数都会变；模型本身只决定 144 KiB/token。
+
+### 4. 三个可以自己验算的结论
+
+**8k 上下文为什么是 11.19x**
+
+```
+8,192 token × 144 KiB = 1,152 MiB = 1.125 GiB / 请求
+12.59 GiB / 1.125 GiB = 11.19
+```
+
+**实际请求为什么是 80 blocks**
+
+```
+1,024 输入 + 256 输出 = 1,280 token（输出 token 也占 KV：每生成一个，它就成为后续的上下文）
+1,280 / 16 = 80 block
+80 × 2.25 MiB = 180 MiB / 请求
+```
+
+**c=64 为什么抢占为 0**
+
+```
+KV 上限：91,648 / 1,280 = 71.6 条
+但 --max-num-seqs 64 先生效
+64 × 1,280 = 81,920 < 91,648 → 还有余量
 ```
 
 vLLM 日志里的两个数：
@@ -1203,16 +1266,27 @@ vLLM 日志里的两个数：
 - `GPU KV cache size: 91,648 tokens`：按 `gpu-memory-utilization` 扣掉权重和激活后，剩下的显存能放多少 KV token；
 - `Maximum concurrency for 8,192 tokens per request: 11.19x`：`91,648 / 8,192 = 11.19`，假设每条请求都吃满 8k 上下文。
 
-按我们实际的 1024 输入 + 256 输出：
-
-```
-每条请求 = 1,280 tokens = 80 blocks
-91,648 / 1,280 = 71.6  → KV 上限约 71 条
-但 --max-num-seqs 64 先生效 → 实际最多 64 条
-64 × 1,280 = 81,920 < 91,648 → 所以 c=64 抢占为 0
-```
-
 **这三个“最大并发”要分清**：KV 上限（71）、服务端 batch 上限（64）、SLO 安全并发（见下）。
+
+### 5. 常见算错
+
+| 错误 | 会算成 | 原因 |
+|---|---|---|
+| 用 32 个 attention head | 576 KiB/token（4×） | 忘了 GQA 只存 8 个 KV head |
+| 忘了 ×2 | 72 KiB/token（一半） | 只算了 K 或只算了 V |
+| 忘了乘层数 | 4 KiB/token | 只算了单层 |
+| 把 block 当 token | 2.25 MiB/token（16×） | block 是 16 个 token |
+| FP16 用 4 B | 288 KiB/token（2×） | FP16 是 2 B，FP32 才是 4 B |
+
+### 6. 换配置会怎样
+
+| 配置 | 每 token KV | 同样 12.6 GiB 能放 |
+|---|---|---|
+| FP16 KV（当前） | 144 KiB | 91,648 token |
+| FP8 KV | 72 KiB | ~183,000 token（2×） |
+| MHA（32 KV head） | 576 KiB | ~22,900 token（1/4） |
+
+FP8 KV 不改变模型质量，直接把 KV 容量翻倍；但它只在“KV 容量是瓶颈”时有用——D1 已经证明我们不是（瓶颈是 40W 功耗墙下的 batching）。
 
 Goodput 的定义、逐条判定和完整计算示例见上一节。这里只记结论：SLO 是 TTFT ≤ 2,000 ms 且 TPOT ≤ 100 ms，c=1 全部达标、c=4 25%、c=16 0.2%、c=64 0%，所以这台 40W L4 的 SLO 安全容量约 **0.077 req/s**（c=1），而不是 KV 上限 71。换 SLO（比如只看 P95、TPOT 放宽到 150ms）容量会变，必须写清口径。
 
