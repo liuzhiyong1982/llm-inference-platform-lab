@@ -835,6 +835,8 @@ echo "preemptions delta: $((AFTER-BEFORE))"
 
 两个服务不能同时占 8000 端口。顺序可以互换：当前是哪个就先测哪个；测完 `Ctrl-C`，再启动另一个。**两边 `max_gen_toks` 必须一致**。
 
+> 质量门命令用 `/workspace/lm-eval-venv/bin/python`；如果报 `No such file or directory`，先回 §3.3 创建 venv 并安装 `lm-eval[api]`。
+
 ### 5.0 lm-eval 是什么、质量门在测什么
 
 #### 5.0.1 lm-eval 的角色
