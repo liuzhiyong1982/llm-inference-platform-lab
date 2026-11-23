@@ -736,6 +736,8 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 > 这是估算：实际 FP16 的 KV 以启动日志 `GPU KV cache size` 为准；FP16 的激活显存可能比 AWQ 略大，实际 KV 可能比 19,100 更小，所以 c=8 是保守选择。
 >
 > 2026-11-23 实测：FP16 启动日志 `GPU KV cache size: 18,944 tokens`，和估算 19,100 基本一致；`c=8` 需要 `8 × 1,280 = 10,240`（够），`c=16` 需要 `20,480`（不够）。启动日志的 `Maximum concurrency for 8,192 tokens per request: 2.31x` 是“每条请求吃满 8,192”时的并发，不是 1,280-token 请求的并发；见 §10 Q18。
+>
+> `--max-model-len` 在 4.5 里是 **8192**（`serve_fp16` 显式写的）。vLLM 0.34 在不传时用模型 config 的 `max_position_embeddings`（Qwen3-8B 是 **40960**），24GB 上 FP16 很可能 OOM；**4096** 只在 8192 OOM 时作为退路。我们的请求只有 1,280，4096 也够。
 
 AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
 
