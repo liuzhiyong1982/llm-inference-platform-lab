@@ -1,10 +1,14 @@
 # D3 学习文档：k3s + vLLM 的冷启动、扩缩容与驱逐
 
-> 状态：**draft（2026-11-23），尚未执行**。执行后把实测数字补进 §7–§9，并在 README 增加 D3 结果小节。
+> 状态：**draft（2026-11-23），尚未执行**。执行后把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
+>
+> 计划中的位置：`ai-cloud-native-week-plan.md` §4 Q1 的 **B 线 artifact**；B 线讲法见该文件 §3「D3 / D5 的 B 线讲法」。执行后同时回填该文件 §5 的“三个 B 线数”。
 >
 > 性质：学习文档 + 可执行 lab，不是 D1/D2 那种逐命令 runbook。D1/D2 回答“单机多快”，D3 回答“把它放进 K8s 后，启动、扩容、驱逐各要付多少秒”。
 >
 > 硬约束：**不在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**。用自己租的/本地的单机 GPU；所有对比同机、同模型、同输入/输出长度、同 SLO。
+>
+> 环境：本地 Linux 或 **Vast GPU VM**（你已在 Vast GPU VM 上跑过 k8s）；Vast 普通容器实例没有 systemd/cgroup，不要用。
 
 ---
 
@@ -51,6 +55,20 @@ D3 只测三个数（“能部署”没有区分度）：
 | 记录 + commit | 30 min | 30 min |
 
 > 3h 是最小路径；如果只能租一张卡，接受“1→2 Pending”这个结果，它本身就是 D3 的核心结论之一。真实扩容曲线留给 2 卡（也可以和 D4 的 2×L4 合并）。
+>
+> **3h 不够时按这个顺序砍：** image-cold → scale-to-zero → PDB → 2 卡曲线 → 驱逐的“有排空”对照。**不要砍 cold/warm 和 1→2 Pending**：前者是 B 线 artifact 的核心数字，后者是单卡 GPU 调度的核心结论。
+
+### 1.2 B 线学习目标（从 D3 起）
+
+D3 不只是 A 线的“平台支撑”，也是 B 线案例 1。三个数之外，还要带走：
+
+- **交付链路**：driver → nvidia-container-toolkit → k3s containerd → device plugin → RuntimeClass → Pod；能解释每一层坏了会怎样。
+- **模型分发**：hostPath/local PV vs 镜像内置 vs 对象存储；冷启动、回滚、节点亲和性的取舍。
+- **弹性**：KEDA/HPA 的信号、扩容延迟、单卡容量边界；为什么 CPU HPA 是错的。
+- **运维**：startup/readiness/liveness、PDB、优雅驱逐、故障处置。
+- **成本与多租户**：每副本 `$/h`、namespace/label 规范、Q2 chargeback 的埋点。
+
+B 线验收：§16 至少 1 条简历 bullet 能脱稿讲 10 分钟，并接住 §12 的 B 线四问。
 
 ---
 
@@ -59,8 +77,9 @@ D3 只测三个数（“能部署”没有区分度）：
 | 方案 | 可行性 | 代价 | 建议 |
 |---|---|---|---|
 | **本地 Linux + NVIDIA GPU** | 最高 | 需要 root、能装内核模块/容器运行时 | **首选**；最接近生产，调试成本最低 |
+| **Vast.ai GPU VM** | 高（你已在 Vast GPU VM 上跑过 k8s） | 按小时计费；必须是 VM/privileged，普通容器实例不行 | **首选之一**；复用你上次成功的 image/template，先做 §5.0 的确认 |
 | **云 GPU VM**（Azure/AWS/GCP 单卡） | 高 | 按小时计费；注意配额和 GPU 型号 | 次选；记录 `power.limit` 和驱动版本 |
-| **Vast.ai GPU 容器实例** | 中低 | 实例本身是容器，k3s 需要 mount/cgroup/overlay 权限；不保证 privileged | 不要假设能跑；先做 §5.0 的权限检查，失败就换方案 |
+| **Vast.ai 普通容器实例** | 低 | 无 systemd/cgroup 权限 | 不要用；换 VM |
 | **共享 UAT AKS `uat-mobility-aks-01`** | — | 污染共享环境、触发 Coder→Reviewer SOP、花公司钱 | **禁止** |
 
 单卡 vs 2 卡：
@@ -71,7 +90,7 @@ D3 只测三个数（“能部署”没有区分度）：
 | KEDA 0→1 | 可以测 | 可以测 |
 | KEDA 1→2 | 第二个 Pod 会 `Pending`（`Insufficient nvidia.com/gpu`） | 可以测真实扩容曲线 |
 | 驱逐 | 可以测，但删掉唯一副本会短暂 0 可用 | 可以测 PDB / 滚动更新 |
-| 成本（按 D2 同型 L4 估） | `$0.2611/h` | 约 `$0.52/h`（GPU ×2 + 存储） |
+| 成本（按 D2 同型 L4 估） | `$0.2611/h` | `$0.5111/h`（GPU ×2 + 存储） |
 
 > 机制可以用 CPU + 小模型（如 `Qwen3-0.6B`）练，但**冷启动秒数只能用目标 GPU 测**；不要把 CPU 数字写进作品集。
 
@@ -128,7 +147,7 @@ NVIDIA driver (host)
 | 调度 | scheduler 找有 GPU 的节点 | ms–s | `PodScheduled` condition 时间 |
 | 镜像拉取 | containerd 拉 vLLM 镜像（数 GB） | 0s（已缓存）–几分钟 | `containerStatuses[].state.running.startedAt` 之前 |
 | 权重下载 | initContainer / 启动脚本拉 5.7GB AWQ | 几十秒–几分钟 | init container 的 `startedAt`/`finishedAt` |
-| 模型加载 + 引擎初始化 | 读权重、KV profiling、CUDA graph capture、API server 起来 | D1 约 **69s** | 主容器 `startedAt` → `Ready=True` |
+| 模型加载 + 引擎初始化 | 读权重、KV profiling、CUDA graph capture、API server 起来 | D1 启动到 ready 约 **69s**（其中 model loading 7.72s、init engine 21.72s） | 主容器 `startedAt` → `Ready=True` |
 
 > D1 的 69s 是“进程启动到 API ready”（权重加载约 7.7s + 引擎初始化约 21.7s + 其余编译/启动开销），不含镜像拉取和权重下载。把 69s 当完整冷启动，会低估 2–5 倍。
 
@@ -208,24 +227,27 @@ terminationGracePeriodSeconds > preStop 秒数 + --shutdown-timeout + 进程清�
 
 ### 5.0 先检查“能不能跑 k3s”
 
-Vast.ai 的实例本身是 Docker 容器；k3s 需要 mount、cgroup、overlayfs 等权限。先在目标机器上检查：
+你以前在 Vast 的 GPU VM 上跑过 k8s，说明 Vast 这条路可行；但 Vast 也有普通容器实例，先在**当前实例**上确认它是 VM/privileged：
 
 ```bash
 # 目的：确认有 systemd / cgroup v2 / 能写 /var/lib/rancher
 ps -p 1 -o comm=
+systemctl is-system-running 2>/dev/null || true
 stat -fc %T /sys/fs/cgroup
-test -w /var/lib && echo "var-lib writable"
+sudo test -w /var/lib && echo "var-lib writable"
 ```
+
+> 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。不要在 D3 里换发行版，先把冷启动数字测出来。
 
 - `ps -p 1` 不是 `systemd`（例如是 `tini`/`bash`），k3s 的 systemd 服务方式就不适用；可以试 `k3s server` 前台运行，但重启管理要自己做。
 - cgroup 不是 `cgroup2fs`，k3s/kubelet 可能起不来。
-- 如果检查失败，换本地机器/云 VM，不要在 Vast 容器里硬扛。
+- 如果检查失败，换 Vast GPU VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
 
 ### 5.1 安装 k3s
 
 ```bash
 # 目的：单节点 k3s；--write-kubeconfig-mode 让普通用户也能 kubectl
-curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
+curl -sfL https://get.k3s.io | sudo sh -s - --write-kubeconfig-mode 644
 
 # 目的：确认节点 Ready（k3s 自带 kubectl）
 sudo k3s kubectl get nodes -o wide
@@ -234,6 +256,8 @@ sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
 sudo chown "$USER" ~/.kube/config
 kubectl get nodes
 ```
+
+> 复用上次成功的 k3s 版本：`curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.xx.y+k3s1 sh -s - --write-kubeconfig-mode 644`。版本不同，冷启动数字不可比；把版本记进结果。
 
 ### 5.2 让 k3s 识别 NVIDIA runtime
 
@@ -249,6 +273,9 @@ sudo systemctl restart k3s
 
 # 目的：确认 containerd 配置里出现 nvidia
 grep -n nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+
+# 目的：确认 RuntimeClass 存在；没有它，runtimeClassName: nvidia 的 Pod 会卡住
+kubectl get runtimeclass nvidia
 ```
 
 如果 `grep` 没有任何输出：
@@ -257,6 +284,8 @@ grep -n nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml
 2. 确认它在 k3s 服务的 PATH 里（`/usr/bin` 或 `/usr/local/bin`）；
 3. 再重启 k3s；仍不行就查 `journalctl -u k3s -n 100`。
 
+> 云 GPU 镜像通常已带 driver + toolkit；先 `nvidia-ctk --version` 确认，缺了再按 NVIDIA 官方 repo 安装。`nvidia-container-toolkit` 包会带上 `nvidia-container-runtime`，装完用 `which nvidia-container-runtime` 复核。
+>
 > 不要手写整份 `config.toml` 覆盖 k3s 生成的文件；k3s 升级/重启会重新渲染。要用模板就用官方 `config-v3.toml.tmpl` 的 `{{ template "base" . }}` 方式。
 
 ### 5.3 安装 NVIDIA device plugin
@@ -265,11 +294,18 @@ grep -n nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml
 # 目的：把 GPU 暴露成 nvidia.com/gpu 扩展资源；版本按 release 页核对
 kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.18.0/deployments/static/nvidia-device-plugin.yml
 
+# 目的：static manifest 没有写 runtimeClassName；k3s 默认 runtime 是 runc，
+# 不补这一行，device plugin 可能看不到 GPU（allocatable 一直是 0）
+kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type merge \
+  -p '{"spec":{"template":{"spec":{"runtimeClassName":"nvidia"}}}}'
+
 kubectl -n kube-system rollout status ds/nvidia-device-plugin-daemonset --timeout=180s
 
 # 目的：确认 allocatable 里有 1 张卡
 kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\n"}'
 ```
+
+> k3s 会为检测到的 NVIDIA runtime 创建 `RuntimeClass/nvidia`；static manifest 本身不带 `runtimeClassName`，所以必须 patch。用 Helm 装 GPU Operator 时这一步由 chart 的 `runtimeClassName` 完成。
 
 ### 5.4 GPU smoke test
 
@@ -364,6 +400,7 @@ metadata:
   name: vllm-qwen3-8b
   labels:
     app: vllm
+    team: platform
 spec:
   replicas: 1
   # 单卡 + 单副本：Recreate 避免 RollingUpdate 先起一个 Pending 的第二个 Pod
@@ -376,6 +413,8 @@ spec:
     metadata:
       labels:
         app: vllm
+        team: platform
+        model: qwen3-8b
     spec:
       runtimeClassName: nvidia
       terminationGracePeriodSeconds: 120
@@ -390,7 +429,8 @@ spec:
         args:
         - |
           set -eu
-          if [ -f /models/Qwen3-8B-AWQ/config.json ]; then
+          if [ -f /models/Qwen3-8B-AWQ/config.json ] && \
+             find /models/Qwen3-8B-AWQ -maxdepth 1 -name '*.safetensors' | grep -q .; then
             echo "weights cached"
             exit 0
           fi
@@ -483,6 +523,10 @@ spec:
   type: ClusterIP
 ```
 
+> initContainer 用 `config.json` + 至少一个 `*.safetensors` 判断缓存完整，避免“下载中断但 config.json 已写入”导致 vLLM 启动失败。真要严格，可让 `snapshot_download` 每次都跑（完整缓存时它只做元数据校验）。
+>
+> B 线埋点：在 `template.metadata.labels` 里加 `team`/`model`，并把 Deployment 放到团队 namespace；D3 可以先单 namespace，但 Q2 的 chargeback 依赖这些 label。
+
 应用并验证：
 
 ```bash
@@ -531,7 +575,56 @@ vllm bench serve --host 127.0.0.1 --port 8000 ...
 vllm bench serve --host <node-ip> --port 8000 ...
 ```
 
+> 单副本才能用 `hostNetwork: true` + 8000 端口；多副本会端口冲突。这个对比只回答“网络多一跳值多少”，不要把它当生产默认。
+
 记录 TTFT P50/P99。单节点上差距通常不大；这个实验的价值是让你能回答“K8s 的网络开销在哪”，而不是背一个固定毫秒数。
+
+### 6.5 B 线加练：模型版本与回滚（可选，30 分钟）
+
+B 线 JD 里的“模型交付”不只有冷启动，还有回滚。最小做法是把权重按版本目录存放，而不是覆盖同一个目录：
+
+```text
+/var/lib/models/
+  Qwen3-8B-AWQ-v1/   # 当前
+  Qwen3-8B-AWQ-v2/   # 新版本
+```
+
+把 §6.2 的 `args` 第一项改成 `$(MODEL_PATH)`，并加环境变量：
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+      - name: vllm
+        env:
+        - name: MODEL_PATH
+          value: /models/Qwen3-8B-AWQ-v1
+        args:
+        - "$(MODEL_PATH)"
+        # 其余 args / image / resources 省略
+```
+
+> 主实验 §6.2 用的是字面路径 `/models/Qwen3-8B-AWQ`；做本节前先把 `args` 第一项改成 `$(MODEL_PATH)` 并加上面的 `env`，重新 `kubectl apply`。否则 `kubectl set env` 只改环境变量，模型路径不会变。
+
+发布/回滚：
+
+```bash
+# 目的：准备两个版本目录（各 5.7GB；磁盘不够就只读本节，不做实测）
+sudo mkdir -p /var/lib/models/Qwen3-8B-AWQ-v1 /var/lib/models/Qwen3-8B-AWQ-v2
+sudo cp -a /var/lib/models/Qwen3-8B-AWQ/. /var/lib/models/Qwen3-8B-AWQ-v1/
+sudo cp -a /var/lib/models/Qwen3-8B-AWQ/. /var/lib/models/Qwen3-8B-AWQ-v2/
+
+# 目的：切到 v2
+kubectl set env deploy/vllm-qwen3-8b MODEL_PATH=/models/Qwen3-8B-AWQ-v2
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
+
+# 目的：回滚到 v1
+kubectl set env deploy/vllm-qwen3-8b MODEL_PATH=/models/Qwen3-8B-AWQ-v1
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
+```
+
+> 不要在运行中的目录上覆盖权重：旧 Pod 可能还在读，新 Pod 可能读到半套文件；版本目录是回滚的前提。生产上还要配 node affinity/local PV，避免 Pod 调度到没有该版本权重的节点。
 
 ---
 
@@ -543,8 +636,10 @@ vllm bench serve --host <node-ip> --port 8000 ...
 |---|---|---|---|
 | **cold** | 已缓存 | 删除 `/var/lib/models/Qwen3-8B-AWQ` | 权重下载 + 模型加载 + 引擎初始化，最接近“新节点” |
 | **warm** | 已缓存 | 保留 | 只测模型加载 + 引擎初始化 |
-| **image-cold**（可选） | `k3s crictl rmi` 删除镜像 | 保留 | 单独测镜像拉取 |
+| **image-cold**（可选） | `sudo k3s crictl rmi docker.io/vllm/vllm-openai:v0.34.0` 删除镜像 | 保留 | 单独测镜像拉取 |
 
+> 镜像引用名先用 `sudo k3s crictl images | grep vllm` 确认；不同 registry 前缀可能不同。
+>
 > 不要用 `emptyDir` 做 cold/warm 对比：Pod 一删缓存就没了，两次都是 cold，结论会错。
 
 ### 7.2 操作
@@ -554,8 +649,9 @@ vllm bench serve --host <node-ip> --port 8000 ...
 kubectl rollout restart deploy/vllm-qwen3-8b
 kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 
-# cold：先缩到 0，删缓存，再起
+# cold：先缩到 0，等 Pod 真正退出，再删缓存
 kubectl scale deploy/vllm-qwen3-8b --replicas=0
+kubectl wait --for=delete pod -l app=vllm --timeout=180s
 sudo rm -rf /var/lib/models/Qwen3-8B-AWQ
 kubectl scale deploy/vllm-qwen3-8b --replicas=1
 kubectl rollout status deploy/vllm-qwen3-8b --timeout=30m
@@ -718,6 +814,8 @@ kubectl run bench --rm -it --restart=Never \
     --metric-percentiles 50,95,99
 ```
 
+> bench Pod 没有挂 hostPath，`--tokenizer Qwen/Qwen3-8B` 会从 HF 拉 tokenizer（几十 MB）。离线集群要改成挂 `/var/lib/models` 并用 `--tokenizer /models/Qwen3-8B-AWQ`；`-it` 只适合交互终端，脚本里去掉。
+
 同时观察：
 
 ```bash
@@ -751,7 +849,7 @@ kubectl describe pod -l app=vllm | grep -A5 Events
 | `t_trigger` | queue > threshold | Prometheus 第一次超过 8 |
 | `t_scheduled` | 新 Pod `PodScheduled=True` | Pod condition |
 | `t_ready` | 新 Pod `Ready=True` | Pod condition |
-| `t_first_200` | 新 Pod 收到第一个成功请求 | vLLM 日志/网关日志 |
+| `t_first_success` | 新 Pod 收到第一个成功请求 | vLLM 日志/网关日志 |
 
 扩容窗口内的 P99 用 Prometheus 取，不依赖 bench 的聚合结果：
 
@@ -805,6 +903,8 @@ done
 ```bash
 kubectl patch scaledobject vllm-scaler --type merge -p '{"spec":{"minReplicaCount":0}}'
 kubectl get pods -w
+# 等到 Pod 数为 0（cooldownPeriod 默认 300s，别在 1 分钟后就下结论）
+kubectl get pods -l app=vllm
 ```
 
 Pod 缩到 0 后，直接请求 Service：
@@ -833,7 +933,9 @@ kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl --command
 - `preStop` 的 `sleep 15`
 - `terminationGracePeriodSeconds`（默认 30s）
 
-然后压一批长请求（输出 1024），5 秒后删 Pod：
+复制时至少要改三处，否则两个 Deployment 会抢同一张卡和同一个 Service：`metadata.name`（如 `vllm-nodrain`）、`spec.selector.matchLabels.app`（如 `vllm-nodrain`）、`template.metadata.labels.app`（同上），并单独建一个 Service。更简单的做法是**先**用无排空配置做本节，再 apply §6.2 的完整配置做 §9.2，不要让两个 Deployment 并存。复制路径还要把下面脚本的 URL 改成新 Service 名；简单路径 Service 名不变。
+
+然后压一批长请求（8 并发 × 512 output tokens，约 45s；能在 90s 排空窗口内跑完），5 秒后删 Pod：
 
 > 脚本要在集群内跑（例如用一个带 `requests` 的 Pod），或者先 `kubectl port-forward svc/vllm-qwen3-8b 8000:8000` 再把 URL 改成 `127.0.0.1:8000`。port-forward 在 Pod 删除时会断，这本身也是“客户端观测到失败”的一部分；报告里要注明用的是哪条路径。
 
@@ -850,15 +952,16 @@ def one(i):
         r = requests.post(URL, json={
             "model": "qwen3-8b",
             "prompt": "Write a long detailed story about a lighthouse.",
-            "max_tokens": 1024,
+            "max_tokens": 512,
             "temperature": 0,
+            "ignore_eos": True,
         }, timeout=180)
         return r.status_code, time.time() - t
     except Exception as e:
         return type(e).__name__, time.time() - t
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-    futs = [ex.submit(one, i) for i in range(32)]
+    futs = [ex.submit(one, i) for i in range(8)]
     for f in concurrent.futures.as_completed(futs):
         print(f.result())
 PY
@@ -867,6 +970,8 @@ PY
 sleep 5
 kubectl delete pod -l app=vllm
 ```
+
+> 想验证“排空窗口不够”时，把 `range(8)` 改成 `range(32)`、`max_tokens` 改成 1024；这时 90s 内跑不完是预期结果，不是脚本 bug。
 
 统计：
 
@@ -877,18 +982,21 @@ kubectl delete pod -l app=vllm
 
 ### 9.2 再测“有排空”
 
-用 §6.2 的完整配置（`--shutdown-timeout 90` + `preStop 15s` + grace 120s），重复同一批请求和删除动作。
+先把无排空的 Deployment/Service 缩到 0 或删掉，再 apply §6.2 的完整配置（`--shutdown-timeout 90` + `preStop 15s` + grace 120s），重复同一批请求和删除动作。
+
+> 删除 Pod 后 Deployment 会立刻起新 Pod，但新 Pod 要几十秒才 Ready；这段窗口 Service 没有可用 Endpoint，**新请求**会失败。本实验只看“删除瞬间已在途的请求”，不要把新请求的失败算进排空成功率。
 
 预期：
 
 1. Pod 进入 `Terminating`，先从 Endpoints 摘除；
 2. `preStop` sleep 15s，新请求不再进来；
 3. SIGTERM 后 vLLM 继续跑在途请求，最多 90s；
-4. 请求完成，Pod 在 120s 内退出，没有 SIGKILL。
+4. 请求完成，Pod 在 120s 内退出，没有 SIGKILL；如果 90s 内没跑完，说明 `--shutdown-timeout` 小于最长请求，应该调大或缩短请求。
 
 验证日志：
 
 ```bash
+# Pod 消失后日志就没了；删除前先开一个 `kubectl logs -f` 到文件，或删除后立刻抓
 kubectl logs -l app=vllm --tail=100 | grep -iE "shutdown|drain|abort|SIGTERM"
 kubectl get pod -l app=vllm -w
 ```
@@ -897,8 +1005,9 @@ kubectl get pod -l app=vllm -w
 
 | 配置 | 在途请求 | 成功 | 失败 | 最大延迟 | Terminating 时长 | 是否 SIGKILL |
 |---|---|---|---|---|---|---|
-| 无排空（默认 30s） | 32 | | | | | |
-| 有排空（90s + 15s + 120s） | 32 | | | | | |
+| 无排空（默认 30s） | 8 | | | | | |
+| 有排空（90s + 15s + 120s） | 8 | | | | | |
+| 有排空 + 32×1024（可选，验证窗口不够） | 32 | | | | | |
 
 ### 9.4 PDB 的取舍
 
@@ -932,19 +1041,19 @@ spec:
 | 扩容延迟 | `queue > threshold` → 新 Pod `Ready=True` | Prometheus + Pod condition |
 | 扩容窗口 P99 | 扩容前后各 2 分钟的 TTFT P99 | `histogram_quantile` |
 | 驱逐成功率 | 成功完成 / 在途请求 | 客户端统计 |
-| goodput | 满足 SLO 的请求数 / 总请求 / 时长 | 同 D1/D2 |
+| goodput | `good_completed / duration`（req/s）；达标比例 = `goodput / request_throughput` | 同 D1/D2 |
 
 SLO 沿用 D1/D2：`TTFT ≤ 2,000ms`、`TPOT ≤ 100ms`（per-request）。不要中途换 SLO，否则 goodput 不可比。
 
 ### 10.2 成本
 
-| 项目 | 单价 | 3h 成本 |
+| 项目 | 单价 | 成本 |
 |---|---|---|
-| 单卡 L4 | `$0.2611/h`（GPU + 40GB 存储） | 约 `$0.78` |
-| 2×L4 | 约 `$0.52/h` | 约 `$1.56` |
+| 单卡 L4 | `$0.2611/h`（GPU + 40GB 存储） | 3h 约 `$0.78` |
+| 2×L4 | `2 × $0.25 + $0.0111 = $0.5111/h` | 3h 约 `$1.53`；4h 约 `$2.04` |
 | 公网/存储 | ingress 通常不计费；Stop 后存储照计 | 见 Vast 账单 |
 
-D2 后账户余额 `$18.81`；D3 单卡 3h 约 `$0.8`，2 卡 4h 约 `$2.1`，预算足够。**先 scp 结果再 Destroy**。
+D2 后账户余额 `$18.81`；D3 单卡 3h 约 `$0.8`，2 卡 4h 约 `$2.0`，预算足够。**先 scp 结果再 Destroy**。
 
 ---
 
@@ -952,8 +1061,10 @@ D2 后账户余额 `$18.81`；D3 单卡 3h 约 `$0.8`，2 卡 4h 约 `$2.1`，�
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
-| k3s 起不来 / 卡在 `Starting` | Vast 容器没有 systemd/cgroup/privileged | 换本地或云 VM；不要在生产容器里硬装 |
+| k3s 起不来 / 卡在 `Starting` | 当前是 Vast 普通容器，没有 systemd/cgroup/privileged | 换 Vast GPU VM 或本地/云 VM；不要在普通容器里硬装 |
 | `nvidia.com/gpu` allocatable 是 0 | device plugin 没 Ready，或 runtime 没配 | 看 `kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`；`grep nvidia .../config.toml` |
+| device plugin 日志报 `No devices found` | static manifest 没写 `runtimeClassName: nvidia`，Pod 用 runc 看不到 GPU | patch DaemonSet 加 `runtimeClassName: nvidia`（§5.3） |
+| k3s 安装脚本报 permission denied | 没有用 root 执行 | 用 `sudo sh -s -` 安装，不要直接 `sh` |
 | Pod 里 `nvidia-smi` 报错 | 没写 `runtimeClassName: nvidia` | 加 `runtimeClassName`，或给 k3s `--default-runtime nvidia` |
 | Pod 一直 `ContainerCreating` | 镜像太大/拉取慢；hostPath 不存在 | `kubectl describe pod` 看 Events；hostPath 用 `DirectoryOrCreate` 或先建目录 |
 | 模型加载中被重启 | 只配了 liveness，没配 startupProbe | 用 `startupProbe` 保护启动；liveness 只在启动后生效 |
@@ -977,7 +1088,7 @@ D2 后账户余额 `$18.81`；D3 单卡 3h 约 `$0.8`，2 卡 4h 约 `$2.1`，�
 
 device plugin 把 GPU 暴露成整数扩展资源（`nvidia.com/gpu`），调度器只认整数。MIG 把 A100/H100 切成固定切片（硬隔离，但 L4 不支持）；time-slicing 让多个 Pod 共享同一张卡（软隔离，互相抢算力，LLM 的 TPOT 会抖）；MPS 做进程级并发（共享显存，隔离弱）；DRA 是 K8s 新的设备分配 API，支持更细的设备属性和配额。对 LLM 推理，优先整卡；要切卡先想清楚 SLO。
 
-**Q2：8B 模型 16GB 权重，怎么让新 Pod 20 秒内起来？四种方案和代价。**
+**Q2：8B 模型 FP16 约 16GB 权重（AWQ 约 5.7GB），怎么让新 Pod 20 秒内起来？四种方案和代价。**
 
 ① 节点本地缓存（hostPath/local PV）：最快，但只对单节点有效；② Model Streamer / 远程权重流式加载：省下载，但依赖高速网络；③ 预热池（minReplica ≥ 1）：没有冷启动，但一直占卡；④ 更小的量化/模型（AWQ/FP8/更小参数）：加载和显存都降，但质量/能力要重测。D1 的 69s 是启动到 ready 的参照，20s 需要模型/量化/存储一起优化，不是单靠 K8s。
 
@@ -1011,7 +1122,14 @@ TP（张量并行）用于单卡放不下模型，卡间通信最重；PP（流�
 
 **Q10：KEDA、HPA、Kueue 怎么选？**
 
-HPA 是副本伸缩的底层机制；KEDA 在 HPA 之上接事件源/Prometheus，支持 scale-to-zero；Kueue 是配额/排队/准入，不扩副本。推理平台通常三者一起：Kueue 管“能不能拿卡”，KEDA 管“拿几张”，HPA 管“怎么调”。D5 会把 Kueue 的配额和 Kyverno 的准入补上。
+HPA 是副本伸缩的底层机制；KEDA 在 HPA 之上接事件源/Prometheus，支持 scale-to-zero；Kueue 是配额/排队/准入，不扩副本。推理平台通常三者一起：Kueue 管“能不能拿卡”，KEDA 管“根据什么信号扩到几张”，HPA 是 KEDA 底下的执行机制。D5 会把 Kueue 的配额和 Kyverno 的准入补上。
+
+**B 线四问（D3/D5 的 B 线面试会追问）**
+
+- **GPU 平台怎么做多租户隔离？** 四层：namespace/RBAC 做逻辑隔离；ResourceQuota 限 CPU/内存；Kueue `ClusterQueue` 限 GPU 配额与优先级；Kyverno 强制 label/priorityClass/资源上限。device plugin 不做隔离；time-slicing/MIG 才会切分算力，但会破坏 SLO。
+- **模型版本回滚怎么做？** 权重按版本目录存放（`/var/lib/models/<model>-v1`、`-v2`），Deployment 用 `MODEL_PATH` 指向版本；回滚 = 改路径 + rollout restart。不要在运行中的目录上覆盖权重，否则旧 Pod 读旧文件、新 Pod 读半套文件，回滚也没有旧版本可回。
+- **GPU 容量规划为什么不能只看 util？** GPU util 高不代表排队；要看 `num_requests_waiting`、KV 使用率、TTFT P99、goodput。容量 = 满足 SLO 的并发，不是“卡跑满”；D2 的 c=64 goodput 0 就是例子。
+- **chargeback 按 GPU 小时还是按 token？** 两种口径都要：按 GPU 小时是财务口径（预留/闲置都算），按 token 是业务口径（谁用得多）；差额是闲置成本。D3 先把 namespace/label 和每副本 `$/h` 埋好，Q2 再算。
 
 ---
 
@@ -1021,6 +1139,7 @@ HPA 是副本伸缩的底层机制；KEDA 在 HPA 之上接事件源/Prometheus�
 - **D2**：AWQ + prefix caching 是默认配置；`max-num-seqs 64`、`max-model-len 8192` 直接复用。D2 的 c=8 goodput 25%、c=16 0.5% 说明“副本数不等于容量”，KEDA 的阈值要按队列/goodput 调，不要按 CPU。
 - **D4**：llm-d 的 prefix-cache-aware 路由需要 ≥2 副本 + 网关；D3 的 Deployment/Service/Endpoint 是底座。D3 的 1→2 曲线直接决定 D4 的“扩容期间 P99”基线。
 - **D5**：Kueue 的 ClusterQueue 和 Kyverno 的准入策略建在同一个集群上；D3 的 namespace/label 规范要提前定好。
+- **计划**：D3 是 Q1 的 B 线 artifact；执行后把冷启动/扩容/驱逐三个数回填 `ai-cloud-native-week-plan.md` §5 的“三个 B 线数”，并按该文件 §3 的讲法准备 10 分钟讲解。
 
 ---
 
@@ -1059,12 +1178,27 @@ nvidia-smi
 - [ ] scale-to-zero 的失败/延迟证据（可选）
 - [ ] 驱逐：无排空 vs 有排空的成功/失败对比
 - [ ] 一段带数字的归因结论
+- [ ] 能画出 GPU 平台交付链路，并回答 §12 的 B 线四问
+- [ ] 能脱稿讲 §16 的 B 线 bullet（至少 1 条，每条接住三层追问）
+- [ ] 回填计划 §5 的“三个 B 线数”和 README D3 小节
 - [ ] 结果、manifest、日志 commit + push
 - [ ] 成本记录；实例 Stop/Destroy
 
 ---
 
-## 16. Sources
+## 16. D3 的 B 线简历 bullet（执行后填，选 1–3 条）
+
+执行完 §5–§9 后，把下面三条填上数字，直接投 B 线岗位（K8s / GPU platform / ML platform）：
+
+- 在单节点 k3s 上交付 vLLM 推理服务：用 NVIDIA device plugin + `runtimeClassName: nvidia` 暴露 GPU，hostPath 缓存 5.7GB 权重，cold/warm 冷启动从 ____s 降到 ____s（−__%）。
+- 用 KEDA + Prometheus 按 `vllm:num_requests_waiting` 做队列驱动扩缩：0→1 在 ____s 内 Ready；单卡 1→2 的 `Pending` 证明 GPU 整数分配是容量瓶颈，不是 HPA 算法问题。
+- 设计优雅驱逐：`preStop` 15s + `--shutdown-timeout` 90s + grace 120s，在途 ____ 条长请求成功率从 __% 提升到 __%，Pod 在 ____s 内退出且无 SIGKILL。
+
+> 每条都要能接住三层追问：为什么用 hostPath 不用 emptyDir？为什么不用 CPU HPA？为什么 grace 是 120 不是 90？答案分别在 §6.3、§3.5、§3.6。
+
+---
+
+## 17. Sources
 
 1. k3s Advanced Options（NVIDIA runtime 自动探测、`runtimeClassName: nvidia`、containerd 模板）：https://docs.k3s.io/advanced
 2. NVIDIA Kubernetes device plugin（安装与 DaemonSet）：https://github.com/NVIDIA/k8s-device-plugin

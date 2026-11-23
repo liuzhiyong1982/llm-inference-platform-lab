@@ -1,4 +1,4 @@
-# 从 DevOps 到 AI Infra：A 线（Inference Platform）路线 + 季度执行表
+# 从 DevOps 到 AI Infra：A 线（Inference Platform）主路线 + B 线（AI/ML Platform）就业轨道 + 季度执行表
 
 > 2026-11-20 · 为 Andrew 定制 · 目标函数：**薪资**，不是"学会"
 > 本文是唯一版本（替代更早的一周计划与 12 周版），后续调整都改这里。
@@ -85,16 +85,18 @@ A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/�
 
 **PR / citizenship：** PR 在加拿大自由工作，但没有美国工作授权。现在能走加拿大实体/remote-Canada、少数美国公司的 EOR contractor、或加拿大公司的美国团队内部转岗（L-1 通常需海外任职满一年）。拿到 citizenship 后 TN 是最快通道；TN 的 "Engineer" 类别对学位/P.Eng 有要求，platform/DevOps title 可能更适合 "Computer Systems Analyst"。找移民律师确认，不要把"拿到护照"当成自动美国工作许可。等待期间不要停，先用加拿大 remote 岗位积累 A 线经验。
 
-**时间分配（A 线版）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。DRA、Volcano、Kubeflow、PD 分离深挖降为 30 分钟概念，不进入验收。
+**时间分配（A 线专精 + B 线就业）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno，**同时作为 B 线 artifact 的主证据**）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。DRA、Volcano、Kubeflow、PD 分离深挖降为 30 分钟概念，不进入验收。
+
+> B 线不能只靠“我有 DevOps 履历”。D3（GPU 平台交付）、D5（多租户配额）、Q2 的 chargeback 要能各自独立讲成 10 分钟案例；否则投 B 线岗时仍然只有一个 inference benchmark 项目。
 
 **季度 gate（不再按 12/14 周倒排）：**
 
 | 阶段 | 时间 | 目标 | 产出 |
 |---|---|---|---|
-| Q1 | 0–3 月 | 基线 + 方法学 | D1/D2 报告 + 1 篇公开 writeup + 目标公司清单 |
-| Q2 | 3–6 月 | 引擎深度 + 路由 | KV 压力/量化质量 + llm-d 路由 P99 + 第 2 篇 |
-| Q3 | 6–9 月 | 生产化 + 故障 | K8s/冷启动/Kueue/Kyverno + 故障日志 + 第 3 篇 |
-| Q4 | 9–12 月 | 市场验证 | 10–20 个申请 + mock interview + 小开源贡献 |
+| Q1 | 0–3 月 | 基线 + 方法学 | D1/D2 报告 + D3 冷启动/扩容 + 1 篇公开 writeup + 目标公司清单 |
+| Q2 | 3–6 月 | 引擎深度 + 路由 | KV 压力/量化质量 + llm-d 路由 P99 + chargeback 表 + 第 2 篇 |
+| Q3 | 6–9 月 | 生产化 + 故障 | Kueue/Kyverno 配额 + 故障日志 + SLO 面板 + 第 3 篇 |
+| Q4 | 9–12 月 | 市场验证 | 3 个 A 线 artifact + 3 条 B 线 bullet + 10–20 个申请 + mock interview |
 | 第 2 年 | 12–24 月 | 身份/市场扩展 | citizenship + A 线岗位或内部转岗 + US relocation |
 
 每周 6–8h 是节奏，不是承诺；每季度一个 gate：有 artifact、有申请、有面试反馈，才进入下一阶段。
@@ -339,19 +341,39 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 |---|---|---|---|
 | **D1** | 4h | 按 `d1-vllm-baseline-runbook.md` 跑 baseline；短课当手册，时间不够就跳过[14] | 4 个 baseline JSON + README 表 + 一句话归因 |
 | **D2** | 3h | `max-num-seqs`、chunked prefill on/off、prefix caching 有/无（用 `--disable-prefix-caching` + `--random-prefix-len` 构造共享前缀）；AWQ vs FP16 + 质量门；读 KV cache / batching 那两节[15] | 一张对照表 + 一句话结论（吞吐 +x%，TTFT −y%，质量 Δ） |
-| **D3** | 3h | k3s + vLLM Deployment；**权重分发实测**：initContainer 现下 vs node-local 缓存，测冷启动秒数；KEDA 按 `vllm:num_requests_waiting` 扩缩 | 冷启动对比（秒）+ 扩容曲线 |
-| **D4** | 4h | **llm-d 日**：租 2×L4，按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字 |
-| **D5** | 3h | Kueue `ClusterQueue` 两团队配额[9] + Kyverno 强制 GPU workload 带 priorityClass / quota label；跑"抢卡"演示 | 两条被拒 manifest 日志（这是你独有的交叉点） |
-| **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试 |
-| **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单 |
+| **D3** | 3h | k3s + vLLM Deployment；**权重分发实测**：initContainer 现下 vs node-local 缓存，测冷启动秒数；KEDA 按 `vllm:num_requests_waiting` 扩缩 | 冷启动对比（秒）+ 扩容曲线；**B 线：GPU 平台交付链路 + 每副本成本** |
+| **D4** | 4h | **llm-d 日**：租 2×L4，按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字；**B 线：Gateway/InferencePool 运维图 + 路由故障表** |
+| **D5** | 3h | Kueue `ClusterQueue` 两团队配额[9] + Kyverno 强制 GPU workload 带 priorityClass / quota label；跑"抢卡"演示 | 两条被拒 manifest 日志；**B 线：配额/准入/审计说明** |
+| **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试；**B 线：500 字平台案例 + 2 条 B 线 bullet** |
+| **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单；**B 线：3 个本地 B 线 JD 映射** |
 
-> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，2026-11-23，未执行）；执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
+> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，2026-11-23，未执行）；D3 可直接用 Vast GPU VM（你已在上面跑过 k8s），先确认当前实例是 VM/privileged。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
+
+### D3 / D5 的 B 线讲法
+
+D3/D5 在 A 线作品集里是“平台支撑”，但在 B 线岗位面前要独立讲成两个案例，不能只说“我部署过 vLLM”：
+
+- **D3（GPU 平台交付）**：“我把 vLLM 从裸机搬到单节点 k3s，量了 cold vs warm 冷启动的分阶段耗时（权重下载 __s / 模型加载+引擎 __s / 总 Ready __s），用 KEDA 按 `vllm:num_requests_waiting` 做 0→1 和 1→2 扩容；单卡 1→2 的 `Pending` 证明 GPU 整数分配是容量瓶颈，不是 HPA 算法问题。”
+- **D5（多租户配额与准入）**：“我用 Kueue `ClusterQueue` 给两个团队分 GPU 配额，Kyverno 强制 GPU workload 带 `priorityClass` 和 quota label，跑了一次抢卡演示并留下两条拒绝日志；这解决的是‘谁能拿卡、拿不到怎么排队’，不是副本数。”
+
+### B 线学习内容（D3–D7）
+
+D1/D2 是纯 A 线；从 D3 起每天至少留 30–45 分钟给 B 线，并把内容写进当天记录。B 线不是额外项目，而是同一套实验的另一个视角：
+
+| 天 | B 线学习内容 | 面试能接住的问题 |
+|---|---|---|
+| D3 | GPU 平台交付链路（driver → toolkit → k3s → device plugin → RuntimeClass → Pod）；模型分发（hostPath/local PV vs 镜像内置）；KEDA/HPA；PDB/驱逐；每副本 `$/h`；namespace/label 规范 | GPU 怎么被调度？冷启动慢在哪？单卡为什么扩不出第二副本？怎么优雅驱逐？ |
+| D4 | Gateway API / `InferencePool` / EPP 的部署与健康检查；路由指标（命中率、P99、5xx）；多模型/多租户路由；故障模式（EPP 挂了、后端不健康、前缀不命中） | llm-d 和普通 Service 路由差在哪？EPP 挂了怎么办？多租户怎么隔离？ |
+| D5 | `ClusterQueue` 配额/优先级/抢占；Kyverno 准入与审计；GPU 节点池/容量规划；模型版本回滚 | Kueue 和 HPA 怎么分工？怎么防止一个团队抢光 GPU？模型回滚怎么做？ |
+| D6 | 把 D3/D4/D5 写成平台案例：SLO、成本、故障处置；B 线简历 bullet | 讲一个你交付过的 GPU 平台案例；怎么证明平台没被滥用？ |
+| D7 | B 线公司/JD 清单（Calgary 本地优先）；逐条映射 D3/D5/chargeback | 你的 K8s 经验怎么迁移到 ML platform？chargeback 怎么算？ |
 
 **冲刺版验收（可选；只做 D1 不要用这张表）**
 - [ ] `make bench` 一键复现（尚未实现；做 D3 时补）
 - [ ] 3 张图：throughput vs concurrency / TTFT P99 / llm-d 路由前后 P99
 - [ ] 2 条策略拒绝日志（Kyverno + Kueue）
 - [ ] 冷启动：带缓存 ____ s vs 不带 ____ s
+- [ ] B 线：D3 冷启动表 + D5 两条拒绝日志 + 3 个 B 线 JD 映射
 - [ ] 核心 4 个数字 + 2 个对比全部填上
 - [ ] 10 分钟讲得完，且能被追问 3 层
 
@@ -360,6 +382,17 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 ## 4. 季度 gate 路线（每周 6–8h；不再按 12/14 周倒排）
 
 > 时间表见 §0.6；这里只定义每个 gate 的内容和验收。**不要为了赶周次牺牲深度。**
+
+### A/B 线 artifact 对照（每季度各一个）
+
+§0.6 定了“A 线专精、B 线就业”，但只写在策略层会落空。下面把 B 线 artifact 固定进每个 gate；A 线沿用原验收。
+
+| 季度 | A 线 artifact | B 线 artifact | B 线验收（能独立讲） |
+|---|---|---|---|
+| Q1 | D1 baseline + D2 调参表 | **D3 GPU 平台基线**：k3s + device plugin + vLLM Deployment + cold/warm 冷启动 + KEDA 0→1 | 分阶段冷启动表 + 1→2 `Pending` 或扩容曲线 |
+| Q2 | KV 压力 + llm-d prefix-cache 路由 P99 | **$/1M tokens chargeback**：namespace/team 级成本归属 | 1 小时窗口的成本归属表 + 公式 + 口径说明 |
+| Q3 | 故障 lab + SLO 面板 | **多租户配额**：Kueue `ClusterQueue` + Kyverno 准入 | 2 条拒绝日志 + 配额/优先级说明 |
+| Q4 | 3 个 A 线 artifact 定稿 | **B 线简历 bullet + JD 映射** | 3 个 B 线 JD 逐条映射到证据，能讲 10 分钟 |
 
 ### Q1（0–3 月）：基线 + 方法学
 
@@ -373,9 +406,11 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
   - 每个配置记录：`max-num-seqs`、chunked prefill、prefix caching、量化格式、TTFT P50/P95/P99、TPOT P95、output tok/s、goodput、preemptions。
   - 结论写成「哪个旋钮、动了多少、哪个指标变了多少、为什么」，不是「调到最快」。
   - D3–D5 也各有 baseline：冷启动 naive vs cache、round-robin vs EPP、无策略 vs Kueue/Kyverno。
+- D3（B 线 artifact）：k3s + vLLM Deployment、device plugin、cold/warm 冷启动、KEDA 0→1/1→2；执行细节见 `d3-k8s-vllm-learning.md`。
+- B 线学习：GPU 平台交付链路、模型分发、KEDA/HPA、PDB/驱逐；能回答 `d3-k8s-vllm-learning.md` §12 的 B 线四问。
 - 固定方法学：SLO、样本数、warmup、重复次数、开环/闭环、成本公式、货币。
 - 写 1 篇公开 writeup；列 10 家目标公司 + 5 个真实 JD。
-- **验收：** 4 个 baseline JSON + 1 张调参表 + 1 篇 writeup + 5 次信息面/招聘方沟通。
+- **验收：** 4 个 baseline JSON + 1 张调参表 + 1 篇 writeup + D3 冷启动表/扩容证据 + 5 次信息面/招聘方沟通。
 
 ### Q2（3–6 月）：引擎深度 + 路由
 
@@ -383,22 +418,67 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 - `max-num-batched-tokens` / chunked prefill 的取舍；量化质量 delta。
 - llm-d prefix-cache routing：共享长前缀，对比 round-robin vs EPP 的 P99 和命中率。
 - 源码阅读：vLLM scheduler / KV cache / prefix caching；llm-d EPP。
-- **验收：** 2 个深度 artifact + 第 2 篇 writeup + 5–10 个申请。
+- **B 线 artifact：$/1M output tokens 的 chargeback**（按 namespace/team 归属；执行见本节后面的 lab）。
+- B 线学习：llm-d 的 Gateway/`InferencePool`/EPP 运维；chargeback 口径；多租户路由。
+- **验收：** 2 个 A 线深度 artifact + chargeback 表 + 第 2 篇 writeup + 5–10 个申请。
 
 ### Q3（6–9 月）：生产化 + 故障
 
-- k3s + vLLM Deployment；权重分发：initContainer 现下 vs node-local cache，测冷启动。
-- Kueue `ClusterQueue` 两团队配额 + Kyverno 一条 GPU 准入策略；保留 2 条拒绝日志。
-- DCGM + vLLM `/metrics` + SLO 面板 + `$/1M tokens` 归属。
+- 生产级 manifest 收口：把 Q1 的单节点 D3 扩到多副本/多节点；只有单卡就保留“1→2 `Pending`”的结论，另补 PDB、滚动更新、node drain。
+- **B 线 artifact：** Kueue `ClusterQueue` 两团队配额 + Kyverno 一条 GPU 准入策略；保留 2 条拒绝日志。
+- B 线学习：Kueue 配额/抢占、Kyverno 准入/审计、GPU 节点池/容量规划、模型回滚。
+- DCGM + vLLM `/metrics` + SLO 面板（`$/1M tokens` 归属已在 Q2 的 chargeback lab 完成）。
 - 故障 lab：OOM、KV cache 打满/抢占、pod kill、node drain、权重下载超时、driver 不匹配；每条记录“症状 → 命令 → 判据 → 处置”。
-- **验收：** 生产级 manifest + 2 条策略日志 + 故障日志 + SLO 面板。
+- **验收：** 生产级 manifest + 2 条策略日志 + 故障日志 + SLO 面板 + B 线配额说明。
 
 ### Q4（9–12 月）：市场验证
 
-- 3 个 artifact 定稿；简历 v2；10 分钟讲解录音；10 道必答题自测。
-- 选 3 个真实 JD 逐条映射到证据；投 10–20 个 A/B 线岗位。
+- 3 个 A 线 artifact 定稿；简历 v2；10 分钟讲解录音；10 道必答题自测。
+- **B 线 artifact：** 把 D3/D5/chargeback 各写成 1 条简历 bullet（共 3 条）；选 3 个真实 B 线 JD 逐条映射到证据，再选 3 个 A 线 JD 映射 D1/D2/D4。
+- B 线学习：3 个 B 线 JD 逐条映射；至少 2 场 B 线模拟面试。
+- 投 10–20 个 A/B 线岗位。
 - 可选：给 vLLM/llm-d 提一个小 PR（docs/test/benchmark 都算）。
-- **验收：** 3 个 artifact + 简历 v2 + 10 个已投 + 答上 ≥8/10 题。
+- **验收：** 3 个 A 线 artifact + 3 条 B 线简历 bullet + 简历 v2 + 10 个已投 + 答上 ≥8/10 题。
+
+### B 线 lab：$/1M tokens 的 chargeback（Q2 执行）
+
+目标：回答“哪个 namespace/team 用了多少 GPU 钱”，而不是只报一个全集群的 `$/1M tokens`。B 线 JD 里的“成本归属/chargeback”问的就是这件事。
+
+**先把口径定死（面试第一问就是口径）：**
+
+- 分母用 `vllm:generation_tokens_total`（output tokens），不要混入 prompt tokens；需要全口径时另报一列 `vllm:prompt_tokens_total`[56]。
+- 分子用**副本占用的 GPU 小时 × 单价**，不是“实际忙时”。GPU 空闲也计费，闲置摊销必须算进去，否则低负载时 `$/1M tokens` 会虚低。
+- 一张卡被多个模型共享时，先按 GPU-seconds 或约定份额分摊，再除以各自 tokens；不要直接把整张卡的钱按 token 比例分。
+
+**PromQL（1 小时窗口）：**
+
+```promql
+# 每个 namespace 的 output tokens
+sum by (namespace) (increase(vllm:generation_tokens_total[1h]))
+
+# 每个 namespace 的 prompt tokens（可选，报全口径）
+sum by (namespace) (increase(vllm:prompt_tokens_total[1h]))
+
+# 每个 namespace 的 vLLM 副本数（按 1 GPU/副本估 GPU 小时）
+count by (namespace) (kube_pod_status_phase{phase="Running", pod=~"vllm-.*"} == 1)
+```
+
+> `namespace` 标签由 Prometheus 的 Kubernetes 服务发现加上；如果查询结果为空，先检查 ServiceMonitor/PodMonitor 的 `namespaceSelector`。`kube_pod_status_phase` 来自 kube-state-metrics。
+
+**算账模板（1 小时窗口，单价按实际账单）：**
+
+| namespace | 副本 | GPU 小时 | GPU 成本 | output tokens | $/1M output tokens | 备注 |
+|---|---|---|---|---|---|---|
+| team-a | 1 | 1.0 | $0.2611 | 5.0M | $0.052 | 满负载 |
+| team-b | 1 | 1.0 | $0.2611 | 2.0M | $0.131 | 低负载，闲置摊销高 |
+
+```text
+$/1M output tokens = (GPU 小时 × GPU 单价 + 存储/网络) / (output tokens / 1,000,000)
+```
+
+**交付物：** `results/chargeback-YYYYMMDD.csv` + README 一段“口径 + 一张表 + 一句结论”。结论要能回答：同样的卡，为什么 team-b 的 `$/1M` 是 team-a 的 2.5 倍——是输出长度/模型不同，还是利用率不同。
+
+**面试怎么讲：** “chargeback 的难点不是 PromQL，是口径：按预留 GPU 小时还是按实际 token？我两种都算，差额就是闲置成本；平台团队要能解释这笔钱该由谁承担。”
 
 ### 为什么是 Kueue 而不是 Volcano（以及什么时候反转）
 
@@ -446,6 +526,8 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | 4 | [Optimized Baseline](https://llm-d.ai/docs/well-lit-paths/foundations/optimized-baseline) | 1h | quickstart 的深入版，理解默认参数从哪来 |
 | 5 | [PD Disaggregation](https://llm-d.ai/docs/well-lit-paths/foundations/pd-disaggregation) | 30 min，**只看不跑** | 需要两个池才跑得动；你只要读懂"什么时候不划算" |
 | 6 | [KAITO docs](https://kaito-project.github.io/kaito/docs/)[30] | 20 min | 你集群里已经装了 KAITO——知道它和 llm-d 的关系，面试能接住追问 |
+
+> **B 线视角：** llm-d 不只是路由算法，也是一个平台组件。D4 除了 P99，还要带走：Gateway API/`InferencePool`/EPP 的部署与健康检查、路由指标（命中率/5xx）、故障模式（EPP 挂了、后端不健康）。产出见 §3 的 B 线学习表。
 
 **不要做的三件事：** 不要一上来读 production-stack（给已有集群的人看的）；不要把 10 条 path 都看一遍（一条就够）；不要在 vLLM quickstart 没跑通时去碰 llm-d。
 
@@ -504,13 +586,14 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 
 **选它的理由（L4 的定位）：** 24GB 显存、72W、300GB/s 带宽——典型的"小模型高并发推理卡"。8B 模型 FP16 刚好塞得下（16GB 权重 + 少量 KV cache 紧张），8B AWQ（约 5–6GB）就很宽裕，能跑到有意义的并发。它**没有 NVLink**，不适合做 TP=2 的大模型实验——那一步临时开 2×L4 或 A100 40GB 一小时就够。
 
-**不浪费钱的六条：**
+**不浪费钱的七条：**
 1. 按秒计费；Vast 的 **Stop** 保留容器盘但继续收存储费、且不保证能重启，**Destroy** 才停止计费
 2. 结果先 `scp` 回本地并 push，再决定 Stop（D2 在 24h 内）还是 Destroy（隔几天）；不要长期 Stop 着挂存储费
 3. 直接用 `vllm/vllm-openai` 镜像，省掉装 CUDA/PyTorch 的两小时
 4. 先开 1 小时验证能跑通，再决定要不要长开
 5. 设一个 $15 预算上限，周末复盘花了多少、换到几个数字
 6. 实验脚本全部进 git，机器随时可以删——**机器是租的，数字是你的**
+7. **D3 的 k3s 要 VM/privileged**：你在 Vast GPU VM 上跑过 k8s，租的时候选同类 VM/template；普通容器实例没有 systemd/cgroup，k3s 起不来
 
 ## 4.5 推理平台要不要 K8s（价值、替代方案、什么时候不要）
 
@@ -597,7 +680,7 @@ K8s 只在第 2 层；第 3 层大多是"K8s 之上"，不是替代。
 
 **面试标准答案（一句话 + 一个数字）：** "单模型单机时裸机更快，K8s 的价值在多模型、多租户和弹性；我们量过，走 Service 比 hostNetwork 多约 __ms 的 P99，所以推理热路径走 hostNetwork + 网关直连。"
 
-## 5. 四个核心数字 + 两个对比（A 线版）
+## 5. 四个核心数字 + 两个对比（A 线版）+ 三个 B 线数
 
 核心 4 个（缺一个 writeup 不成立）：
 
@@ -611,14 +694,20 @@ K8s 只在第 2 层；第 3 层大多是"K8s 之上"，不是替代。
 5. 冷启动：____ s（node-local cache）/ ____ s（initContainer 现下）
 6. 质量/路由：AWQ vs FP16 质量 delta ____；prefix-cache 路由 P99 改善 ____%
 
+**B 线三个数（单独报，不要混进上面的 A 线核心）：**
+
+1. 冷启动：cold ____ s / warm ____ s（D3，分阶段见 `d3-k8s-vllm-learning.md` §7）。
+2. 多租户配额：`ClusterQueue` 配额 ____ GPU，拒绝 ____ 次（D5）。
+3. 成本归属：team-a $____/1M output tokens，team-b $____/1M；差额来自 ____（Q2 chargeback）。
+
 **方法学必须一起写：** 样本数、warmup、重复次数、开环/闭环、SLO 定义、GPU 单价/利用率、货币（CAD/USD）。没有这些，数字不可复核。
 
 ---
 
-## 6. 十道必答题 + 四道 llm-d 题
+## 6. 十道必答题 + 四道 llm-d 题 + 四道 B 线题
 
 1. device plugin 为什么不能申请"半张卡"；MIG / time-slicing / MPS / DRA 各解决什么、代价是什么[5][8]
-2. 8B 模型 16GB 权重，怎么让新 pod 20 秒内起来；四种方案代价[5]
+2. 8B 模型 FP16 约 16GB 权重（AWQ 约 5.7GB），怎么让新 pod 20 秒内起来；四种方案代价[5]
 3. 为什么 GPU inference 不该用 CPU 型 HPA，该用什么信号
 4. chat 场景能不能 scale-to-zero，怎么折中[5]
 5. P99 TTFT 高但 GPU util 只有 40%，怎么查
@@ -633,6 +722,12 @@ K8s 只在第 2 层；第 3 层大多是"K8s 之上"，不是替代。
 - `InferencePool` 这个契约解决什么问题？为什么不直接用 Service？
 - PD 分离在什么情况下**不划算**？（低并发、模型小、网络带宽不够搬 KV、集群没有第二个 GPU 池——大多数团队死在这条）
 - wide EP 解决什么？（MoE 模型的专家并行，单机放不下时跨节点切专家）
+
+**B 线四问（D3/D5，答案见 `d3-k8s-vllm-learning.md` §12）：**
+- GPU 平台怎么做多租户隔离？namespace/RBAC、ResourceQuota、Kueue、Kyverno 各管什么？
+- 模型版本回滚怎么做？hostPath/local PV 怎么避免回滚到旧权重？
+- GPU 容量规划为什么不能只看 util？该看哪些指标？
+- chargeback 按 GPU 小时还是按 token？两种口径的差额是什么？
 
 ### A 线源码阅读（每周 1h，不要求写 kernel）
 
@@ -662,6 +757,7 @@ K8s 只在第 2 层；第 3 层大多是"K8s 之上"，不是替代。
 - ❌ A-only：A 线岗位少，B 线是就业基本盘；不要拒绝 AI 公司的平台岗
 - ❌ 把 Data Center Technician / 纯 MLOps 当 A 线入口；它们可以糊口，但不积累推理性能证据
 - ❌ 没有 SLO/样本量就报 P99；用 random 数据测 prefix caching
+- ❌ 只报全集群 `$/1M tokens`，不报 namespace/team 归属和闲置摊销
 - ❌ 在 PR 阶段假设美国 remote 随便投；先确认身份/EOR/岗位所在地
 
 ---
@@ -727,3 +823,4 @@ K8s 只在第 2 层；第 3 层大多是"K8s 之上"，不是替代。
 [53] https://docs.vllm.ai/en/latest/cli/serve/ — vLLM serve CLI
 [54] https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/ — Pod Lifecycle: terminationGracePeriodSeconds (默认 30s) — Kubernetes docs
 [55] https://kubernetes.io/docs/concepts/workloads/controllers/deployment/ — Deployments: rolling update maxUnavailable / maxSurge 默认 25% — Kubernetes docs
+[56] https://docs.vllm.ai/en/stable/design/metrics/ — vLLM Metrics: prompt/generation token counters, request success, model_name label
