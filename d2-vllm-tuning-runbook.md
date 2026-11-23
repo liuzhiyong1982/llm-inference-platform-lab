@@ -715,7 +715,7 @@ for f in sorted(glob.glob("results/d2-*.json")):
 **预期是否被证实：方向证实，但 TTFT 代价被低估。**
 
 - output tok/s：64→32 只掉 3.9%，32→16 再掉 12.9%（相对 32）；**拐点在 32 与 16 之间**，mns32 保留 96.1% 的吞吐。
-- TPOT P95：426→226→130ms（−46.9% / −69.5%），**减少每批序列数确实显著改善 TPOT**。
+- TPOT P95：426→226→130ms（−46.9% / −69.5%），**减少每批序列数确实显著改善 TPOT**（mns 同时限制每步 decode 序列数；TPOT≈step_time，机制见 §10 Q15）。
 - ITL P99.9：2,172→1,883→1,811ms，只小幅下降；`>1s gaps/req` 31→17→3，尾部停顿次数大幅减少，但 ~1.8s 的尖峰仍在——mns 只能缓解、不能消除 prefill 造成的停顿，这正是 4.3b 要测的。
 - TTFT：8.1s→63.3s→104.9s（P50），57.7s→82.9s→111.7s（P99）。**不是“可能变化”，而是灾难性变差**。服务端只跑 16/32 条，其余 48/32 条在 waiting；Little's law 对得上：48 / 0.468 ≈ 102.6s，32 / 0.537 ≈ 59.6s（再加 prefill）。
 - goodput：三组都是 0。TTFT P50 已远超 2s，TPOT P95 也都 >100ms；**没有一个 c=64 的 mns 配置满足 SLO**。
@@ -1078,3 +1078,36 @@ c=16 的 ITL 分布（D1 主跑，n=500，255 gap/请求）：
 但这不是已证实的因果：D1 没有打印每步 token 组成，`bt512` 才是对照实验。
 
 一句话类比：prefill 是“大货车”，decode 是“小包裹”。预算 2048 时，大货车一次装完，小包裹要等它卸完；预算 512 时，大货车分几趟，小包裹可以在每趟之间走。总工作量差不多，但小包裹的单次等待变短。
+
+### Q15：为什么减小 `max-num-seqs` 会降低 TPOT？mns 不是只管排队吗？
+
+不是只管排队。`max-num-seqs` 同时限制两件事：
+
+1. **admission**：最多多少条序列进入 running；
+2. **每步 decode batch 的序列数**：一次 forward 最多算多少条序列的下一个 token。
+
+TPOT 是“这条请求每个输出 token 的平均时间”，在 decode 阶段约等于 **一步 forward 的耗时**。一步里 64 条序列各出 1 token，和 16 条序列各出 1 token，计算量、attention/KV 读取、MLP 都不同：
+
+```text
+mns=64: 一步算 64 条序列 → step 约 419ms → TPOT P50 419ms
+mns=32: 一步算 32 条序列 → step 约 215ms → TPOT P50 215ms
+mns=16: 一步算 16 条序列 → step 约 126ms → TPOT P50 126ms
+```
+
+D2 实测（c=64，n=300）：
+
+| mns | Running | TPOT P50 | TPOT P95 | output tok/s | mns / TPOT P50 |
+|---|---|---|---|---|---|
+| 64 | 64 | 419ms | 426ms | 143.1 | 152.7 |
+| 32 | 32 | 215ms | 226ms | 137.5 | 149.2 |
+| 16 | 16 | 126ms | 130ms | 119.8 | 126.8 |
+
+`output tok/s ≈ mns / TPOT`（实测比估算低 5–8%，差在 prefill、ramp-up、调度开销）。所以不是“mns 和 TPOT 没关系”，而是：
+
+> **mns 决定一步里有多少条序列；TPOT 就是这一步的耗时摊到每个 token 上。**
+
+为什么 64 条和 16 条差这么多：这张卡是 40W 限功耗，GPU 不能靠升频把多出来的 attention/MLP/KV 读取藏掉；每多一条序列，这一步的 attention 和 KV 读取就多一份，step time 随 batch 上升（近似线性到次线性）。权重只读一次，所以吞吐仍然随 batch 上升（64 条 143 tok/s > 16 条 120 tok/s），但每条 token 的延迟变差——这是典型的 throughput-latency trade-off。
+
+**什么时候 mns 不影响 TPOT**：客户端并发 c ≤ mns 时，running 最多只有 c 条，mns=64 和 mns=16 的 decode batch 一样大。4.2 用 c=64 就是为了让 mns 真正绑定；c=8 时改 mns 不会有 TPOT 差异。
+
+**mns 不能解决什么**：它降低的是平均 decode step（TPOT），但 prefill 造成的 ~1.8s ITL 尖峰还在（mns16 的 ITL P99.9 仍有 1,811ms）。那部分要靠 4.3b 的 budget 实验。
