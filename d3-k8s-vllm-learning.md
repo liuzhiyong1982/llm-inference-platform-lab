@@ -299,6 +299,10 @@ vastai destroy instance <ID> -y  # 结果 scp 回本地后再执行
 
 2026-11-23 实测：3090 VM 约 `$0.41/h`（含 130GB 盘），4090 约 `$0.48/h`；3h 约 `$1.2–1.5`。比 D2 的 L4 容器贵，但在 `$15` 预算内。
 
+> **不要用 interruptible（`--bid_price`）做 D3 的正式测量。** D3 的 cold start、KEDA 扩容曲线和驱逐实验都要求同一台机器连续运行；bid 实例被 outbid 后会 pause/stop，k3s、Prometheus TSDB 和 in-flight 请求一起断，这一段数据只能作废重跑。省下来的约 `$0.7` 不值得拿作品集数字冒险。
+>
+> **预算紧时按这个顺序省：** ① 选 3090 而不是 4090；② 只做单卡，接受 1→2 `Pending`；③ 砍 image-cold、scale-to-zero、PDB、2 卡曲线、驱逐的“有排空”对照；④ 提前把 YAML/脚本准备好，租完直接跑；⑤ 结果 `scp` 后立刻 Destroy，不要 Stop 着收存储费。
+
 ### 5.1 记录机器并检查 k3s 前置条件
 
 §5.0 的 `ps -p 1` / `systemctl` 已经确认是 systemd；这里补 k3s 真正依赖的几项：
