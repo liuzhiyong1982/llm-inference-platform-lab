@@ -541,6 +541,38 @@ d2_bench chunk-off 16 200 0    # TAG=chunk-off；C=16 客户端并发；N=200 �
 
 预期：1024-token prompt 在 2048 budget 下本来就能塞进一个 step，chunking 很少真的把单条 prompt 切开；所以 on/off 的差异可能很小。**这组回答的是“交错策略”，不是“步长”**。如果差异很大，先回看启动日志的 `max_num_batched_tokens`，很可能预算被抬到了 8192。
 
+> **结果（2026-11-23）：差异很大，但不是预算被抬高。** 日志确认两边都是 `max_model_len=2048`、`max_num_batched_tokens=2048`；ITL 尾部如预期下降，TTFT **也下降**，吞吐/TPOT 基本不变。见 §4.3.1。
+
+#### 4.3.1 结果与归因（2026-11-23）
+
+条件：实例 `62184627`，L4 23,034 MiB / 40W，`Qwen/Qwen3-8B-AWQ`，vLLM 0.34.0；c=16、n=200、input 1024 / output 256。两边启动日志都确认 `max_model_len=2048`、`max_num_batched_tokens=2048`；`control-2k` 是 `enable_chunked_prefill=True`，`chunk-off` 是 `enable_chunked_prefill=False`。抢占均为 0；KV cache 88,064（control-2k）vs 92,672（chunk-off），都远高于 16×1280，不是 KV 压力。
+
+| run | output tok/s | TTFT P50 | TTFT P95 | TTFT P99 | TPOT P95 | ITL P99 | ITL P99.9 | >1s gaps/req | goodput |
+|---|---|---|---|---|---|---|---|---|---|
+| control-2k（chunk on） | 119.4 | 4,152ms | 7,194ms | 12,324ms | 126.6ms | 1,678ms | 1,811ms | 3（190/200 条有） | 0.0023 |
+| chunk-off（chunk off） | 120.4 | 2,761ms | 4,715ms | 11,467ms | 125.6ms | 939ms | 993ms | 0（0/200 条有） | 0.0024 |
+| 4.1 control-c16（8192，on） | 119.8 | 4,068ms | 7,160ms | 12,104ms | 126.4ms | 1,642ms | 1,810ms | 3 | 0.0023 |
+
+**预期是否被证实：一半。**
+
+- **ITL：证实且超预期。** ITL P99 1,678→939ms（−44.0%），P99.9 1,811→993ms（−45.2%）；control-2k 有 190/200 条请求出现 `>1s gap`（每条中位数 3 个、最多 7 个），chunk-off **0/200**，最大 ITL 999ms。
+- **TTFT：预期被推翻。** 原以为关 chunking 会让 TTFT 变差，实际 P50 4,152→2,761ms（−33.5%），P95 7,194→4,715ms（−34.5%），P99 12,324→11,467ms（−7.0%）。
+- **吞吐/TPOT：基本不变。** output 119.4→120.4（+0.8%），total token throughput 596.8→601.9（+0.9%），TPOT P95 126.6→125.6（−0.8%）。
+- **goodput：** 0.0023→0.0024，都是 0.5% 达标；SLO 仍不满足（TTFT P50 2.76s、TPOT P95 125.6ms 都超）。
+
+**为什么 chunk-off 反而全面更好**（解释，不是已证实的因果）：
+
+- chunking on 时，scheduler 可以用剩余预算调度**部分** prefill；一步可能装进约 2032 个 prefill token（例如一条 1024 prompt + 另一条的 1008 token），decode 要等约 1.8s。
+- chunking off 时，每条 prefill 必须整体调度；剩下装不下的部分不能塞，所以一步最多处理一条 1024-token prompt，decode 最多等约 1s。结果就是 ITL 尾部从 1.8s 降到 1.0s，`>1s gap` 清零。
+- TTFT 变好更像是“整段 prefill 一次完成”减少了分块/交错带来的调度延迟；这一点是解释，不是直接测量。
+- 这不是“预算被抬到 8192”的假象：日志明确是 2048/2048。
+
+**结论**：在这台 40W L4、c=16、1024-token prompt 的负载下，`--disable-chunked-prefill` 不是“用 TTFT 换 ITL”，而是**同时改善 ITL 尾部和 TTFT，吞吐不变**。原因是它把每步的 prefill 上限从“剩余预算（约 2032）”变成“一条完整 prompt（1024）”，等价于一个隐式的 prefill 步长上限。
+
+**但不要外推**：这是低并发、短 prompt 的结果。并发更高或 prompt 更长时，关 chunking 可能造成 head-of-line blocking、TTFT 变差、GPU 利用率下降。D2 的结论只覆盖 c=16 / 1024 in / 256 out / 40W L4。
+
+> 与 4.1 `control-c16` 对比：control-2k 和它几乎完全一致（output 119.4 vs 119.8，TTFT P99 12,324 vs 12,104，ITL P99.9 1,811 vs 1,810），说明 `max-model-len=2048` 对这个 workload 没有影响，control-2k 是有效对照。
+
 ### 4.3b `max-num-batched-tokens` 512（可选，优先于 mns32）
 
 > **先重启服务**：tmux A `Ctrl-C` 停掉 `chunk-off` 服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动。
@@ -706,8 +738,8 @@ lm_eval --model vllm \
 | 1 | control-c64 | AWQ mns=64 | 64 | 300 | 143.1 | 8,102 | 57,706 | 426.2 | 2,172 | 31 | 0 | 0 | 91,648 | 4.2 控制组 |
 | 2 | mns16 | mns=16 | 64 | 300 | 119.8 | 104,945 | 111,659 | 130.1 | 1,811 | 3 | 0 | 0 | 92,672 | Running 16 / Waiting 48 |
 | 3 | mns32 | mns=32 | 64 | 300 | 137.5 | 63,271 | 82,912 | 226.4 | 1,883 | 17 | 0 | 0 | 92,672 | Running 32 / Waiting 32 |
-| 4a | control-2k | 2k len + 2k budget | 16 | 200 | | | | | | | | | | |
-| 4 | chunk-off | chunked off, 2k budget | 16 | 200 | | | | | | | | | | |
+| 4a | control-2k | 2k len + 2k budget | 16 | 200 | 119.4 | 4,152 | 12,324 | 126.6 | 1,811 | 3 | 0.0023（0.5%） | 0 | 88,064 | 同预算对照 |
+| 4 | chunk-off | chunked off, 2k budget | 16 | 200 | 120.4 | 2,761 | 11,467 | 125.6 | 993 | 0 | 0.0024（0.5%） | 0 | 92,672 | 0/200 条 >1s |
 | 4b | bt512 | batch-tokens=512 | 16 | 200 | | | | | | | | | | |
 | 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | | | 命中率 __% |
 | 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | | | 命中率 0% |

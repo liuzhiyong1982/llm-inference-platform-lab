@@ -65,7 +65,9 @@ Vast Charges：**$1.01**（GPU + 存储，2026-11-20，实例 `61674313`）。GP
 4. 需要拆排队时，用 §6 的诊断跑；
 5. 重复 c=16/64 时按 §5.4，报中位数/范围。
 
-## D2 进展：max-num-seqs（2026-11-23，进行中）
+## D2 进展（2026-11-23，进行中）
+
+### 4.2 max-num-seqs
 
 同一天、同一台 40W L4、AWQ、c=64、n=300：
 
@@ -78,6 +80,17 @@ Vast Charges：**$1.01**（GPU + 存储，2026-11-20，实例 `61674313`）。GP
 降 `max-num-seqs` 显著改善 TPOT（426→130ms），但 TTFT P50 从 8.1s 涨到 105s；`mns16` 的吞吐/TPOT 与 c=16 控制组几乎相同，说明**客户端并发超过服务端上限只增加排队，不增加吞吐**。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.2.1。
 
 > D2 的 n=300，D1 的 n=1000；控制组吞吐比 D1 高 7.8%，主要来自运行时长/热节流差异。只做同一天、同一 n 的对比。
+
+### 4.3 chunked prefill off（固定 2048 预算）
+
+同一天、同一台 40W L4、AWQ、c=16、n=200：
+
+| run | output tok/s | TTFT P50 | TTFT P99 | TPOT P95 | ITL P99.9 | >1s gaps/req |
+|---|---|---|---|---|---|---|
+| control-2k（chunk on） | 119.4 | 4.15s | 12.32s | 126.6ms | 1,811ms | 3 |
+| chunk-off | 120.4 | 2.76s | 11.47s | 125.6ms | 993ms | 0 |
+
+`--disable-chunked-prefill` 同时降低 ITL 尾部和 TTFT，吞吐/TPOT 基本不变；200 条请求里 **0 条**出现 `>1s gap`。这是 c=16、1024-token prompt 的结果，不能外推到高并发/长 prompt。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.3.1。
 
 ## 下一步
 
