@@ -65,6 +65,20 @@ Vast Charges：**$1.01**（GPU + 存储，2026-11-20，实例 `61674313`）。GP
 4. 需要拆排队时，用 §6 的诊断跑；
 5. 重复 c=16/64 时按 §5.4，报中位数/范围。
 
+## D2 进展：max-num-seqs（2026-11-23，进行中）
+
+同一天、同一台 40W L4、AWQ、c=64、n=300：
+
+| `max-num-seqs` | output tok/s | TTFT P50 | TPOT P95 | goodput |
+|---|---|---|---|---|
+| 64（控制） | 143.1 | 8.1s | 426ms | 0 |
+| 32 | 137.5 | 63.3s | 226ms | 0 |
+| 16 | 119.8 | 104.9s | 130ms | 0 |
+
+降 `max-num-seqs` 显著改善 TPOT（426→130ms），但 TTFT P50 从 8.1s 涨到 105s；`mns16` 的吞吐/TPOT 与 c=16 控制组几乎相同，说明**客户端并发超过服务端上限只增加排队，不增加吞吐**。完整表与归因见 `d2-vllm-tuning-runbook.md` §6.1。
+
+> D2 的 n=300，D1 的 n=1000；控制组吞吐比 D1 高 7.8%，主要来自运行时长/热节流差异。只做同一天、同一 n 的对比。
+
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
