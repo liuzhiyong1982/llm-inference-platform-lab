@@ -533,6 +533,8 @@ serve_awq chunk-off --max-model-len 2048 --max-num-batched-tokens 2048 --disable
 
 就绪后：
 
+> 注意：最后的 `0` 是 **PREFIX=0**（无共享前缀），不是 `prefill=0`；每条请求仍有 1024 个输入 token。
+
 ```bash
 d2_bench chunk-off 16 200 0    # TAG=chunk-off；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 ```
@@ -1141,3 +1143,24 @@ D2 实测（c=64，n=300）：
 **什么时候 mns 不影响 TPOT**：客户端并发 c ≤ mns 时，running 最多只有 c 条，mns=64 和 mns=16 的 decode batch 一样大。4.2 用 c=64 就是为了让 mns 真正绑定；c=8 时改 mns 不会有 TPOT 差异。
 
 **mns 不能解决什么**：它降低的是平均 decode step（TPOT），但 prefill 造成的 ~1.8s ITL 尖峰还在（mns16 的 ITL P99.9 仍有 1,811ms）。那部分要靠 4.3b 的 budget 实验。
+
+### Q16：4.3 里 `d2_bench chunk-off 16 200 0` 的 `0` 是“prefill=0”吗？
+
+不是。最后一个位置参数是 **PREFIX**（共享前缀长度），0 表示“不构造共享前缀”，和 prefill 无关。
+
+- 每条请求仍然是 `--random-input-len 1024` + `--random-output-len 256`；1024 个输入 token 必须做 prefill，才能生成首 token。
+- 如果 `PREFIX=512`，则 random input = 512，前缀 512，总输入还是 1024；4.4 才用这个。
+- `PREFIX=0` 只是说“没有可复用的相同前缀”，不是“没有 prefill”。
+
+证据：chunk-off 的 `request_throughput = 0.470 req/s`，每条 1024 input → 0.470 × 1024 ≈ **481 input tok/s**；加 output 120.4 = **601.7**，正好等于 `total_token_throughput = 601.9`。如果 prefill=0，total 应该只有约 120 tok/s。
+
+如果你在日志里看到 `Avg prompt throughput: 0.0 tokens/s`，那是 benchmark 结束后的空闲 tail；跑的时候 prompt throughput 是非零的。
+
+### Q17：1024-token prompt 在 2048 预算下，为什么 chunked prefill on/off 还会不同？
+
+因为 chunking 影响的不只是“单条 prompt 是否被切开”，还影响“这一步能不能用**别的请求的部分 prefill**填满剩余预算”。
+
+- **chunk on**：16 条 decode 占 16 token，剩 2032；一条 1024 prompt 算完后还剩 1008，scheduler 可以把**第二条请求的 1008 个 prefill token**也塞进同一步 → 一步约 2032 prefill，decode 等 ~1.8s。
+- **chunk off**：第二条 prefill 必须整体调度，1008 < 1024，装不下 → 只能等下一步；这一步最多一条 1024 prompt → decode 等 ~1s。
+
+所以差异来自“一步里塞了几个 prefill”，不是“prefill 有没有发生”。4.3 实测 ITL P99.9 1,811→993ms，`>1s gap` 190/200→0/200，就是这个机制。
