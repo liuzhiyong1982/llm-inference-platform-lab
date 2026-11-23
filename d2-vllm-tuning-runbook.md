@@ -325,7 +325,7 @@ curl -s http://127.0.0.1:8000/metrics \
 
 ```bash
 BEFORE=$(preempts)
-d2_bench control-c16 16 200 0
+d2_bench control-c16 16 200 0    # TAG=control-c16；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 AFTER=$(preempts)
 echo "preemptions delta: $((AFTER-BEFORE))"
 ```
@@ -347,7 +347,7 @@ bench 窗口（tmux B）：
 ```bash
 # 在另一个 shell 里再粘一次整段（函数和 export 都不会跨 shell）
 preempts
-d2_bench control-c16 16 200 0
+d2_bench control-c16 16 200 0    # TAG=control-c16；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 preempts
 ls -lh /workspace/results/d2-control-c16-*.json
 ```
@@ -406,21 +406,21 @@ serve_awq control-c16 --max-num-seqs 64
 grep -E "GPU KV cache size|Maximum concurrency" /workspace/d2-control-c16.log | tail -2
 
 # 目的：延迟基准
-d2_bench control-c16 16 200 0
+d2_bench control-c16 16 200 0    # TAG=control-c16；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 ```
 
 再跑 c=64 吞吐基准（同一个服务，不用重启）：
 
 ```bash
 # 目的：吞吐基准；n 比 D1 小，控制总时长
-d2_bench control-c64 64 300 0
+d2_bench control-c64 64 300 0    # TAG=control-c64；C=64 客户端并发；N=300 总请求；PREFIX=0 无前缀
 ```
 
 再补一个 c=8，作为 §4.5 AWQ vs FP16 的同并发对照（同一个服务，仍然不用重启）：
 
 ```bash
 # 目的：FP16 在 c=16 会受 KV 上限影响，c=8 才是纯量化对比
-d2_bench control-c8 8 100 0
+d2_bench control-c8 8 100 0    # TAG=control-c8；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
 ```
 
 ### 4.2 `max-num-seqs` 16 / 32
@@ -435,7 +435,7 @@ serve_awq mns16 --max-num-seqs 16
 就绪后：
 
 ```bash
-d2_bench mns16 64 300 0
+d2_bench mns16 64 300 0    # TAG=mns16；C=64 客户端并发；N=300 总请求；PREFIX=0 无前缀
 ```
 
 可选，时间够再做 32：
@@ -449,7 +449,7 @@ serve_awq mns32 --max-num-seqs 32
 就绪后：
 
 ```bash
-d2_bench mns32 64 300 0
+d2_bench mns32 64 300 0    # TAG=mns32；C=64 客户端并发；N=300 总请求；PREFIX=0 无前缀
 ```
 
 预期：`max-num-seqs` 降低会减少每批序列数，TPOT 可能下降、TTFT 排队可能变化，但 output tok/s 通常下降；找“吞吐开始明显掉”的拐点。
@@ -473,7 +473,7 @@ serve_awq control-2k --max-model-len 2048 --max-num-batched-tokens 2048
 就绪后：
 
 ```bash
-d2_bench control-2k 16 200 0
+d2_bench control-2k 16 200 0    # TAG=control-2k；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 ```
 
 再关：
@@ -488,7 +488,7 @@ serve_awq chunk-off --max-model-len 2048 --max-num-batched-tokens 2048 --disable
 就绪后：
 
 ```bash
-d2_bench chunk-off 16 200 0
+d2_bench chunk-off 16 200 0    # TAG=chunk-off；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 ```
 
 > `max-model-len 2048` 对 1024+256 的请求够用；KV cache 总池由显存决定，不随 `max-model-len` 变小。
@@ -507,7 +507,7 @@ serve_awq bt512 --max-num-seqs 64 --max-num-batched-tokens 512
 就绪后：
 
 ```bash
-d2_bench bt512 16 200 0
+d2_bench bt512 16 200 0    # TAG=bt512；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 ```
 
 预期：如果 D1 的 ~2.3s 停顿来自“一个 step 塞进约 2048 个 prefill token”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
@@ -526,7 +526,7 @@ serve_awq prefix-on
 就绪后：
 
 ```bash
-d2_bench prefix-on 16 200 512
+d2_bench prefix-on 16 200 512    # TAG=prefix-on；C=16 客户端并发；N=200 总请求；PREFIX=512 共享前缀
 ```
 
 再跑“缓存关 + 同样前缀”：
@@ -540,7 +540,7 @@ serve_awq prefix-off --disable-prefix-caching
 就绪后：
 
 ```bash
-d2_bench prefix-off 16 200 512
+d2_bench prefix-off 16 200 512    # TAG=prefix-off；C=16 客户端并发；N=200 总请求；PREFIX=512 共享前缀
 ```
 
 记录服务端日志的命中率：
@@ -570,13 +570,13 @@ serve_fp16 fp16-c8
 
 ```bash
 grep -E "GPU KV cache size|Maximum concurrency" /workspace/d2-fp16-c8.log | tail -2
-d2_bench fp16-c8 8 100 0
+d2_bench fp16-c8 8 100 0    # TAG=fp16-c8；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
 ```
 
 可选：在同一个 FP16 服务上再跑 c=16（不用重启），观察 KV 容量效应。**先看抢占增量**；如果 `>0`，这一行只能说明“FP16 的 KV 不够”，不是纯量化对比：
 
 ```bash
-d2_bench fp16-c16 16 200 0
+d2_bench fp16-c16 16 200 0    # TAG=fp16-c16；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀（同一 FP16 服务）
 ```
 
 如果启动 OOM：
@@ -591,7 +591,7 @@ serve_fp16 fp16-4k --max-model-len 4096
 就绪后：
 
 ```bash
-d2_bench fp16-4k 8 100 0
+d2_bench fp16-4k 8 100 0    # TAG=fp16-4k；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
 ```
 
 > 读启动日志时记下 FP16 的 `GPU KV cache size`；它和 AWQ 的 91,648 对比，就是“量化多换来的容量”，这比单纯的 tok/s 更能解释 24GB 卡上的取舍。
