@@ -739,6 +739,8 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 >
 > `--max-model-len` 在 4.5 里是 **8192**（`serve_fp16` 显式写的）。vLLM 0.34 在不传时用模型 config 的 `max_position_embeddings`（Qwen3-8B 是 **40960**），24GB 上 FP16 很可能 OOM；**4096** 只在 8192 OOM 时作为退路。我们的请求只有 1,280，4096 也够。
 
+> 每轮 bench 前后都用 §3.4 的 `preempts` 读累计抢占数；`delta > 0` 表示这一轮发生了 KV 抢占。`preempts` 读的是 `vllm:num_preemptions_total`；如果 `curl` 失败也会打印 0，先确认 `/metrics` 可访问。
+
 AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
 
 > **先重启服务**：tmux A `Ctrl-C` 停掉 `prefix-off` 服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动 FP16。
@@ -752,14 +754,26 @@ serve_fp16 fp16-c8 --max-num-seqs 64
 
 ```bash
 grep -E "GPU KV cache size|Maximum concurrency" /workspace/d2-fp16-c8.log | tail -2
+
+# §3.4 的 preempts 函数：读累计抢占数；差值就是本轮增量
+BEFORE=$(preempts)
 d2_bench fp16-c8 8 100 0    # TAG=fp16-c8；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
+AFTER=$(preempts)
+echo "preemptions delta: $((AFTER-BEFORE))"
 ```
 
-可选：在同一个 FP16 服务上再跑 c=16（不用重启），观察 KV 容量效应。**先看抢占增量**；如果 `>0`，这一行只能说明“FP16 的 KV 不够”，不是纯量化对比：
+`c=8` 的 delta 预期是 **0**；如果 `>0`，说明 10,240 token 的 KV 需求已经触发抢占，这一轮不能当纯量化对比，先降并发或查 KV。
+
+可选：在同一个 FP16 服务上再跑 c=16（不用重启），观察 KV 容量效应。**先看下面的 `preemptions delta`**；如果 `>0`，这一行只能说明“FP16 的 KV 不够”，不是纯量化对比：
 
 ```bash
+BEFORE=$(preempts)
 d2_bench fp16-c16 16 200 0    # TAG=fp16-c16；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀（同一 FP16 服务）
+AFTER=$(preempts)
+echo "preemptions delta: $((AFTER-BEFORE))"
 ```
+
+c=16 需要 `20,480 > 18,944`，delta 很可能 `>0`；即使 delta=0，只要 TTFT 因排队变差，也不能当纯量化对比。
 
 如果启动 OOM：
 
@@ -773,7 +787,10 @@ serve_fp16 fp16-4k --max-num-seqs 64 --max-model-len 4096
 就绪后：
 
 ```bash
+BEFORE=$(preempts)
 d2_bench fp16-4k 8 100 0    # TAG=fp16-4k；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
+AFTER=$(preempts)
+echo "preemptions delta: $((AFTER-BEFORE))"
 ```
 
 > 读启动日志时记下 FP16 的 `GPU KV cache size`；它和 D2 AWQ 控制组的 91,648（D1 是 96,256）对比，就是“量化多换来的容量”，这比单纯的 tok/s 更能解释 24GB 卡上的取舍。
