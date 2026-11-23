@@ -15,14 +15,14 @@
 |---|---|---|
 | 前置检查 + 下载 FP16 | 20 min | `Qwen/Qwen3-8B` 可用；flag 核对完 |
 | 控制组（c=16 / c=64） | 25 min | 当天的 AWQ baseline |
-| `max-num-seqs` 16/32 | 25 min | 吞吐 vs TPOT 拐点 |
-| chunked prefill off + `bt512` | 20 min | TTFT/TPOT/ITL 变化，步长假设 |
+| `max-num-seqs` 16/32 | 20 min | 吞吐 vs TPOT 拐点 |
+| chunked prefill off + `bt512` | 30 min | 同预算对照 + 步长假设 |
 | prefix caching on/off | 20 min | 共享前缀下的 TTFT、命中率 |
 | AWQ vs FP16 | 15 min | 吞吐/显存对比 |
-| 质量门（GSM8K 50 条） | 30 min | exact match delta |
+| 质量门（GSM8K 50 条） | 25 min | exact match delta |
 | 记录 + 收尾 | 25 min | 对照表 + 一句话结论 + commit |
 
-**时间不够按这个顺序砍：** 质量门（先注明 deferred）→ `max-num-seqs=32` → `bt512` → c=64 控制组。**不要砍掉控制组和“一次一个变量”。**
+**时间不够按这个顺序砍：** 质量门（先注明 deferred）→ `max-num-seqs=32` → `chunk-off` 对照对 → `bt512` → c=64 控制组。**不要砍掉控制组和“一次一个变量”。**
 
 ---
 
@@ -63,7 +63,8 @@ vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 | 1 | `control-c64` | 同上 | c=64, n=300 | 当天吞吐基准 |
 | 2 | `mns16` | `--max-num-seqs 16` | c=64, n=300 | 服务端并发上限的影响 |
 | 3 | `mns32` | `--max-num-seqs 32`（可选） | c=64, n=300 | 找拐点 |
-| 4 | `chunk-off` | `--disable-chunked-prefill` | c=16, n=200 | 整段 prefill 不再切块 |
+| 4a | `control-2k` | `--max-model-len 2048 --max-num-batched-tokens 2048` | c=16, n=200 | #4 的同预算对照 |
+| 4 | `chunk-off` | 同上 + `--disable-chunked-prefill` | c=16, n=200 | 固定预算下关掉 prefill/decode 交错 |
 | 4b | `bt512`（可选，优先于 mns32） | `--max-num-batched-tokens 512` | c=16, n=200 | 直接验证“大步 prefill 造成 decode 停顿” |
 | 5 | `prefix-on` | 默认（prefix on） | c=16, n=200, prefix=512 | 共享前缀的缓存收益 |
 | 6 | `prefix-off` | `--disable-prefix-caching` | c=16, n=200, prefix=512 | 无缓存对照 |
@@ -130,6 +131,7 @@ lm_eval --help >/dev/null && echo "lm-eval ok"
 ```bash
 # 目的：统一启动 AWQ 服务；额外参数由调用方传，比如 --max-num-seqs 16
 # 注意：v0.34 的 max_num_seqs 默认是 128；控制组必须显式传 --max-num-seqs 64 才能和 D1 对齐
+# 调用方传的同名参数会覆盖上面的默认值（argparse 后者优先），比如 --max-model-len 2048
 serve_awq() {
   local TAG="$1"; shift
   cd /workspace
@@ -263,11 +265,31 @@ d2_bench mns32 64 300 0
 
 预期：`max-num-seqs` 降低会减少每批序列数，TPOT 可能下降、TTFT 排队可能变化，但 output tok/s 通常下降；找“吞吐开始明显掉”的拐点。
 
-### 4.3 chunked prefill off
+### 4.3 chunked prefill off（固定 2048 预算，含对照）
+
+v0.34 源码里有两条约束：
+
+1. `--disable-chunked-prefill` 要求 `max_num_batched_tokens >= max_model_len`，否则启动直接 `ValueError`；
+2. 不显式传 budget 时，EngineArgs 会自动把 budget 抬到 `max_model_len`（这里是 8192）。
+
+所以“直接关 chunking”会同时把步长预算从 2048 改成 8192，两个变量一起动。要单变量，就把 `max-model-len` 和 budget 都钉在 2048，先跑一个 chunking 仍开着的对照：
 
 ```bash
-# 目的：关闭 chunked prefill，对比默认（控制组 c=16）
-serve_awq chunk-off --disable-chunked-prefill
+# 目的：#4 的同预算对照；除了 chunked prefill 开关，其他都与 chunk-off 相同
+serve_awq control-2k --max-model-len 2048 --max-num-batched-tokens 2048
+```
+
+就绪后：
+
+```bash
+d2_bench control-2k 16 200 0
+```
+
+再关：
+
+```bash
+# 目的：同一 2048 预算下，关掉 prefill/decode 交错
+serve_awq chunk-off --max-model-len 2048 --max-num-batched-tokens 2048 --disable-chunked-prefill
 ```
 
 就绪后：
@@ -276,7 +298,9 @@ serve_awq chunk-off --disable-chunked-prefill
 d2_bench chunk-off 16 200 0
 ```
 
-预期：关闭后每段 prefill 一次算完，不再按 2048-token 预算切块；TTFT P99 可能变大，但 ITL P99.9 / `>1s gaps` 可能变小。**这组主要看 ITL，不只看 TPOT**——TPOT 会把秒级停顿平均掉。
+> `max-model-len 2048` 对 1024+256 的请求够用；KV cache 总池由显存决定，不随 `max-model-len` 变小。
+
+预期：1024-token prompt 在 2048 budget 下本来就能塞进一个 step，chunking 很少真的把单条 prompt 切开；所以 on/off 的差异可能很小。**这组回答的是“交错策略”，不是“步长”**。如果差异很大，先回看启动日志的 `max_num_batched_tokens`，很可能预算被抬到了 8192。
 
 ### 4.3b `max-num-batched-tokens` 512（可选，优先于 mns32）
 
@@ -406,7 +430,8 @@ lm_eval --model vllm \
 | 1 | control-c64 | AWQ mns=64 | 64 | 300 | | | | | | | | | | |
 | 2 | mns16 | mns=16 | 64 | 300 | | | | | | | | | | |
 | 3 | mns32 | mns=32 | 64 | 300 | | | | | | | | | | |
-| 4 | chunk-off | chunked off | 16 | 200 | | | | | | | | | | |
+| 4a | control-2k | 2k len + 2k budget | 16 | 200 | | | | | | | | | | |
+| 4 | chunk-off | chunked off, 2k budget | 16 | 200 | | | | | | | | | | |
 | 4b | bt512 | batch-tokens=512 | 16 | 200 | | | | | | | | | | |
 | 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | | | 命中率 __% |
 | 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | | | 命中率 0% |
@@ -431,7 +456,7 @@ for f in sorted(glob.glob("results/d2-*.json")):
 
 一句话结论模板：
 
-> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 __ 变为 __、TTFT P99 从 __ 变为 __；关闭 chunked prefill 使 ITL P99.9 __、TTFT P99 __；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%（c=8）、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
+> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 __ 变为 __、TTFT P99 从 __ 变为 __；关闭 chunked prefill（固定 2048 预算）使 ITL P99.9 __、TTFT P99 __；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%（c=8）、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
 
 每条结论必须带数字和方向（+x% / −y%），不要写“效果更好”。
 
@@ -461,6 +486,8 @@ ls -lh /workspace/d2-*.log
 | FP16 c=16 TTFT 明显变差 | FP16 KV 只剩约 1.9 万 token，16×1280 已压上限 | 主对比用 c=8；c=16 单独标“KV 受限”，看抢占 |
 | `--no-enable-*` 在 help 里搜不到 | v0.34 的 EnableDisableAction 只显示 `--enable-x` / `--disable-x`；`--no-enable-x` 是隐藏兼容别名 | 用 `--disable-*`；`grep -E "disable-(chunked-prefill\|prefix-caching)"` 对一遍 |
 | `--max-num-seqs 64` 没生效 | v0.34 默认是 128 | 控制组命令里显式写；看启动日志 `non-default args` 的 `max_num_seqs` |
+| `chunk-off` 启动报 `max_num_batched_tokens < max_model_len` | v0.34 关 chunked prefill 时 budget 必须 ≥ max_model_len | 同时传 `--max-model-len 2048 --max-num-batched-tokens 2048` |
+| `chunk-off` 差异巨大 | 没显式传 budget，被自动抬到 8192，步长也变了 | 固定 2048 预算，先跑 `control-2k` 对照 |
 | prefix 实验没差异 | 前缀不是共享的，或总长度不是 1024 | 看 JSON `input_lens`；确认 `PREFIX=512` 且 `IN=512` |
 | `max-num-seqs` 改了没变化 | 客户端 c 低于服务端上限 | 用 c=64 才看得出 16/32 的差别 |
 | `local-completions` 报错 | lm-eval 与当前 API 不兼容 | 用 `--model vllm` 退路；先停 8000 服务 |
@@ -474,7 +501,7 @@ ls -lh /workspace/d2-*.log
 - [ ] 同一天、同一台 L4 的 control（c=16 / c=64）
 - [ ] `max-num-seqs` 16（可选 32）结果
 - [ ] `max-num-batched-tokens 512` 结果（可选，但优先于 mns32）
-- [ ] chunked prefill off 结果
+- [ ] chunked prefill off（含 `control-2k` 同预算对照）结果，或明确 deferred
 - [ ] prefix caching on/off（共享 512-token 前缀）+ 命中率
 - [ ] AWQ vs FP16：c=8 主对比 + 两边 KV cache 数字（时间不够可 deferred，但要写明）
 - [ ] GSM8K 50 条质量门（或明确 deferred；记录 max_gen_toks）
