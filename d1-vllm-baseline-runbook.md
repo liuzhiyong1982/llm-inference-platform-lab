@@ -621,7 +621,7 @@ D1 用到的 flag 逐项解释：
 
 **“抢占”（preemption）是什么**：vLLM 的 KV cache 是固定大小的块池。当新请求要不到空闲块时，调度器会把**已经在跑**的某条序列的 KV 块收走腾地方：要么丢弃、之后重算（recompute），要么换到 CPU 再换回来（swap）。被抢占的请求会多出重算/搬运开销，表现为 ITL/TTFT 尖峰。所以 `num_preemptions_total` 的增量 > 0 是 KV cache 压力的直接信号。
 
-它和 Vast 的 interruptible 实例被 host 暂停**不是一回事**：前者是 vLLM 内部的显存调度，后者是整台实例被 marketplace 抢占。D1 里 c=64 的 KV 需求约 `64 × (1024+256) = 81,920` tokens，小于 91,648 的 KV 容量，所以预期抢占为 0。
+它和 Vast 的 interruptible 实例被 host 暂停**不是一回事**：前者是 vLLM 内部的显存调度，后者是整台实例被 marketplace 抢占。D1 里 c=64 的 KV 需求约 `64 × (1024+256) = 81,920` tokens，小于 96,256 的 KV 容量，所以预期抢占为 0。
 
 ### 5.4 重复 c=16/64（可选，约 20–50 分钟）
 
@@ -1267,8 +1267,8 @@ tmux capture-pane -p -t ssh_tmux:2 -S -300 > /workspace/results/client-stdout.lo
    144 KiB × 16 = 2,304 KiB = 2.25 MiB / block
 
 ⑤ 从总 token 数换算 block 和 GiB
-   91,648 / 16 = 5,728 blocks
-   5,728 × 2.25 MiB = 12,888 MiB = 12.59 GiB
+   96,256 / 16 = 6,016 blocks
+   6,016 × 2.25 MiB = 13,536 MiB = 13.22 GiB
 ```
 
 通用公式（换任何模型都能用）：
@@ -1279,26 +1279,28 @@ KV B/token = 2 × layers × kv_heads × head_dim × dtype_bytes
 
 ### 2. 为什么是 8 个 head，不是 32
 
-Qwen3-8B 有 32 个 query head，但只有 8 个 KV head，每 4 个 query head 共享一组 K/V，这就是 GQA（Grouped Query Attention）。如果按 32 个 KV head 算（MHA），每 token 是 **576 KiB**，4 倍——91,648 token 要 50 GiB，24GB 卡放不下。**GQA 存在的意义就是压 KV cache。**
+Qwen3-8B 有 32 个 query head，但只有 8 个 KV head，每 4 个 query head 共享一组 K/V，这就是 GQA（Grouped Query Attention）。如果按 32 个 KV head 算（MHA），每 token 是 **576 KiB**，4 倍——96,256 token 要 53 GiB，24GB 卡放不下。**GQA 存在的意义就是压 KV cache。**
 
-### 3. 91,648 不是模型常数
+### 3. 96,256 不是模型常数
+
+> 2026-11-23 修正：D1 三个启动日志实测 `96,256 tokens` / `11.75x`；早期文档里的 `91,648` / `11.19x` 是 D2 控制组的值，已更正。
 
 它是 vLLM 启动时量出来的：
 
 ```
 可用 KV 显存 = 24GB × gpu-memory-utilization − 权重 − 激活 − CUDA context
-91,648 tokens = 可用 KV 字节 / 144 KiB
+96,256 tokens = 可用 KV 字节 / 144 KiB
 ```
 
 换卡、换量化、改 `gpu-memory-utilization`，这个数都会变；模型本身只决定 144 KiB/token。
 
 ### 4. 三个可以自己验算的结论
 
-**8k 上下文为什么是 11.19x**
+**8k 上下文为什么是 11.75x**
 
 ```
 8,192 token × 144 KiB = 1,152 MiB = 1.125 GiB / 请求
-12.59 GiB / 1.125 GiB = 11.19
+13.22 GiB / 1.125 GiB = 11.75
 ```
 
 **实际请求为什么是 80 blocks**
@@ -1312,15 +1314,15 @@ Qwen3-8B 有 32 个 query head，但只有 8 个 KV head，每 4 个 query head 
 **c=64 为什么抢占为 0**
 
 ```
-KV 上限：91,648 / 1,280 = 71.6 条
+KV 上限：96,256 / 1,280 = 75.2 条
 但 --max-num-seqs 64 先生效
-64 × 1,280 = 81,920 < 91,648 → 还有余量
+64 × 1,280 = 81,920 < 96,256 → 还有余量
 ```
 
 vLLM 日志里的两个数：
 
-- `GPU KV cache size: 91,648 tokens`：按 `gpu-memory-utilization` 扣掉权重和激活后，剩下的显存能放多少 KV token；
-- `Maximum concurrency for 8,192 tokens per request: 11.19x`：`91,648 / 8,192 = 11.19`，假设每条请求都吃满 8k 上下文。
+- `GPU KV cache size: 96,256 tokens`：按 `gpu-memory-utilization` 扣掉权重和激活后，剩下的显存能放多少 KV token；
+- `Maximum concurrency for 8,192 tokens per request: 11.75x`：`96,256 / 8,192 = 11.75`，假设每条请求都吃满 8k 上下文。
 
 **这三个“最大并发”要分清**：KV 上限（71）、服务端 batch 上限（64）、SLO 安全并发（见下）。
 
@@ -1336,9 +1338,9 @@ vLLM 日志里的两个数：
 
 ### 6. 换配置会怎样
 
-| 配置 | 每 token KV | 同样 12.6 GiB 能放 |
+| 配置 | 每 token KV | 同样 13.2 GiB 能放 |
 |---|---|---|
-| FP16 KV（当前） | 144 KiB | 91,648 token |
+| FP16 KV（当前） | 144 KiB | 96,256 token |
 | FP8 KV | 72 KiB | ~183,000 token（2×） |
 | MHA（32 KV head） | 576 KiB | ~22,900 token（1/4） |
 

@@ -12,7 +12,7 @@ D1：单卡 L4 上的 vLLM serving 基线。执行步骤见 [`d1-vllm-baseline-r
 - **host**：driver 595.99.02（Max CUDA 13.2），24 vCPU / 125GB RAM
 - **模型**：`Qwen/Qwen3-8B-AWQ`（约 5.7GB）
 - **服务**：`max-model-len 8192`、`gpu-memory-utilization 0.90`、`max-num-seqs 64`、prefix caching 默认开
-- **启动指标**：模型加载约 **69s**；KV cache **91,648 tokens**；8k 请求最大并发 **11.19x**
+- **启动指标**：模型加载约 **69s**；KV cache **96,256 tokens**；8k 请求最大并发 **11.75x**
 - **负载**：`vllm bench serve` → `/v1/completions`，random 数据集，输入 1024 / 输出 256，`--ignore-eos`，`--temperature 0`
 - **采样**：`nvidia-smi` 每秒一次（util / 显存 / 功耗 / 温度 / SM clock）+ vLLM `/metrics` 抢占计数
 

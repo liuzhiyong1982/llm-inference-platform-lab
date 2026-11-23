@@ -682,7 +682,11 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 
 ### 4.5 AWQ vs FP16
 
-**主对比用 c=8，不要直接 c=16。** AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB；按 144KiB/token 算，这 10.7GB 约等于 7.2 万 token 的 KV。D1 的 AWQ KV 是 91,648 token，所以 FP16 大约只剩 **1.9 万 token**，而 c=16 × 1280 token/请求 = 20,480，已经压到 KV 上限——TTFT 会被排队/KV 压力污染，不能把差异全算成量化。
+**主对比用 c=8，不要直接 c=16。** AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB；按 144KiB/token 算，这 10.7GB 约等于 7.2 万 token 的 KV。D2 控制组的 AWQ KV 是 91,648 token（D1 是 96,256），所以 FP16 大约只剩 **1.9 万 token**，而 c=16 × 1280 token/请求 = 20,480，已经压到 KV 上限——TTFT 会被排队/KV 压力污染，不能把差异全算成量化。
+
+> D1 本身就是 AWQ baseline（`Qwen/Qwen3-8B-AWQ`，`quantization=auto_awq`）；D1 没有跑过 FP16，FP16 是 D2 新增的对照。
+>
+> D1 与 D2 的 AWQ KV 差约 4,600 token（96,256 vs 91,648），来自不同 host / 启动 profiling；4.5 用 D2 控制组的值估算 FP16，因为 FP16 也跑在 D2 这台机器上。
 
 AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
 
@@ -721,7 +725,7 @@ serve_fp16 fp16-4k --max-model-len 4096
 d2_bench fp16-4k 8 100 0    # TAG=fp16-4k；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
 ```
 
-> 读启动日志时记下 FP16 的 `GPU KV cache size`；它和 AWQ 的 91,648 对比，就是“量化多换来的容量”，这比单纯的 tok/s 更能解释 24GB 卡上的取舍。
+> 读启动日志时记下 FP16 的 `GPU KV cache size`；它和 D2 AWQ 控制组的 91,648（D1 是 96,256）对比，就是“量化多换来的容量”，这比单纯的 tok/s 更能解释 24GB 卡上的取舍。
 
 ---
 
@@ -920,7 +924,7 @@ D2 用 `--random-prefix-len 512` 造一段所有请求共享的 512-token 前缀
 
 合理预期是 1–5 个点，随任务而变。D2 的 50 条 GSM8K 只是 smoke test：n=50 时单个比例的 95% CI 约 ±11 个点，分辨不了 1–2 个点；报告写原始命中数（如 43/50 vs 44/50），不要写“只掉 1.2 个点”。
 
-**容量**：AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB ≈ 7.2 万 token 的 KV；D1 的 AWQ KV 是 91,648 token，所以 FP16 大约只剩 1.9 万。c=16 × 1280 = 20,480 已经压到 FP16 的 KV 上限，因此 AWQ vs FP16 的主对比放 c=8，c=16 只作 KV 容量观察（看抢占）。
+**容量**：AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB ≈ 7.2 万 token 的 KV；D2 控制组的 AWQ KV 是 91,648 token（D1 是 96,256），所以 FP16 大约只剩 1.9 万。c=16 × 1280 = 20,480 已经压到 FP16 的 KV 上限，因此 AWQ vs FP16 的主对比放 c=8，c=16 只作 KV 容量观察（看抢占）。
 
 ### Q6：TPOT 和 ITL 有什么区别？
 
