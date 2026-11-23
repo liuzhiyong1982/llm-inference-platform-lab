@@ -73,7 +73,7 @@ vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 | 7 | `fp16-c8` | `Qwen/Qwen3-8B` + `--dtype float16` | c=8, n=100 | 量化 vs 半精度（主对比） |
 | 7b | `fp16-c16`（可选） | 同上 | c=16, n=200 | KV 容量效应，不是纯量化对比 |
 
-> 默认 `max_num_batched_tokens` 是 2048。D1 看到的 ~2.3s decode 停顿，量级正好等于“一个调度步塞进 2048 个 prefill token”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
+> 默认 `max_num_batched_tokens` 是 2048。D1 c=64 的 ITL P99 = 2,345ms，量级正好等于“一个调度步塞进 2048 个 prefill token”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
 
 为什么 c=16/c=64：c=16 看延迟和 TPOT，c=64 看吞吐上限和排队。D2 的 n 比 D1 小，是为了在 3 小时内跑完多个配置；**同一个对比对内的 n 必须一致**（c=16 对用 n=200，c=64 用 n=300，AWQ/FP16 的 c=8 对用 n=100）。
 
@@ -526,7 +526,11 @@ serve_awq bt512 --max-num-seqs 64 --max-num-batched-tokens 512
 d2_bench bt512 16 200 0    # TAG=bt512；C=16 客户端并发；N=200 总请求；PREFIX=0 无前缀
 ```
 
-预期：如果 D1 的 ~2.3s 停顿来自“一个 step 塞进约 2048 个 prefill token”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
+> **“~2.3s 停顿”到底是什么**：D1 **c=64** 的 **ITL P99 = 2,345ms**（P99.9 2,367ms），来自 1000 条请求 × 255 个 token gap 展平后的分布；不是 TPOT，也不是 TTFT。同一轮 TPOT P95 只有 470ms，因为 TPOT 把 255 个 gap 平均掉了。
+>
+> 运行条件：40W L4、Qwen3-8B-AWQ、vLLM 0.34.0、`max-model-len 8192`、`max-num-seqs 64`、chunked prefill on、prefix caching on、random 1024 in / 256 out、`--ignore-eos`、`--temperature 0`、c=64、n=1000。D1 c=16 的 ITL P99.9 约 2.0s；诊断跑 c=16/n=200 的 ITL P99 1.83s / P99.9 1.99s。
+
+预期：如果 D1 的秒级停顿（c=16 的 ITL P99.9 ≈ 2.0s，c=64 的 ITL P99 ≈ 2.3s）来自“一个 step 塞进约 2048 个 prefill token”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
 
 ### 4.4 prefix caching on/off（共享前缀）
 
@@ -768,7 +772,7 @@ ls -lh /workspace/d2-*.log
 
 例子：64 条序列各 decode 1 token = 64 token；一条 1024-token prompt 做 prefill = 1024 token；两条 1024-token prompt 同一步 = 2048 token，正好打满。
 
-调大 budget：每步塞更多 token，吞吐上升，但单步变长、ITL 尾部变差；调小：ITL 更平滑，但步数变多、吞吐下降、长 prompt 的 TTFT 变差。D1 的 ~2.3s 停顿，量级等于一个 1024–2048 token 的 prefill step，所以 `bt512` 是直接检验。
+调大 budget：每步塞更多 token，吞吐上升，但单步变长、ITL 尾部变差；调小：ITL 更平滑，但步数变多、吞吐下降、长 prompt 的 TTFT 变差。D1 c=64 的 ITL P99 = 2,345ms，量级等于一个 1024–2048 token 的 prefill step，所以 `bt512` 是直接检验。
 
 ### Q3：chunked prefill 是什么？
 
@@ -975,3 +979,19 @@ t2:  又完成 1 条 → 同样补位
 | 尾延迟 | 被最慢请求拖住 | 只影响队列，不阻塞整批 |
 
 服务端日志里直接看 `Running: 16 reqs, Waiting: 48 reqs`；这就是这个状态。`mns16` 这个 tag 只表示服务是用 `--max-num-seqs 16` 起的，bench 命令本身不会改服务端配置。
+
+### Q13：4.3b 里的 “~2.3s 停顿” 是什么指标？当时是什么条件？
+
+**指标是 ITL，不是 TPOT/TTFT。** D1 c=64 的 ITL P99 = 2,345ms、P99.9 = 2,367ms、max 2,387ms；这是 1000 条请求 × 255 个 gap = 255,000 个样本展平后的尾部。
+
+| D1 跑 | c | n | ITL P99 | ITL P99.9 | TPOT P95 | >1s gaps/req 中位数 |
+|---|---|---|---|---|---|---|
+| 主跑 | 64 | 1000 | 2,345ms | 2,367ms | 470ms | 34 |
+| 主跑 | 16 | 500 | 1,082ms | 2,006ms | 137ms | 13 |
+| 诊断 | 16 | 200 | 1,832ms | 1,985ms | 134ms | 8 |
+
+运行条件：40W L4、Qwen3-8B-AWQ（W4A16）、vLLM 0.34.0、`max-model-len 8192`、`max-num-seqs 64`、chunked prefill on、prefix caching on、random 1024 in / 256 out、`--ignore-eos`、`--temperature 0`；主跑 c=64/n=1000，诊断 c=16/n=200 且开了 `--enable-per-request-metrics`。ITL 数组来自客户端 `--save-detailed` 的 JSON。
+
+为什么不是 TPOT：同一轮 c=64 的 TPOT P95 只有 470ms，因为每条请求的 255 个 gap 里中位数有 34 个超过 1s，平均后变成 453ms 的 TPOT P50。**ITL 看的是单个 gap，TPOT 看的是整条请求的平均。**
+
+这不是“某一条请求总共卡了 2.3s”，而是“所有 decode gap 里最慢的 1% 约 2.3s”。它说明 decode 不是匀速的，但**不能单凭这个数字证明是 prefill 造成的**；4.3b 的 `bt512` 就是把这个假设变成可检验的实验：如果压小每步 prefill 预算后 ITL 尾部明显下降，假设才成立。
