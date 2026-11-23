@@ -452,7 +452,7 @@ serve_awq mns32 --max-num-seqs 32
 d2_bench mns32 64 300 0    # TAG=mns32；C=64 客户端并发；N=300 总请求；PREFIX=0 无前缀
 ```
 
-预期：`max-num-seqs` 降低会减少每批序列数，TPOT 可能下降、TTFT 排队可能变化，但 output tok/s 通常下降；找“吞吐开始明显掉”的拐点。
+预期：`max-num-seqs` 降低会减少每批序列数，TPOT 可能下降、TTFT 排队可能变化，但 output tok/s 通常下降；找“吞吐开始明显掉”的拐点。注意：这不是“64 条一批、跑完再下一批”；vLLM 是 continuous batching，16 条 running 完成一条就补一条，日志里应看到 `Running: 16 reqs, Waiting: ~48 reqs`。
 
 ### 4.3 chunked prefill off（固定 2048 预算，含对照）
 
@@ -910,3 +910,28 @@ scheduler：max_num_seqs=64, budget=2048
 
 - 同一对比对内 n 必须一致；跨并发比较时 n 不同会影响 ramp-up 占比，报告里要写。
 - `--num-prompts` 不是 `--limit`（lm-eval 的 50 条样本），也不是 `--max-num-seqs`；它只是客户端的样本量。
+
+### Q12：`d2_bench mns16 64 300 0` 是“发 64 条、处理完再发下一批 64 条”吗？
+
+不是。这是**静态批处理**的直觉，vLLM 用的是 **continuous batching**（连续批处理）：
+
+- 客户端 `--max-concurrency 64` 是一个**滑动窗口**：保持最多 64 条在飞；任意一条完成，就立刻从剩下的请求里补一条，不会等 64 条全部完成。
+- 服务端 `--max-num-seqs 16` 是另一个上限：最多 16 条 running，其余在 waiting 队列。
+- 所以典型状态是：客户端 64 条在飞；服务端 16 条 running + 约 48 条 waiting；每完成一条，waiting 里补一条，客户端再补一条。
+- 直到 300 条全部发完，客户端停止补发，窗口从 64 逐渐排空。
+
+时间线：
+
+| 时刻 | 客户端已发 | 客户端在飞 | 服务端 running | 服务端 waiting |
+|---|---|---|---|---|
+| t0 | 64 | 64 | 16 | 48 |
+| t1 | 65 | 64 | 16 | 48 |
+| ... | ... | ... | ... | ... |
+| 结束前 | 300 | 64→0 | 16→0 | 48→0 |
+
+关键区别：
+
+- **静态批处理**：64 条一批，等最慢的一条完成才发下一批；GPU 会有空洞，尾延迟差。
+- **continuous batching**：每个 iteration 重新组 batch；完成的走、排队的进；没有“批”的屏障。
+
+服务端日志里直接看 `Running: 16 reqs, Waiting: 48 reqs`；这就是这个状态。`mns16` 这个 tag 只表示服务是用 `--max-num-seqs 16` 起的，bench 命令本身不会改服务端配置。

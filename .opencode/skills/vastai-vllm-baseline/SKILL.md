@@ -44,6 +44,7 @@ GPU 架构 (L4 = sm_89)
 | 概念 | 一句话 | v0.34 关键数字 / 坑 |
 |---|---|---|
 | prefill vs decode | prefill 并行算 prompt、写 KV；decode 每步 1 token、读 KV | TTFT≈排队+prefill；TPOT/ITL≈decode step |
+| continuous batching | 每个 iteration 重新组 batch，完成即补位 | 不是静态分批；`c=64` + `mns=16` → 16 running + 48 waiting |
 | `max-num-batched-tokens` | 一次 forward 的 token 预算，prefill+decode 共用 | 默认 2048；不是并发数；调小→ITL 稳、吞吐降、长 prompt TTFT 升 |
 | `max-model-len` | 单条请求 prompt+output 的上限（空间） | 不预分配 KV；关 chunking 时 budget 必须 ≥ 它 |
 | `--num-prompts` | 一轮总请求数（样本量），不是并发 | `n < c` 到不了目标并发；per-request P99.9 需 N≥1000，看 ITL P99.9 更稳 |
