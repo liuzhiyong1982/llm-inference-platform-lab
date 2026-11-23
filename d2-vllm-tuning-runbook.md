@@ -59,6 +59,7 @@ vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 | # | tag | 服务端配置 | bench | 目的 |
 |---|---|---|---|---|
 | 0 | `control-c16` | AWQ，`--max-num-seqs 64`，chunked on，prefix on | c=16, n=200 | 当天延迟基准 |
+| 0b | `control-c8` | 同上 | c=8, n=100 | #7 的同并发对照 |
 | 1 | `control-c64` | 同上 | c=64, n=300 | 当天吞吐基准 |
 | 2 | `mns16` | `--max-num-seqs 16` | c=64, n=300 | 服务端并发上限的影响 |
 | 3 | `mns32` | `--max-num-seqs 32`（可选） | c=64, n=300 | 找拐点 |
@@ -66,11 +67,12 @@ vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 | 4b | `bt512`（可选，优先于 mns32） | `--max-num-batched-tokens 512` | c=16, n=200 | 直接验证“大步 prefill 造成 decode 停顿” |
 | 5 | `prefix-on` | 默认（prefix on） | c=16, n=200, prefix=512 | 共享前缀的缓存收益 |
 | 6 | `prefix-off` | `--disable-prefix-caching` | c=16, n=200, prefix=512 | 无缓存对照 |
-| 7 | `fp16` | `Qwen/Qwen3-8B` + `--dtype float16` | c=16, n=200 | 量化 vs 半精度 |
+| 7 | `fp16-c8` | `Qwen/Qwen3-8B` + `--dtype float16` | c=8, n=100 | 量化 vs 半精度（主对比） |
+| 7b | `fp16-c16`（可选） | 同上 | c=16, n=200 | KV 容量效应，不是纯量化对比 |
 
 > 默认 `max_num_batched_tokens` 是 2048。D1 看到的 ~2.3s decode 停顿，量级正好等于“一个调度步塞进 2048 个 prefill token”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
 
-为什么 c=16/c=64：c=16 看延迟和 TPOT，c=64 看吞吐上限和排队。D2 的 n 比 D1 小，是为了在 3 小时内跑完多个配置；**同一张表内所有行必须用同样的 n**。
+为什么 c=16/c=64：c=16 看延迟和 TPOT，c=64 看吞吐上限和排队。D2 的 n 比 D1 小，是为了在 3 小时内跑完多个配置；**同一个对比对内的 n 必须一致**（c=16 对用 n=200，c=64 用 n=300，AWQ/FP16 的 c=8 对用 n=100）。
 
 ---
 
@@ -232,6 +234,13 @@ d2_bench control-c16 16 200 0
 d2_bench control-c64 64 300 0
 ```
 
+再补一个 c=8，作为 §4.5 AWQ vs FP16 的同并发对照（同一个服务，仍然不用重启）：
+
+```bash
+# 目的：FP16 在 c=16 会受 KV 上限影响，c=8 才是纯量化对比
+d2_bench control-c8 8 100 0
+```
+
 ### 4.2 `max-num-seqs` 16 / 32
 
 ```bash
@@ -318,25 +327,37 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 
 ### 4.5 AWQ vs FP16
 
+**主对比用 c=8，不要直接 c=16。** AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB；按 144KiB/token 算，这 10.7GB 约等于 7.2 万 token 的 KV。D1 的 AWQ KV 是 91,648 token，所以 FP16 大约只剩 **1.9 万 token**，而 c=16 × 1280 token/请求 = 20,480，已经压到 KV 上限——TTFT 会被排队/KV 压力污染，不能把差异全算成量化。
+
+AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
+
 ```bash
 # 目的：同一 served name，换 FP16 权重；先确认显存够，OOM 就降 max-model-len
-serve_fp16 fp16
+serve_fp16 fp16-c8
 ```
 
 就绪后：
 
 ```bash
-grep -E "GPU KV cache size|Maximum concurrency" /workspace/d2-fp16.log | tail -2
-d2_bench fp16 16 200 0
+grep -E "GPU KV cache size|Maximum concurrency" /workspace/d2-fp16-c8.log | tail -2
+d2_bench fp16-c8 8 100 0
 ```
 
-FP16 的 KV cache 会比 AWQ 小（权重占 16.4GB），c=64 可能触发抢占；D2 只在 c=16 比，不强行跑 c=64。如果启动 OOM：
+可选：再跑 c=16，观察 KV 容量效应。**先看抢占增量**；如果 `>0`，这一行只能说明“FP16 的 KV 不够”，不是纯量化对比：
+
+```bash
+d2_bench fp16-c16 16 200 0
+```
+
+如果启动 OOM：
 
 ```bash
 # 目的：FP16 权重太大时缩短上下文，先保证能跑；在 README 里注明
 serve_fp16 fp16-4k --max-model-len 4096
-d2_bench fp16-4k 16 200 0
+d2_bench fp16-4k 8 100 0
 ```
+
+> 读启动日志时记下 FP16 的 `GPU KV cache size`；它和 AWQ 的 91,648 对比，就是“量化多换来的容量”，这比单纯的 tok/s 更能解释 24GB 卡上的取舍。
 
 ---
 
@@ -344,7 +365,9 @@ d2_bench fp16-4k 16 200 0
 
 只在 AWQ 和 FP16 两个服务都跑过性能后做；它衡量“量化掉了多少质量”，不是性能。
 
-AWQ 服务还开着时：
+两个服务不能同时占 8000 端口：如果当前开着的是 FP16，就先测 FP16；测完 `Ctrl-C`，用 `serve_awq qgate-awq --max-num-seqs 64` 重启 AWQ 再测 AWQ。**两边的 `max_gen_toks` 必须一致**。
+
+AWQ 服务开着时：
 
 ```bash
 # 目的：用当前 vLLM 服务做 50 条 GSM8K，5-shot，greedy；记录 exact_match
@@ -368,7 +391,7 @@ lm_eval --model vllm \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
 ```
 
-> 50 条 GSM8K 只是指示性质量门，不是完整评测。AWQ 掉 1–2 个点以内通常可接受；掉超过 5 个点要在结论里明确写“质量不可接受”。
+> 50 条 GSM8K 只是指示性质量门，不是完整评测：n=50 时单个比例的 95% 置信区间约 ±11 个点，**分辨不了 1–2 个点的差异**。报告里写原始命中数（如 43/50 vs 44/50）和“未检测到明显掉点 / 检测到明显掉点”，不要写“AWQ 只掉 1.2 个点”。
 
 ---
 
@@ -379,6 +402,7 @@ lm_eval --model vllm \
 | # | tag | 配置 | c | n | output tok/s | TTFT P50 | TTFT P99 | TPOT P95 | ITL P99.9 | >1s gaps/req | goodput | 抢占 Δ | KV cache | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 0 | control-c16 | AWQ mns=64 | 16 | 200 | | | | | | | | | | |
+| 0b | control-c8 | AWQ mns=64 | 8 | 100 | | | | | | | | | | |
 | 1 | control-c64 | AWQ mns=64 | 64 | 300 | | | | | | | | | | |
 | 2 | mns16 | mns=16 | 64 | 300 | | | | | | | | | | |
 | 3 | mns32 | mns=32 | 64 | 300 | | | | | | | | | | |
@@ -386,7 +410,8 @@ lm_eval --model vllm \
 | 4b | bt512 | batch-tokens=512 | 16 | 200 | | | | | | | | | | |
 | 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | | | 命中率 __% |
 | 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | | | 命中率 0% |
-| 7 | fp16 | FP16 | 16 | 200 | | | | | | | | | | |
+| 7 | fp16-c8 | FP16 | 8 | 100 | | | | | | | | | | |
+| 7b | fp16-c16 | FP16（可选） | 16 | 200 | | | | | | | | | | KV 受限，看抢占 |
 
 `ITL P99.9` 也可以直接读 JSON 的 `p99.9_itl_ms`（bench 已加 `99.9`；**key 里是小数点，不是下划线**）；`>1s gaps/req` 要自己从 `itls` 数：
 
@@ -406,7 +431,7 @@ for f in sorted(glob.glob("results/d2-*.json")):
 
 一句话结论模板：
 
-> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 __ 变为 __、TTFT P99 从 __ 变为 __；关闭 chunked prefill 使 ITL P99.9 __、TTFT P99 __；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
+> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 __ 变为 __、TTFT P99 从 __ 变为 __；关闭 chunked prefill 使 ITL P99.9 __、TTFT P99 __；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%（c=8）、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
 
 每条结论必须带数字和方向（+x% / −y%），不要写“效果更好”。
 
@@ -432,7 +457,8 @@ ls -lh /workspace/d2-*.log
 | 症状 | 原因 | 处置 |
 |---|---|---|
 | 两次结果差很多 | host 噪声 / 功耗墙波动 | 同一配置重复 2 次；报中位数/范围；不要拿单次最好值 |
-| FP16 启动 OOM | 16.4GB 权重 + 8k KV 放不下 | `--max-model-len 4096`；或只跑 c=1/4/16 |
+| FP16 启动 OOM | 16.4GB 权重 + 8k KV 放不下 | `--max-model-len 4096`；或只跑 c=1/4/8 |
+| FP16 c=16 TTFT 明显变差 | FP16 KV 只剩约 1.9 万 token，16×1280 已压上限 | 主对比用 c=8；c=16 单独标“KV 受限”，看抢占 |
 | `--no-enable-*` 在 help 里搜不到 | v0.34 的 EnableDisableAction 只显示 `--enable-x` / `--disable-x`；`--no-enable-x` 是隐藏兼容别名 | 用 `--disable-*`；`grep -E "disable-(chunked-prefill\|prefix-caching)"` 对一遍 |
 | `--max-num-seqs 64` 没生效 | v0.34 默认是 128 | 控制组命令里显式写；看启动日志 `non-default args` 的 `max_num_seqs` |
 | prefix 实验没差异 | 前缀不是共享的，或总长度不是 1024 | 看 JSON `input_lens`；确认 `PREFIX=512` 且 `IN=512` |
@@ -450,7 +476,7 @@ ls -lh /workspace/d2-*.log
 - [ ] `max-num-batched-tokens 512` 结果（可选，但优先于 mns32）
 - [ ] chunked prefill off 结果
 - [ ] prefix caching on/off（共享 512-token 前缀）+ 命中率
-- [ ] AWQ vs FP16 吞吐/显存对比（时间不够可 deferred，但要写明）
+- [ ] AWQ vs FP16：c=8 主对比 + 两边 KV cache 数字（时间不够可 deferred，但要写明）
 - [ ] GSM8K 50 条质量门（或明确 deferred；记录 max_gen_toks）
 - [ ] ITL P50/P99/P99.9 + `>1s gaps/req`（不只 TPOT）
 - [ ] 一张对照表 + 一句话结论（带数字和方向）
