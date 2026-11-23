@@ -142,7 +142,7 @@ vastai create instance <offer_id> \
 
 固定镜像 tag，不要 `latest`（nightly 的 CUDA 和 flag 都会漂）。
 
-> **D3 的 k3s 需要 VM，不是容器**：search 时加 `vms_enabled=true`，用官方 Ubuntu 22.04 VM 模板创建；命令见仓库 `d3-k8s-vllm-learning.md` §2.1。不要用 `vllm/vllm-openai` 容器镜像建 VM，它不会给你 systemd。
+> **D3 的 k3s 需要 VM，不是容器**：search 时加 `vms_enabled=true`，用官方 Ubuntu 22.04 VM 模板创建；命令见仓库 `d3-k8s-vllm-learning.md` §5.0。不要用 `vllm/vllm-openai` 容器镜像建 VM，它不会给你 systemd。
 
 ### 2. SSH 与 tmux
 

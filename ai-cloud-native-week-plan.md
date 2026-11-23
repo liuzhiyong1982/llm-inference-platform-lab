@@ -347,7 +347,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 | **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试；**B 线：500 字平台案例 + 2 条 B 线 bullet** |
 | **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单；**B 线：3 个本地 B 线 JD 映射** |
 
-> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，2026-11-23，未执行）；D3 可直接用 Vast GPU VM（你已在上面跑过 k8s），先确认当前实例是 VM/privileged。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
+> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，2026-11-23，未执行）；D3 直接用 Vast RTX VM（你已在上面跑过 k8s），租借命令见该文档 §5.0。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
 
 ### D3 / D5 的 B 线讲法
 
@@ -593,7 +593,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 4. 先开 1 小时验证能跑通，再决定要不要长开
 5. 设一个 $15 预算上限，周末复盘花了多少、换到几个数字
 6. 实验脚本全部进 git，机器随时可以删——**机器是租的，数字是你的**
-7. **D3 的 k3s 要 VM/privileged**：你在 Vast GPU VM 上跑过 k8s，租的时候选同类 VM/template；普通容器实例没有 systemd/cgroup，k3s 起不来。2026-11-23 实测 Vast 没有 L4 VM，24GB VM 主要是 3090/4090，约 `$0.41–0.48/h`
+7. **D3 的 k3s 要 VM/privileged**：你以前就在 Vast 的 RTX VM 上跑过 k8s，租的时候选同类 RTX VM/template；普通容器实例没有 systemd/cgroup，k3s 起不来。2026-11-23 实测 Vast 没有 L4 VM，24GB VM 主要是 3090/4090，约 `$0.41–0.48/h`
 
 ## 4.5 推理平台要不要 K8s（价值、替代方案、什么时候不要）
 

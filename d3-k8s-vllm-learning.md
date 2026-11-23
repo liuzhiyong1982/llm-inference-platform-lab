@@ -8,16 +8,16 @@
 >
 > 硬约束：**不在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**。用自己租的/本地的单机 GPU；所有对比同机、同模型、同输入/输出长度、同 SLO。
 >
-> 环境：本地 Linux 或 **Vast GPU VM**（你已在 Vast GPU VM 上跑过 k8s）；Vast 普通容器实例没有 systemd/cgroup，不要用。
+> 环境：本地 Linux 或 **Vast RTX VM**（你已在 Vast 的 RTX VM 上跑过 k8s）；Vast 普通容器实例没有 systemd/cgroup，不要用。
 
 ---
 
 ## 0. 先看结论（执行前先记住）
 
 1. **K8s 不会让推理变快。** 它提供的是声明式发布、服务发现、调度、扩缩容；代价是镜像拉取、权重分发、网络转发、调度排队四层开销。
-2. **冷启动不等于“启动到 ready 69s”。** D1 的 69s 是进程启动到 API ready，其中 `Model loading took ... 7.72s`、`init engine ... 21.72s`；完整冷启动还要加镜像拉取和权重下载（5.7GB）。不分阶段测，数字不可比。
-3. **单卡上 KEDA 1→2 必然 Pending。** `nvidia.com/gpu` 是整数资源，device plugin 不会把一张 L4 切成两张；这不是 KEDA 的 bug，是 GPU 调度模型的边界。
-4. **scale-to-zero 对 chat 基本不可用。** 70s 级冷启动会打穿 TTFT SLO；它只适合异步、批处理、低频请求。KEDA 缩到 0 也不会替你排队——请求会直接失败。
+2. **冷启动不等于“启动到 ready 69s”。** D1 的 69s 是 L4 上进程启动到 API ready，其中 `Model loading took ... 7.72s`、`init engine ... 21.72s`；完整冷启动还要加镜像拉取和权重下载（5.7GB）。D3 跑在 RTX 3090/4090 上，绝对值不能和 D1 的 L4 直接比；但“调度 / 镜像 / 权重 / 加载 / Ready”的分阶段口径一致。
+3. **单卡上 KEDA 1→2 必然 Pending。** `nvidia.com/gpu` 是整数资源，device plugin 不会把一张 24GB 卡切成两张；这不是 KEDA 的 bug，是 GPU 调度模型的边界。
+4. **scale-to-zero 对 chat 基本不可用。** 几十秒级冷启动会打穿 TTFT SLO；它只适合异步、批处理、低频请求。KEDA 缩到 0 也不会替你排队——请求会直接失败。
 5. **驱逐要三层配合。** Endpoint 摘除 → `preStop` 等传播 → `SIGTERM` 后 vLLM `--shutdown-timeout` 排空；`terminationGracePeriodSeconds` 必须大于 `preStop + shutdown-timeout`，否则 SIGKILL 会把排空窗口直接截断。
 
 ---
@@ -34,6 +34,7 @@ D3 只测三个数（“能部署”没有区分度）：
 
 验收清单：
 
+- [ ] Vast 实例是 RTX VM（`ps -p 1` = `systemd`），记录 GPU 型号 / driver / power limit；
 - [ ] k3s 单节点起来，`nvidia.com/gpu` 可分配；
 - [ ] vLLM Deployment Ready，`/v1/models` 和一次 completion 成功；
 - [ ] 冷启动表：cold / warm（可选 image-cold），每段有秒数；
@@ -44,8 +45,9 @@ D3 只测三个数（“能部署”没有区分度）：
 
 ### 1.1 3 小时最小路径 vs 完整路径
 
-| 阶段 | 最小路径（单卡，3h） | 完整路径（2 卡，4–5h） |
+| 阶段 | 最小路径（单卡 RTX，3h） | 完整路径（2 卡 RTX，4–5h） |
 |---|---|---|
+| 租 VM + 启动（不含在 3h 内） | 10–15 min | 10–15 min |
 | 读 §2–§4 概念 | 30 min | 30 min |
 | k3s + GPU runtime + device plugin | 45 min | 45 min |
 | 模型缓存 + Deployment + Service | 30 min | 30 min |
@@ -54,7 +56,7 @@ D3 只测三个数（“能部署”没有区分度）：
 | 驱逐 | 15 min | 30 min |
 | 记录 + commit | 30 min | 30 min |
 
-> 3h 是最小路径；如果只能租一张卡，接受“1→2 Pending”这个结果，它本身就是 D3 的核心结论之一。真实扩容曲线留给 2 卡（也可以和 D4 的 2×L4 合并）。
+> 3h 是**登录 VM 之后**的净时间；租 VM、等 `creating → running` 另加 10–15 分钟。如果只能租一张卡，接受“1→2 Pending”这个结果，它本身就是 D3 的核心结论之一。真实扩容曲线留给 2 卡；2 卡 RTX VM 约 `$0.85–1.0/h`，比单卡贵一倍，预算紧就只做单卡。
 >
 > **3h 不够时按这个顺序砍：** image-cold → scale-to-zero → PDB → 2 卡曲线 → 驱逐的“有排空”对照。**不要砍 cold/warm 和 1→2 Pending**：前者是 B 线 artifact 的核心数字，后者是单卡 GPU 调度的核心结论。
 
@@ -77,7 +79,7 @@ B 线验收：§16 至少 1 条简历 bullet 能脱稿讲 10 分钟，并接住 
 | 方案 | 可行性 | 代价 | 建议 |
 |---|---|---|---|
 | **本地 Linux + NVIDIA GPU** | 最高 | 需要 root、能装内核模块/容器运行时 | **首选**；最接近生产，调试成本最低 |
-| **Vast.ai GPU VM** | 高（你已在 Vast GPU VM 上跑过 k8s） | 按小时计费；必须是 VM/privileged，普通容器实例不行 | **首选之一**；复用你上次成功的 image/template，先做 §5.0 的确认 |
+| **Vast.ai RTX GPU VM** | 高（你已在 Vast 的 RTX VM 上跑过 k8s） | 按小时计费；必须是 VM/privileged，普通容器实例不行 | **D3 主路径**；复用你上次成功的 image/template，先做 §5.0–§5.1 的确认 |
 | **云 GPU VM**（Azure/AWS/GCP 单卡） | 高 | 按小时计费；注意配额和 GPU 型号 | 次选；记录 `power.limit` 和驱动版本 |
 | **Vast.ai 普通容器实例** | 低 | 无 systemd/cgroup 权限 | 不要用；换 VM |
 | **共享 UAT AKS `uat-mobility-aks-01`** | — | 污染共享环境、触发 Coder→Reviewer SOP、花公司钱 | **禁止** |
@@ -90,101 +92,15 @@ B 线验收：§16 至少 1 条简历 bullet 能脱稿讲 10 分钟，并接住 
 | KEDA 0→1 | 可以测 | 可以测 |
 | KEDA 1→2 | 第二个 Pod 会 `Pending`（`Insufficient nvidia.com/gpu`） | 可以测真实扩容曲线 |
 | 驱逐 | 可以测，但删掉唯一副本会短暂 0 可用 | 可以测 PDB / 滚动更新 |
-| 成本（L4 容器 / 24GB VM） | `$0.2611/h` / 约 `$0.41–0.48/h` | `$0.5111/h`（GPU ×2 + 存储） |
+| 成本（单卡 RTX VM / 2 卡 RTX VM） | 约 `$0.41–0.48/h` | 约 `$0.85–1.0/h`（GPU ×2 + 存储） |
 
+> L4 容器 `$0.2611/h` 只作 D1/D2 参照；D3 的 k3s 不能跑在普通容器里，所以 D3 不报 L4 容器的价格。
+>
 > 机制可以用 CPU + 小模型（如 `Qwen3-0.6B`）练，但**冷启动秒数只能用目标 GPU 测**；不要把 CPU 数字写进作品集。
 
-> 2026-11-23 实测：Vast 上搜不到 L4 VM（`gpu_name=L4 vms_enabled=true` 返回空），24GB VM 只有 3090/4090/5090。用 3090/4090 时，D3 只做内部 cold/warm 对比，**不要**把吞吐或冷启动秒数和 D1/D2 的 L4 数字直接比。
+> 2026-11-23 实测：Vast 上搜不到 L4 VM（`gpu_name=L4 vms_enabled=true` 返回空），24GB VM 只有 3090/4090/5090。你以前已经在 Vast 的 RTX VM 上跑过 k8s，所以 **RTX 3090/4090 VM 是 D3 的主路径**，不是临时兜底。用 RTX 时，D3 只做内部 cold/warm 对比，**不要**把吞吐或冷启动秒数和 D1/D2 的 L4 数字直接比。
 
-### 2.1 在 Vast 租一台 GPU VM（CLI）
-
-k3s 需要 systemd/cgroup；**普通容器实例不行**，必须选 `vms_enabled=true` 的 VM。下面命令按顺序执行。
-
-**0）账号与 SSH key：**
-
-```bash
-vastai show user -q
-vastai show ssh-keys
-
-# 没有 key 时，把路径换成你的公钥
-vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
-```
-
-**1）搜 VM offer：**
-
-```bash
-# L4 VM：先试；当前返回空是正常的
-vastai search offers -n \
-  'gpu_name=L4 num_gpus=1 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.95' \
-  -o 'dph' --storage 130 --limit 10
-
-# 24GB VM 兜底：3090/4090/5090
-vastai search offers -n \
-  'num_gpus=1 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.98' \
-  -o 'dph' --storage 130 --limit 10
-```
-
-挑 `R >= 0.98`、`Net_down >= 500`、`Disk >= 100`、`Max_Days >= 1`、`ports >= 1` 的。**必须用 `vms_enabled=true` 查询返回的 offer ID**；同一个 GPU 的 VM 和容器 offer ID 不同，拿容器 ID 建 VM 会失败。
-
-**2）创建 VM：**
-
-```bash
-vastai create instance <OFFER_ID> \
-  --template_hash 2c18cabd8f2f0525c2ff8446f5d4e063 \
-  --disk 130 \
-  --label d3-k3s-vm \
-  --cancel-unavail
-```
-
-模板是官方 `Ubuntu 22.04 VM`（`vm=True`、SSH、自带 CUDA/Docker），自带 `vms_enabled` 过滤。不要用 `vllm/vllm-openai` 镜像建 VM：那是容器模板，不会给你 systemd。
-
-如果建出来不是 VM（下一步 `ps -p 1` 不是 `systemd`），destroy 后走 API：
-
-```bash
-curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
-  -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
-  -H "Content-Type: application/json" \
-  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"runtype":"ssh_direct","label":"d3-k3s-vm","cancel_unavail":true}'
-```
-
-**3）SSH 与 VM 确认：**
-
-```bash
-vastai show instances
-vastai ssh-url <ID>
-
-# ssh-url 输出形如 ssh://root@host:port；换成：
-ssh -p <PORT> root@<HOST>
-
-# 在 VM 里执行：
-ps -p 1 -o comm=                 # 必须是 systemd
-systemctl is-system-running      # running/degraded 都算起来了
-stat -fc %T /sys/fs/cgroup       # 期望 cgroup2fs
-nvidia-smi
-df -h /
-```
-
-`ps -p 1` 不是 `systemd` 就说明拿到的是容器，立刻 `vastai destroy instance <ID> -y`，不要继续装 k3s。
-
-**4）计费与清理：**
-
-```bash
-vastai show instances
-vastai stop instance <ID>        # 保留磁盘，继续收存储费
-vastai destroy instance <ID> -y  # 结果 scp 回本地后再执行
-```
-
-2026-11-23 实测：3090 VM 约 `$0.41/h`（含 130GB 盘），4090 约 `$0.48/h`；3h 约 `$1.2–1.5`。比 D2 的 L4 容器贵，但在 `$15` 预算内。
-
-开工前记录：
-
-```bash
-# 目的：这些是后面所有数字的可比性前提
-nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit --format=csv,noheader
-nvidia-container-toolkit --version 2>/dev/null || nvidia-ctk --version
-uname -r
-df -h /var/lib
-```
+> 租 VM 的具体命令见 §5.0；这一节只比较环境方案。
 
 ---
 
@@ -217,7 +133,7 @@ NVIDIA driver (host)
 
 关键点：
 
-- **device plugin 只做整数分配**：一张 L4 只能给一个 Pod（除非 MIG / time-slicing / MPS / DRA）。
+- **device plugin 只做整数分配**：一张 24GB 卡（L4/3090/4090）只能给一个 Pod（除非 MIG / time-slicing / MPS / DRA）。
 - `nvidia.com/gpu` 要写在 `limits` 里；只写 `requests` 可能拿不到设备。两者同时写时必须相等。
 - Pod 里能不能看到 GPU，取决于 runtime（`runtimeClassName: nvidia`）和 device plugin 是否 Ready；两者缺一不可。
 - MIG 把 A100/H100 切成固定切片；time-slicing 让多个 Pod 共享同一张卡但互相抢算力；MPS 做进程级并发；DRA 是 K8s 新的设备分配 API。**对 LLM 推理，time-slicing 会直接破坏 TPOT/ITL，不要把它当“免费切卡”。**
@@ -305,27 +221,109 @@ terminationGracePeriodSeconds > preStop 秒数 + --shutdown-timeout + 进程清�
 
 ---
 
-## 5. Lab 0：k3s + GPU runtime + device plugin
+## 5. Lab 0：租 RTX VM + k3s + GPU runtime + device plugin
 
-### 5.0 先检查“能不能跑 k3s”
+### 5.0 在 Vast 租一台 RTX VM（CLI）
 
-先按 §2.1 租 VM。你以前在 Vast 的 GPU VM 上跑过 k8s，说明 Vast 这条路可行；但 Vast 也有普通容器实例，租完先在**当前实例**上确认它是 VM/privileged：
+k3s 需要 systemd/cgroup；**普通容器实例不行**，必须选 `vms_enabled=true` 的 VM。你上次已经在 RTX VM 上跑通 k8s，直接复用同一类机器和安装方式。下面命令按顺序执行。
+
+**0）账号与 SSH key：**
 
 ```bash
-# 目的：确认有 systemd / cgroup v2 / 能写 /var/lib/rancher
-ps -p 1 -o comm=
-systemctl is-system-running 2>/dev/null || true
-stat -fc %T /sys/fs/cgroup
-sudo test -w /var/lib && echo "var-lib writable"
+vastai show user -q
+vastai show ssh-keys
+
+# 没有 key 时，把路径换成你的公钥
+vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
 ```
 
-> 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。不要在 D3 里换发行版，先把冷启动数字测出来。
+**1）搜 VM offer：**
 
-- `ps -p 1` 不是 `systemd`（例如是 `tini`/`bash`），k3s 的 systemd 服务方式就不适用；可以试 `k3s server` 前台运行，但重启管理要自己做。
+```bash
+# 直接搜 RTX VM（L4 VM 当前为空，不用先试）
+vastai search offers -n \
+  'num_gpus=1 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.98 cpu_ram>=64' \
+  -o 'dph' --storage 130 --limit 10
+```
+
+挑 `R >= 0.98`、`Net_down >= 500`、`Disk >= 100`、`Max_Days >= 1`、`ports >= 1`、`RAM >= 64GB` 的。**必须用 `vms_enabled=true` 查询返回的 offer ID**；同一个 GPU 的 VM 和容器 offer ID 不同，拿容器 ID 建 VM 会失败。`cpu_ram>=64` 是为了让 §6.2 的 `memory: 32Gi` 能调度；32GB 的机器会 Pending。
+
+> 如果以后 Vast 上出现 L4 VM，把 `gpu_ram>=24` 换成 `gpu_name=L4` 即可；当前（2026-11-23）没有，别为它多跑一次查询。
+>
+> 2 卡路径：把 `num_gpus=1` 改成 `num_gpus=2`，`--disk` 加到 160；单卡是主路径，2 卡只用来测真实扩容曲线。
+
+**2）创建 VM：**
+
+```bash
+vastai create instance <OFFER_ID> \
+  --template_hash 2c18cabd8f2f0525c2ff8446f5d4e063 \
+  --disk 130 \
+  --label d3-k3s-vm \
+  --cancel-unavail
+```
+
+模板是官方 `Ubuntu 22.04 VM`（`vm=True`、SSH、自带 CUDA/Docker），自带 `vms_enabled` 过滤。不要用 `vllm/vllm-openai` 镜像建 VM：那是容器模板，不会给你 systemd。
+
+如果建出来不是 VM（下一步 `ps -p 1` 不是 `systemd`），destroy 后走 API：
+
+```bash
+curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
+  -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
+  -H "Content-Type: application/json" \
+  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"runtype":"ssh_direct","label":"d3-k3s-vm","cancel_unavail":true}'
+```
+
+**3）SSH 与 VM 确认：**
+
+```bash
+vastai show instances
+vastai ssh-url <ID>
+
+# ssh-url 输出形如 ssh://root@host:port；换成：
+ssh -p <PORT> root@<HOST>
+
+# 在 VM 里执行：
+ps -p 1 -o comm=                 # 必须是 systemd
+systemctl is-system-running      # running/degraded 都算起来了
+```
+
+`ps -p 1` 不是 `systemd` 就说明拿到的是容器，立刻 `vastai destroy instance <ID> -y`，不要继续装 k3s。
+
+**4）计费与清理：**
+
+```bash
+vastai show instances
+vastai stop instance <ID>        # 保留磁盘，继续收存储费
+vastai destroy instance <ID> -y  # 结果 scp 回本地后再执行
+```
+
+2026-11-23 实测：3090 VM 约 `$0.41/h`（含 130GB 盘），4090 约 `$0.48/h`；3h 约 `$1.2–1.5`。比 D2 的 L4 容器贵，但在 `$15` 预算内。
+
+### 5.1 记录机器并检查 k3s 前置条件
+
+§5.0 的 `ps -p 1` / `systemctl` 已经确认是 systemd；这里补 k3s 真正依赖的几项：
+
+```bash
+# 目的：这些是后面所有数字的可比性前提
+nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit --format=csv,noheader
+nvidia-ctk --version 2>/dev/null || echo "no nvidia-ctk"
+uname -r
+
+# 目的：k3s/kubelet 要 cgroup v2
+stat -fc %T /sys/fs/cgroup
+
+# 目的：k3s 要写 /var/lib/rancher
+sudo test -w /var/lib && echo "var-lib writable"
+df -h /var/lib
+```
+
+> 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
+
 - cgroup 不是 `cgroup2fs`，k3s/kubelet 可能起不来。
-- 如果检查失败，换 Vast GPU VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
+- `/var/lib` 不可写，通常是权限或磁盘满；先解决再装。
+- 如果检查失败，换 RTX VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
 
-### 5.1 安装 k3s
+### 5.2 安装 k3s
 
 ```bash
 # 目的：单节点 k3s；版本固定为 2026-11-23 的 stable，避免版本漂移
@@ -341,7 +339,7 @@ kubectl get nodes
 
 > 复用上次成功的 k3s 版本时，把 `INSTALL_K3S_VERSION` 换成你记录的那版；版本不同，冷启动数字不可比。把 `k3s --version` 记进结果。
 
-### 5.2 让 k3s 识别 NVIDIA runtime
+### 5.3 让 k3s 识别 NVIDIA runtime
 
 k3s 会自动探测 PATH 里的 `nvidia-container-runtime`；装好 toolkit 后重启 k3s 即可。默认 runtime 仍是 `runc`，所以 Pod 要显式写 `runtimeClassName: nvidia`（或者给 k3s 加 `--default-runtime nvidia`）。
 
@@ -366,11 +364,11 @@ kubectl get runtimeclass nvidia
 2. 确认它在 k3s 服务的 PATH 里（`/usr/bin` 或 `/usr/local/bin`）；
 3. 再重启 k3s；仍不行就查 `journalctl -u k3s -n 100`。
 
-> 云 GPU 镜像通常已带 driver + toolkit；先 `nvidia-ctk --version` 确认，缺了再按 NVIDIA 官方 repo 安装。`nvidia-container-toolkit` 包会带上 `nvidia-container-runtime`，装完用 `which nvidia-container-runtime` 复核。
+> RTX VM 镜像通常已带 driver；先 `nvidia-smi` 和 `nvidia-ctk --version` 确认，缺 toolkit 再按 NVIDIA 官方 repo 安装。`nvidia-container-toolkit` 包会带上 `nvidia-container-runtime`，装完用 `which nvidia-container-runtime` 复核。RTX 3090/4090 是消费卡，**不要**假设 `nvidia-fabricmanager` 或 NVLink 存在；D3 单卡用不到。
 >
 > 不要手写整份 `config.toml` 覆盖 k3s 生成的文件；k3s 升级/重启会重新渲染。要用模板就用官方 `config-v3.toml.tmpl` 的 `{{ template "base" . }}` 方式。
 
-### 5.3 安装 NVIDIA device plugin
+### 5.4 安装 NVIDIA device plugin
 
 ```bash
 # 目的：把 GPU 暴露成 nvidia.com/gpu 扩展资源；版本按 release 页核对
@@ -389,7 +387,7 @@ kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\n
 
 > k3s 会为检测到的 NVIDIA runtime 创建 `RuntimeClass/nvidia`；static manifest 本身不带 `runtimeClassName`，所以必须 patch。用 Helm 装 GPU Operator 时这一步由 chart 的 `runtimeClassName` 完成。
 
-### 5.4 GPU smoke test
+### 5.5 GPU smoke test
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -414,7 +412,7 @@ kubectl logs gpu-test
 kubectl delete pod gpu-test
 ```
 
-看到 `nvidia-smi` 输出和 L4 型号，才说明 runtime + device plugin + scheduling 三层都通了。
+看到 `nvidia-smi` 输出和 RTX 3090/4090 型号，才说明 runtime + device plugin + scheduling 三层都通了。
 
 ---
 
@@ -723,6 +721,8 @@ kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 > 镜像引用名先用 `sudo k3s crictl images | grep vllm` 确认；不同 registry 前缀可能不同。
 >
 > 不要用 `emptyDir` 做 cold/warm 对比：Pod 一删缓存就没了，两次都是 cold，结论会错。
+>
+> D3 在 RTX 3090/4090 上测，**不要拿 D1 的 69s 当目标或基线**；D1 是 L4 容器内进程启动，D3 是 RTX VM 上从 scale 到 Ready。本节只比较同一台机器上的 cold vs warm，以及各阶段占比。
 
 ### 7.2 操作
 
@@ -766,6 +766,8 @@ kubectl get pod "$pod" -o json | jq -r '
 | cold | | | | | |
 | warm | | | | | |
 | image-cold（可选） | | | | | |
+
+> 表头下面先记一行机器信息：`GPU 型号 / driver / power limit / k3s 版本 / VM 单价`。RTX 3090/4090 的加载速度、功耗和 L4 不同，没有这行，数字不可复核。
 
 归因规则：
 
@@ -1000,7 +1002,7 @@ kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl --command
 然后发一个请求触发扩容，测“从请求到第一个 token”：
 
 - KEDA 只负责把副本从 0 拉到 1，**不负责排队**；请求在 Pod 起来之前就失败了。
-- 如果要“请求不丢”，需要 KEDA HTTP add-on 之类的 interceptor 先接住请求，或者网关排队；对 LLM 还要再加 70s 冷启动。
+- 如果要“请求不丢”，需要 KEDA HTTP add-on 之类的 interceptor 先接住请求，或者网关排队；对 LLM 还要再加几十秒冷启动。
 - 结论：chat 场景用 `minReplicaCount: 1` + 预热池；scale-to-zero 只给异步/批处理。
 
 ---
@@ -1131,12 +1133,11 @@ SLO 沿用 D1/D2：`TTFT ≤ 2,000ms`、`TPOT ≤ 100ms`（per-request）。不�
 
 | 项目 | 单价 | 成本 |
 |---|---|---|
-| 单卡 L4 容器 | `$0.2611/h`（GPU + 40GB 存储） | 3h 约 `$0.78` |
-| 单卡 3090/4090 VM | 约 `$0.41–0.48/h`（含 130GB 盘） | 3h 约 `$1.2–1.5` |
-| 2×L4 容器 | `2 × $0.25 + $0.0111 = $0.5111/h` | 3h 约 `$1.53`；4h 约 `$2.04` |
+| 单卡 RTX VM（3090/4090） | 约 `$0.41–0.48/h`（含 130GB 盘） | 3h 约 `$1.2–1.5` |
+| 2 卡 RTX VM | 约 `$0.85–1.0/h`（GPU ×2 + 存储） | 3h 约 `$2.6–3.0`；4h 约 `$3.4–4.0` |
 | 公网/存储 | ingress 通常不计费；Stop 后存储照计 | 见 Vast 账单 |
 
-D2 后账户余额 `$18.81`；D3 单卡 VM 3h 约 `$1.3`，2 卡 4h 约 `$2.0`，预算足够。**先 scp 结果再 Destroy**。VM 创建比容器慢（几分钟），`creating` 不是失败；用 `vastai logs <ID>` 看进度。
+D2 后账户余额约 `$18.78`；D3 单卡 VM 3h 约 `$1.3`，2 卡 4h 约 `$3.7`，预算足够。**先 scp 结果再 Destroy**。VM 创建比容器慢（几分钟），`creating` 不是失败；用 `vastai logs <ID>` 看进度。
 
 ---
 
@@ -1144,10 +1145,10 @@ D2 后账户余额 `$18.81`；D3 单卡 VM 3h 约 `$1.3`，2 卡 4h 约 `$2.0`�
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
-| k3s 起不来 / 卡在 `Starting` | 当前是 Vast 普通容器，没有 systemd/cgroup/privileged | 按 §2.1 用 `vms_enabled=true` + VM 模板重建；不要在普通容器里硬装 |
+| k3s 起不来 / 卡在 `Starting` | 当前是 Vast 普通容器，没有 systemd/cgroup/privileged | 按 §5.0 用 `vms_enabled=true` + VM 模板重建；不要在普通容器里硬装 |
 | 建 VM 报 `no_such_ask` / 创建失败 | offer 被租走，或用了非 VM 的 offer ID | 重新搜；必须用 `vms_enabled=true` 查询返回的 ID |
 | `nvidia.com/gpu` allocatable 是 0 | device plugin 没 Ready，或 runtime 没配 | 看 `kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`；`grep nvidia .../config.toml` |
-| device plugin 日志报 `No devices found` | static manifest 没写 `runtimeClassName: nvidia`，Pod 用 runc 看不到 GPU | patch DaemonSet 加 `runtimeClassName: nvidia`（§5.3） |
+| device plugin 日志报 `No devices found` | static manifest 没写 `runtimeClassName: nvidia`，Pod 用 runc 看不到 GPU | patch DaemonSet 加 `runtimeClassName: nvidia`（§5.4） |
 | k3s 安装脚本报 permission denied | 没有用 root 执行 | 用 `sudo sh -s -` 安装，不要直接 `sh` |
 | Pod 里 `nvidia-smi` 报错 | 没写 `runtimeClassName: nvidia` | 加 `runtimeClassName`，或给 k3s `--default-runtime nvidia` |
 | Pod 一直 `ContainerCreating` | 镜像太大/拉取慢；hostPath 不存在 | `kubectl describe pod` 看 Events；hostPath 用 `DirectoryOrCreate` 或先建目录 |
@@ -1174,7 +1175,7 @@ device plugin 把 GPU 暴露成整数扩展资源（`nvidia.com/gpu`），调度
 
 **Q2：8B 模型 FP16 约 16GB 权重（AWQ 约 5.7GB），怎么让新 Pod 20 秒内起来？四种方案和代价。**
 
-① 节点本地缓存（hostPath/local PV）：最快，但只对单节点有效；② Model Streamer / 远程权重流式加载：省下载，但依赖高速网络；③ 预热池（minReplica ≥ 1）：没有冷启动，但一直占卡；④ 更小的量化/模型（AWQ/FP8/更小参数）：加载和显存都降，但质量/能力要重测。D1 的 69s 是启动到 ready 的参照，20s 需要模型/量化/存储一起优化，不是单靠 K8s。
+① 节点本地缓存（hostPath/local PV）：最快，但只对单节点有效；② Model Streamer / 远程权重流式加载：省下载，但依赖高速网络；③ 预热池（minReplica ≥ 1）：没有冷启动，但一直占卡；④ 更小的量化/模型（AWQ/FP8/更小参数）：加载和显存都降，但质量/能力要重测。D1 的 69s 是 L4 上启动到 ready 的参照；D3 在 RTX VM 上要重新测，20s 需要模型/量化/存储一起优化，不是单靠 K8s。
 
 **Q3：为什么 GPU inference 不该用 CPU 型 HPA？该用什么信号？**
 
@@ -1182,7 +1183,7 @@ GPU 打满时 CPU 可能很低，CPU 利用率和排队长度不相关；CPU HPA
 
 **Q4：chat 场景能不能 scale-to-zero？怎么折中？**
 
-默认不能：冷启动 70s 级，请求在 Pod 起来前就超时；KEDA 缩到 0 也不排队。折中：`minReplicaCount: 1` + 预热池；按时间段/预测扩容；异步任务用队列 + scale-to-zero；或者用 KEDA HTTP add-on/网关先接住请求，但 TTFT 仍然包含冷启动。
+默认不能：冷启动几十秒级，请求在 Pod 起来前就超时；KEDA 缩到 0 也不排队。折中：`minReplicaCount: 1` + 预热池；按时间段/预测扩容；异步任务用队列 + scale-to-zero；或者用 KEDA HTTP add-on/网关先接住请求，但 TTFT 仍然包含冷启动。
 
 **Q5：P99 TTFT 高但 GPU util 只有 40%，怎么查？**
 
@@ -1219,7 +1220,7 @@ HPA 是副本伸缩的底层机制；KEDA 在 HPA 之上接事件源/Prometheus�
 
 ## 13. 与 D1/D2/D4/D5 的衔接
 
-- **D1**：69s 启动到 ready、96,256 KV、c=64 132.8 tok/s 是 D3 冷启动和容量的参照；D3 的 cold start 必须大于 69s（还要加镜像/权重下载）。
+- **D1**：69s 启动到 ready、96,256 KV、c=64 132.8 tok/s 是 D3 的**口径参照**，不是 D3 的目标值。D1 是 L4 容器内进程启动，D3 是 RTX VM 上从 scale 到 Ready；绝对值不能直接比，D3 只比较同机的 cold vs warm 和各阶段占比。
 - **D2**：AWQ + prefix caching 是默认配置；`max-num-seqs 64`、`max-model-len 8192` 直接复用。D2 的 c=8 goodput 25%、c=16 0.5% 说明“副本数不等于容量”，KEDA 的阈值要按队列/goodput 调，不要按 CPU。
 - **D4**：llm-d 的 prefix-cache-aware 路由需要 ≥2 副本 + 网关；D3 的 Deployment/Service/Endpoint 是底座。D3 的 1→2 曲线直接决定 D4 的“扩容期间 P99”基线。
 - **D5**：Kueue 的 ClusterQueue 和 Kyverno 的准入策略建在同一个集群上；D3 的 namespace/label 规范要提前定好。
@@ -1302,3 +1303,6 @@ vastai destroy instance <ID> -y
 8. Kubernetes Probes（startup/readiness/liveness）：https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 9. Kubernetes GPU scheduling（device plugin / 整数资源）：https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/
 10. vLLM Metrics（`vllm:num_requests_waiting`、TTFT histogram 等）：https://docs.vllm.ai/en/stable/design/metrics/
+11. Vast.ai Virtual Machines（VM 与容器差异、`vms_enabled=true`、VM 模板）：https://docs.vast.ai/guides/instances/virtual-machines
+12. Vast.ai create instance API（`vm: true`、`runtype: ssh_direct`）：https://docs.vast.ai/api-reference/instances/create-instance
+13. k3s release channel（2026-11-23 的 stable 为 `v1.37.2+k3s1`）：https://update.k3s.io/v1-release/channels/stable
