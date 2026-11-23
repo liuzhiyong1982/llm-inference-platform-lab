@@ -884,7 +884,7 @@ lm-eval 报两个指标：
 #### 5.0.4 质量门的原理和边界
 
 - **配对比较**：同一批 50 条题、同一 5-shot prompt、同一 `max_gen_toks` / `max_length` / `num_fewshot` / `limit`，只换权重（AWQ vs FP16）。所以它测的是**相对掉点**，不是绝对 benchmark 分数。
-- **n=50 只是 smoke test**：单个比例的 95% 置信区间约 ±11 个点，分辨不了 1–2 个点的差异。报告写原始命中数（如 43/50 vs 44/50），不要写“AWQ 只掉 1.2 个点”。
+- **n=50 只是 smoke test**：单个比例的 95% 置信区间约 ±8–11 个点（取决于准确率），分辨不了 1–2 个点的差异。报告写原始命中数（如 43/50 vs 44/50），不要写“AWQ 只掉 1.2 个点”。
 - **先查截断再看分数**：如果两边都接近 0，先看 `Some contexts exceeded` 和响应结尾；`max_gen_toks=1024` 是防止 Qwen3 thinking 被截断，不是保证一定够。真被截断就同步提高两边，并注明。
 - **同样的设置**：不要一个 50 一个 20，也不要一边 1024 一边 256；否则差异不是模型带来的。
 - **质量 ≠ 性能**：lm-eval 的并发只影响墙钟时间，不影响 greedy 结果；性能数字仍然看 `d2_bench`，不要把质量门当吞吐测试。
@@ -956,7 +956,26 @@ FP16 就绪后，跑同一套 GSM8K，只把 tokenizer 换成 `Qwen/Qwen3-8B`：
 
 > FP16 的退路把 `pretrained` 换成 `Qwen/Qwen3-8B`。
 
-> 50 条 GSM8K 只是指示性质量门，不是完整评测：n=50 时单个比例的 95% 置信区间约 ±11 个点，**分辨不了 1–2 个点的差异**。报告里写原始命中数（如 43/50 vs 44/50）和“未检测到明显掉点 / 检测到明显掉点”，不要写“AWQ 只掉 1.2 个点”。
+> 50 条 GSM8K 只是指示性质量门，不是完整评测：n=50 时单个比例的 95% 置信区间约 ±8–11 个点，**分辨不了 1–2 个点的差异**。报告里写原始命中数（如 46/50 vs 45/50）和“未检测到明显掉点 / 检测到明显掉点”，不要写“AWQ 只掉 1.2 个点”。
+
+### 5.3 质量门结果与结论（2026-11-23）
+
+条件：GSM8K 5-shot，`--limit 50`，`max_gen_toks=1024`，`max_length=4096`，greedy（`do_sample=False, temperature=0.0`）；AWQ 和 FP16 都是同一批前 50 条题，各 7 个 HTTP batch（50 条）。两边都没有 `Some contexts exceeded`，strict 和 flexible 完全一致。
+
+| 模型 | 原始命中 | strict-match | flexible-extract | Stderr |
+|---|---|---|---|---|
+| AWQ | 46/50 | 0.92 | 0.92 | 0.0388 |
+| FP16 | 45/50 | 0.90 | 0.90 | 0.0429 |
+
+**结论：未检测到 AWQ 相对 FP16 的明显质量下降。** 差 1 道题（46 vs 45，2 个百分点），远小于 n=50 的噪声：单个比例 95% CI 约 ±8 点，两个比例之差约 ±11 点（独立近似）。不能据此说“AWQ 更好”，也不能据此确认“1–2 点内的真实差异”；但按“1–2 点可接受、>5 点不可接受”的决策规则，这组结果不构成质量不可接受的证据。
+
+- strict 和 flexible 完全相同，说明两边都按 `#### <number>` 格式输出，答案抽取没有歧义。
+- 没有截断警告；`max_gen_toks=1024` 足够。
+- 没有保存 per-sample 结果（命令没有 `--output_path`），所以做不了配对 McNemar；只能按原始命中数报告。以后跑质量门建议加 `--output_path /workspace/qgate-<tag>`。
+- 这个结果只覆盖 GSM8K 50 条；官方 Qwen 表在 GPQA/AIME 等任务上 AWQ 可能掉 1–5 点，不能外推。
+- 结合 4.5 的性能：FP16 在 c=8 比 AWQ 慢 36.8%（57.2 vs 90.4 tok/s；反向看 AWQ 快 58.0%）、TPOT P95 高 60.6%；质量门又没看到明显掉点；**在 24GB L4 上，AWQ 是当前更优的默认配置**。如果要上线，仍需更大样本/更多任务的质量评估。
+
+> 注意：AWQ c8 的 goodput 25%，FP16 c8 0；这说明 AWQ 在这个 SLO 下也更可用，但两者都不是 SLO-safe 容量。
 
 ---
 
@@ -995,9 +1014,9 @@ for f in sorted(glob.glob("results/d2-*.json")):
           "| output = %.1f tok/s" % d["output_throughput"])
 ```
 
-### 6.1 全 D2 一句话结论（其余实验完成后填）
+### 6.1 全 D2 一句话结论（2026-11-23）
 
-> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 __ 变为 __、TTFT P99 从 __ 变为 __；关闭 chunked prefill（固定 2048 预算）使 ITL P99.9 __、TTFT P99 __；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%（c=8）、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
+> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s **−16.3%**、TPOT P95 **−69.5%**；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 **1,811ms 降到 566ms**、TTFT P99 从 **12,324ms 升到 12,779ms**；关闭 chunked prefill（固定 2048 预算）使 ITL P99.9 **降到 993ms**、TTFT P99 **降到 11,467ms**；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 **12,446ms 降到 7,106ms**（命中率 **~50%**）；AWQ 相对 FP16 在 c=8 下 output **+58.0%**、GSM8K **46/50 vs 45/50**（+1 题，噪声内）。因此 D3/D4 应优先保留 **AWQ + prefix caching**；prefill 尾部按需在 `chunk-off` 与 `bt512` 之间取舍，`max-num-seqs` 只作为 TTFT/TPOT 的取舍旋钮。
 
 每条结论必须带数字和方向（+x% / −y%），不要写“效果更好”。
 
@@ -1112,7 +1131,7 @@ D2 用 `--random-prefix-len 512` 造一段所有请求共享的 512-token 前缀
 | Non-Thinking | GPQA | 39.3 | 35.9 | −3.4 |
 | Non-Thinking | MMLU-Redux | 79.5 | 79.1 | −0.4 |
 
-合理预期是 1–5 个点，随任务而变。D2 的 50 条 GSM8K 只是 smoke test：n=50 时单个比例的 95% CI 约 ±11 个点，分辨不了 1–2 个点；报告写原始命中数（如 43/50 vs 44/50），不要写“只掉 1.2 个点”。
+合理预期是 1–5 个点，随任务而变。D2 的 50 条 GSM8K 只是 smoke test：n=50 时单个比例的 95% CI 约 ±8–11 个点，分辨不了 1–2 个点；报告写原始命中数（如 46/50 vs 45/50），不要写“只掉 1.2 个点”。
 
 **容量**：AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB ≈ 7.2 万 token 的 KV；D2 控制组的 AWQ KV 是 91,648 token（D1 是 96,256），所以 FP16 大约只剩 1.9 万。c=16 × 1280 = 20,480 已经压到 FP16 的 KV 上限，因此 AWQ vs FP16 的主对比放 c=8，c=16 只作 KV 容量观察（看抢占）。
 
