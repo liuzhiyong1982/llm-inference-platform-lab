@@ -349,6 +349,8 @@ df -h /var/lib
 
 ### 5.2 安装 k3s
 
+> 还没装 `nvidia-container-toolkit`？先执行 §5.3 的安装，再回来装 k3s；这样 k3s 启动时会直接探测到 NVIDIA runtime，少一次 restart。已经装了 k3s 也没关系，装完 toolkit 后 `sudo systemctl restart k3s` 即可。
+
 ```bash
 # 目的：单节点 k3s；版本固定为 2026-11-23 的 stable，避免版本漂移
 curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.37.2+k3s1 sh -s - --write-kubeconfig-mode 644
@@ -363,16 +365,37 @@ kubectl get nodes
 
 > 复用上次成功的 k3s 版本时，把 `INSTALL_K3S_VERSION` 换成你记录的那版；版本不同，冷启动数字不可比。把 `k3s --version` 记进结果。
 
-### 5.3 让 k3s 识别 NVIDIA runtime
+### 5.3 安装 NVIDIA runtime（toolkit）
 
 k3s 会自动探测 PATH 里的 `nvidia-container-runtime`；装好 toolkit 后重启 k3s 即可。默认 runtime 仍是 `runc`，所以 Pod 要显式写 `runtimeClassName: nvidia`（或者给 k3s 加 `--default-runtime nvidia`）。
 
 ```bash
-# 目的：安装 NVIDIA container toolkit（Ubuntu/Debian）
+# 目的：先看发行版，以及 apt 里有没有现成的包
+cat /etc/os-release
+apt-cache policy nvidia-container-toolkit
+
+# 目的：安装依赖和 NVIDIA 官方 repo（apt-cache 没有 Candidate 时才需要）
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates gnupg
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  sudo gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 sudo apt-get update
 sudo apt-get install -y nvidia-container-toolkit
 
-# 目的：重启 k3s，让它重新探测 runtime
+# 目的：确认 toolkit 和 runtime 都在
+nvidia-ctk --version
+which nvidia-container-runtime
+```
+
+> 如果 `apt-cache policy nvidia-container-toolkit` 已经显示 `Candidate:`，可以跳过加 repo，直接 `sudo apt-get install -y nvidia-container-toolkit`。
+>
+> 如果 k3s 已经装了，装完 toolkit 后执行 `sudo systemctl restart k3s`；还没装就先去 §5.2，k3s 启动时会自己探测。
+
+```bash
+# 目的：重启 k3s（已安装时）让它重新探测 runtime
 sudo systemctl restart k3s
 
 # 目的：确认 containerd 配置里出现 nvidia
