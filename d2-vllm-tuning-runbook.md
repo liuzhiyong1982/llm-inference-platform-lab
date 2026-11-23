@@ -73,7 +73,7 @@ vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 | 7 | `fp16-c8` | `Qwen/Qwen3-8B` + `--dtype float16` | c=8, n=100 | 量化 vs 半精度（主对比） |
 | 7b | `fp16-c16`（可选） | 同上 | c=16, n=200 | KV 容量效应，不是纯量化对比 |
 
-> 默认 `max_num_batched_tokens` 是 2048。D1 c=64 的 ITL P99 = 2,345ms，量级正好等于“一个调度步塞进 2048 个 prefill token”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
+> 默认 `max_num_batched_tokens` 是 2048。D1 c=64 的 ITL P99 = 2,345ms，量级正好等于“一个调度步里 1024–2048 个 prefill token 和 decode 同批”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
 
 为什么 c=16/c=64：c=16 看延迟和 TPOT，c=64 看吞吐上限和排队。D2 的 n 比 D1 小，是为了在 3 小时内跑完多个配置；**同一个对比对内的 n 必须一致**（c=16 对用 n=200，c=64 用 n=300，AWQ/FP16 的 c=8 对用 n=100）。
 
@@ -529,8 +529,10 @@ d2_bench bt512 16 200 0    # TAG=bt512；C=16 客户端并发；N=200 总请求�
 > **“~2.3s 停顿”到底是什么**：D1 **c=64** 的 **ITL P99 = 2,345ms**（P99.9 2,367ms），来自 1000 条请求 × 255 个 token gap 展平后的分布；不是 TPOT，也不是 TTFT。同一轮 TPOT P95 只有 470ms，因为 TPOT 把 255 个 gap 平均掉了。
 >
 > 运行条件：40W L4、Qwen3-8B-AWQ、vLLM 0.34.0、`max-model-len 8192`、`max-num-seqs 64`、chunked prefill on、prefix caching on、random 1024 in / 256 out、`--ignore-eos`、`--temperature 0`、c=64、n=1000。D1 c=16 的 ITL P99.9 约 2.0s；诊断跑 c=16/n=200 的 ITL P99 1.83s / P99.9 1.99s。
+>
+> **D1 的 chunked prefill 是开的**（启动日志 `enable_chunked_prefill=True`）；1024-token prompt 在 2048 预算下没被切开。`bt512` 是通过压预算**强制**分块，不是打开 chunking。
 
-预期：如果 D1 的秒级停顿（c=16 的 ITL P99.9 ≈ 2.0s，c=64 的 ITL P99 ≈ 2.3s）来自“一个 step 塞进约 2048 个 prefill token”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
+预期：如果 D1 的秒级停顿（c=16 的 ITL P99.9 ≈ 2.0s，c=64 的 ITL P99 ≈ 2.3s）来自“一个 step 里 1024–2048 个 prefill token 和 decode 同批”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
 
 ### 4.4 prefix caching on/off（共享前缀）
 
@@ -782,7 +784,7 @@ v0.34 默认开启，关闭用 `--disable-chunked-prefill`。
 
 两个容易误解的点：
 
-1. **chunked prefill 不是强行切碎**。1024-token prompt 在 2048 预算下通常一次就能算完；只有预算不够（多条 prefill 竞争，或你把 budget 调小）时才切。所以 `chunk-off` 在 2048 预算下可能和 control 几乎没差异；`bt512` 才是“步长”实验。
+1. **chunked prefill 不是强行切碎**。1024-token prompt 在 2048 预算下通常一次就能算完；只有预算不够（多条 prefill 竞争，或你把 budget 调小）时才切。D1 就是“开着但没触发”：启动日志里 `enable_chunked_prefill=True`，1024 prompt 在 2048 预算下没被切开。所以 `chunk-off` 在 2048 预算下可能和 control 几乎没差异；`bt512` 才是“步长”实验。
 2. **关掉 chunking 会连带改预算**。v0.34 要求 `max_num_batched_tokens >= max_model_len`，否则启动 `ValueError`；不显式传 budget 时，EngineArgs 会自动把它抬到 `max_model_len`（8192）。这样就不是单变量了。§4.3 因此固定 `max-model-len 2048` + `budget 2048`，并加 `control-2k` 对照。
 
 ### Q4：prefix caching 是什么？
@@ -995,3 +997,20 @@ t2:  又完成 1 条 → 同样补位
 为什么不是 TPOT：同一轮 c=64 的 TPOT P95 只有 470ms，因为每条请求的 255 个 gap 里中位数有 34 个超过 1s，平均后变成 453ms 的 TPOT P50。**ITL 看的是单个 gap，TPOT 看的是整条请求的平均。**
 
 这不是“某一条请求总共卡了 2.3s”，而是“所有 decode gap 里最慢的 1% 约 2.3s”。它说明 decode 不是匀速的，但**不能单凭这个数字证明是 prefill 造成的**；4.3b 的 `bt512` 就是把这个假设变成可检验的实验：如果压小每步 prefill 预算后 ITL 尾部明显下降，假设才成立。
+
+### Q14：把 `max-num-batched-tokens` 从 2048 降到 512，为什么会减小 ITL？D1 不是没开 chunked prefill 吗？
+
+**先纠正：D1 开了 chunked prefill。** 启动日志里是 `enable_prefix_caching=True, enable_chunked_prefill=True`；v0.34 默认就是开的。问题不是“没开”，而是“开了但没触发”。
+
+chunked prefill 只在“剩余预算装不下这段 prefill”时才切。D1 的请求是 1024-token prompt，预算 2048；16 条 decode 只占 16 token，还剩 2032，足够把 1024 一次算完。所以：
+
+- `max-num-batched-tokens=2048`：一步 ≈ 1024 prefill + 16 decode = 1040 token；prefill 占主导，这一步在 40W L4 上约 1–2s；16 条 decode 在这段时间内出不了下一个 token → ITL gap 变成秒级。
+- `max-num-batched-tokens=512`：1024 prompt 必须拆成约 2–3 个 chunk（每步扣掉 16 个 decode token，实际 prefill 约 496）；每个 step 里 decode 仍能各出 1 个 token，但只需等这个 ~496-token chunk 算完，不用等整段 1024。单步 prefill 工作量减半，ITL 尾部下降，但 TTFT 可能上升（prefill 分更多步），吞吐也可能因步数变多而略降。
+
+所以 `bt512` 不是“打开 chunking”，而是**把预算压到 prompt 以下，强制 chunking 发生**。
+
+注意：它降的是 **ITL 尾部**（P99/P99.9、`>1s gaps`），不是 P50；decode-only step 仍然是 ~80ms。不要期待中位数变化。
+
+为什么 2.3s 不一定是“2048 个 prefill token”：2048 是上限，不是每步实际值。c=16 时一步大约是 1024 prefill + 15–16 decode；c=64 时是 1024 + 63–64 decode。2.3s 的尾部更像是“1024-token prefill 在这张 40W 卡上的耗时”，或者偶尔两步 prefill 挤在一起。具体每步多少 token，vLLM 默认不打印；`bt512` 就是用来验证这个因果关系的。
+
+一句话类比：prefill 是“大货车”，decode 是“小包裹”。预算 2048 时，大货车一次装完，小包裹要等它卸完；预算 512 时，大货车分几趟，小包裹可以在每趟之间走。总工作量差不多，但小包裹的单次等待变短。

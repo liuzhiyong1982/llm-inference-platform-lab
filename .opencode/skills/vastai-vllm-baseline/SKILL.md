@@ -58,6 +58,8 @@ GPU 架构 (L4 = sm_89)
 
 > `max-model-len` 和 `max-num-batched-tokens` 是正交的：8192/512 合法（chunking 把 8k prompt 拆成 16 步），2048/8192 也合法（一步多条短请求）；只有关 chunking 时才要求 budget ≥ max_model_len。
 
+> chunked prefill 默认开，但“开”不等于“触发”：预算装得下整段 prompt 时不会切。D1 的 1024-token prompt + 2048 budget 就是这种情况；`bt512` 是通过压预算**强制**分块，不是打开 chunking。
+
 ### 指标口径
 
 **单请求**
