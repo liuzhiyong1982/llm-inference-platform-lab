@@ -124,11 +124,16 @@ du -shL "$HF_HOME/hub/models--Qwen--Qwen3-8B"
 
 ### 3.3 安装质量门工具（可与下载并行）
 
+用独立 venv，避免升级 vLLM 的 `transformers`/`huggingface_hub`，影响下一次服务重启：
+
 ```bash
 # 目的：GSM8K 50 条的质量门；只装客户端，不占 GPU
-pip install -q lm-eval
-lm_eval --help >/dev/null && echo "lm-eval ok"
+python3 -m venv --system-site-packages /workspace/lm-eval-venv
+/workspace/lm-eval-venv/bin/pip install -q "lm-eval[api]"
+/workspace/lm-eval-venv/bin/python -m lm_eval --help >/dev/null && echo "lm-eval ok"
 ```
+
+> `[api]` 是 `local-completions` 需要的 `aiohttp`/`tenacity`；`--system-site-packages` 让 venv 复用镜像里的 torch/transformers，不重复下载。不要依赖裸 `lm_eval` 命令——它可能不在 PATH，或者装到了别的 Python。
 
 ### 3.4 公共函数（每个新 shell 粘一次）
 
@@ -900,7 +905,7 @@ AWQ 就绪后：
 # max_gen_toks=1024 必须显式传：lm-eval 默认只生成 256 token，Qwen3 的 thinking CoT 会在中途被截断
 # max_length=4096 防止 5-shot prompt（约 1.2k token）被 2048-1024 的默认上限截掉
 # batch_size 8 × num_concurrent 8 = 客户端最多 64 条 prompt 在途；服务端 batch 仍由 vLLM 决定
-lm_eval --model local-completions \
+/workspace/lm-eval-venv/bin/python -m lm_eval --model local-completions \
   --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B-AWQ,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8 2>&1 | tee /workspace/qgate-awq.log
 ```
@@ -918,7 +923,7 @@ serve_fp16 qgate-fp16 --max-num-seqs 64
 FP16 就绪后，跑同一套 GSM8K，只把 tokenizer 换成 `Qwen/Qwen3-8B`：
 
 ```bash
-lm_eval --model local-completions \
+/workspace/lm-eval-venv/bin/python -m lm_eval --model local-completions \
   --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8 2>&1 | tee /workspace/qgate-fp16.log
 ```
@@ -942,7 +947,7 @@ lm_eval --model local-completions \
 
 ```bash
 # 目的：退路——让 lm-eval 自己起 vLLM 引擎；先停掉 8000 端口的服务，避免抢显存
-lm_eval --model vllm \
+/workspace/lm-eval-venv/bin/python -m lm_eval --model vllm \
   --model_args pretrained=Qwen/Qwen3-8B-AWQ,max_model_len=4096,gpu_memory_utilization=0.85,max_gen_toks=1024 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
 ```
