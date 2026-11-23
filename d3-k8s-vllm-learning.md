@@ -221,7 +221,7 @@ terminationGracePeriodSeconds > preStop 秒数 + --shutdown-timeout + 进程清�
 
 ---
 
-## 5. Lab 0：租 RTX VM + k3s + GPU runtime + device plugin
+## 5. Lab 0：租 RTX VM + GPU runtime + k3s + device plugin
 
 ### 5.0 在 Vast 租一台 RTX VM（CLI）
 
@@ -347,27 +347,9 @@ df -h /var/lib
 - `/var/lib` 不可写，通常是权限或磁盘满；先解决再装。
 - 如果检查失败，换 RTX VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
 
-### 5.2 安装 k3s
+### 5.2 安装 NVIDIA runtime（toolkit）
 
-> 还没装 `nvidia-container-toolkit`？先执行 §5.3 的安装，再回来装 k3s；这样 k3s 启动时会直接探测到 NVIDIA runtime，少一次 restart。已经装了 k3s 也没关系，装完 toolkit 后 `sudo systemctl restart k3s` 即可。
-
-```bash
-# 目的：单节点 k3s；版本固定为 2026-11-23 的 stable，避免版本漂移
-curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.37.2+k3s1 sh -s - --write-kubeconfig-mode 644
-
-# 目的：确认节点 Ready（k3s 自带 kubectl）
-sudo k3s kubectl get nodes -o wide
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown "$USER" ~/.kube/config
-kubectl get nodes
-```
-
-> 复用上次成功的 k3s 版本时，把 `INSTALL_K3S_VERSION` 换成你记录的那版；版本不同，冷启动数字不可比。把 `k3s --version` 记进结果。
-
-### 5.3 安装 NVIDIA runtime（toolkit）
-
-k3s 会自动探测 PATH 里的 `nvidia-container-runtime`；装好 toolkit 后重启 k3s 即可。默认 runtime 仍是 `runc`，所以 Pod 要显式写 `runtimeClassName: nvidia`（或者给 k3s 加 `--default-runtime nvidia`）。
+k3s 会自动探测 PATH 里的 `nvidia-container-runtime`，所以**先装 toolkit，再装 k3s**；这样 k3s 首次启动就能识别，不用额外 restart。默认 runtime 仍是 `runc`，Pod 仍要显式写 `runtimeClassName: nvidia`（或者给 k3s 加 `--default-runtime nvidia`）。
 
 ```bash
 # 目的：先看发行版，以及 apt 里有没有现成的包
@@ -392,12 +374,29 @@ which nvidia-container-runtime
 
 > 如果 `apt-cache policy nvidia-container-toolkit` 已经显示 `Candidate:`，可以跳过加 repo，直接 `sudo apt-get install -y nvidia-container-toolkit`。
 >
-> 如果 k3s 已经装了，装完 toolkit 后执行 `sudo systemctl restart k3s`；还没装就先去 §5.2，k3s 启动时会自己探测。
+> 如果你已经先装了 k3s，装完 toolkit 后执行 `sudo systemctl restart k3s`；还没装就继续 §5.3，k3s 启动时会自己探测。
+>
+> RTX VM 镜像通常已带 driver；先 `nvidia-smi` 和 `nvidia-ctk --version` 确认，缺 toolkit 再按上面的 repo 安装。`nvidia-container-toolkit` 包会带上 `nvidia-container-runtime`，装完用 `which nvidia-container-runtime` 复核。RTX 3090/4090 是消费卡，**不要**假设 `nvidia-fabricmanager` 或 NVLink 存在；D3 单卡用不到。
+
+### 5.3 安装 k3s
 
 ```bash
-# 目的：重启 k3s（已安装时）让它重新探测 runtime
-sudo systemctl restart k3s
+# 目的：单节点 k3s；版本固定为 2026-11-23 的 stable，避免版本漂移
+curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.37.2+k3s1 sh -s - --write-kubeconfig-mode 644
 
+# 目的：确认节点 Ready（k3s 自带 kubectl）
+sudo k3s kubectl get nodes -o wide
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown "$USER" ~/.kube/config
+kubectl get nodes
+```
+
+> 复用上次成功的 k3s 版本时，把 `INSTALL_K3S_VERSION` 换成你记录的那版；版本不同，冷启动数字不可比。把 `k3s --version` 记进结果。
+
+装完确认 k3s 探测到了 NVIDIA runtime：
+
+```bash
 # 目的：确认 containerd 配置里出现 nvidia
 grep -n nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml
 
@@ -409,10 +408,8 @@ kubectl get runtimeclass nvidia
 
 1. 确认 `which nvidia-container-runtime` 有路径；
 2. 确认它在 k3s 服务的 PATH 里（`/usr/bin` 或 `/usr/local/bin`）；
-3. 再重启 k3s；仍不行就查 `journalctl -u k3s -n 100`。
+3. 再 `sudo systemctl restart k3s`；仍不行就查 `journalctl -u k3s -n 100`。
 
-> RTX VM 镜像通常已带 driver；先 `nvidia-smi` 和 `nvidia-ctk --version` 确认，缺 toolkit 再按 NVIDIA 官方 repo 安装。`nvidia-container-toolkit` 包会带上 `nvidia-container-runtime`，装完用 `which nvidia-container-runtime` 复核。RTX 3090/4090 是消费卡，**不要**假设 `nvidia-fabricmanager` 或 NVLink 存在；D3 单卡用不到。
->
 > 不要手写整份 `config.toml` 覆盖 k3s 生成的文件；k3s 升级/重启会重新渲染。要用模板就用官方 `config-v3.toml.tmpl` 的 `{{ template "base" . }}` 方式。
 
 ### 5.4 安装 NVIDIA device plugin
