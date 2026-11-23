@@ -1014,6 +1014,27 @@ for f in sorted(glob.glob("results/d2-*.json")):
           "| output = %.1f tok/s" % d["output_throughput"])
 ```
 
+这段代码在做什么：
+
+| 行 | 作用 |
+|---|---|
+| `glob("results/d2-*.json")` | 遍历所有 D2 结果；想只看一个文件就换成具体路径 |
+| `d["itls"]` | 每条请求一个 list，里面是相邻 token 的 gap；输出 256 token → 255 个 gap |
+| `[x for r in d["itls"] for x in r]` | 把 per-request 的 gap 展平成一个大数组 |
+| `* 1000` | JSON 里 `itls` 单位是**秒**，转成 ms；`p*_itl_ms` 字段已经是 ms |
+| `np.percentile(flat, [50, 99, 99.9])` | token 级 ITL 的 P50/P99/P99.9 |
+| `gaps = [sum(1 for x in r if x > 1.0)]` | 每条请求里 `>1s` 的 gap 个数；阈值 `1.0` 是秒 |
+| `np.median(gaps)` | 每条请求的秒级停顿次数的中位数 |
+| `d["output_throughput"]` | 这一轮的 output tok/s，用来和 ITL 一起看 |
+
+为什么需要它：
+
+- `p99.9_itl_ms` 只给一个百分位；`>1s gaps/req` 是“秒级停顿发生了几次”的直接计数，JSON 没有现成字段。
+- ITL 是 token 级（N×255 个样本），TPOT 是请求级（N 个样本）；这段代码保留 token 级尾部，用来验证 `bt512` / `chunk-off` 是否减少了 prefill 造成的秒级停顿。
+- 它不计算 TPOT；TPOT 用 `p95_tpot_ms`，或由 `latencies`/`ttfts`/`output_lens` 按请求重算。
+
+前提：JSON 必须带 `--save-detailed`，否则没有 `itls` 数组。
+
 ### 6.1 全 D2 一句话结论（2026-11-23）
 
 > 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s **−16.3%**、TPOT P95 **−69.5%**；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 **1,811ms 降到 566ms**、TTFT P99 从 **12,324ms 升到 12,779ms**；关闭 chunked prefill（固定 2048 预算）使 ITL P99.9 **降到 993ms**、TTFT P99 **降到 11,467ms**；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 **12,446ms 降到 7,106ms**（命中率 **~50%**）；AWQ 相对 FP16 在 c=8 下 output **+58.0%**、GSM8K **46/50 vs 45/50**（+1 题，噪声内）。因此 D3/D4 应优先保留 **AWQ + prefix caching**；prefill 尾部按需在 `chunk-off` 与 `bt512` 之间取舍，`max-num-seqs` 只作为 TTFT/TPOT 的取舍旋钮。
