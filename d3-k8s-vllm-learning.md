@@ -303,6 +303,26 @@ vastai destroy instance <ID> -y  # 结果 scp 回本地后再执行
 >
 > **预算紧时按这个顺序省：** ① 选 3090 而不是 4090；② 只做单卡，接受 1→2 `Pending`；③ 砍 image-cold、scale-to-zero、PDB、2 卡曲线、驱逐的“有排空”对照；④ 提前把 YAML/脚本准备好，租完直接跑；⑤ 结果 `scp` 后立刻 Destroy，不要 Stop 着收存储费。
 
+**Bid 排练（可选，不产出正式数字）：**
+
+```bash
+# 1) 搜 interruptible VM；$/hr 是当前最低 bid
+vastai search offers -n -t bid \
+  'num_gpus=1 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.98 cpu_ram>=64' \
+  -o 'dph' --storage 130 --limit 10
+
+# 2) 创建；--bid_price 要 >= 上一步的 $/hr，建议上浮 10–20%
+#    当前 3090 约 0.153，所以示例用 0.18
+vastai create instance <OFFER_ID> \
+  --template_hash 2c18cabd8f2f0525c2ff8446f5d4e063 \
+  --disk 130 \
+  --bid_price 0.18 \
+  --label d3-k3s-vm-bid \
+  --cancel-unavail
+```
+
+> bid 实例被 outbid 后可能直接 pause/stop；每完成一步就 `scp`，正式 cold start/扩容/驱逐仍然回到 §5.0 的 on-demand 命令重跑。
+
 ### 5.1 记录机器并检查 k3s 前置条件
 
 §5.0 的 `ps -p 1` / `systemctl` 已经确认是 systemd；这里补 k3s 真正依赖的几项：
