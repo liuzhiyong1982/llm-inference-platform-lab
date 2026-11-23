@@ -1,4 +1,4 @@
-# D2 Runbook：vLLM 参数对比（单卡 L4，3 小时）
+# D2 Runbook：vLLM 参数对比（单卡 L4，3 小时时间盒）
 
 > 目标：在同一台 L4 上，一次只动一个变量，量化 4 个旋钮对吞吐/延迟/质量的影响：
 > `max-num-seqs`、chunked prefill、prefix caching、AWQ vs FP16。
@@ -25,6 +25,8 @@
 | 记录 + 收尾 | 25 min | 对照表 + 一句话结论 + commit |
 
 **时间不够按这个顺序砍：** 质量门（先注明 deferred）→ `max-num-seqs=32` → `chunk-off` 对照对 → `bt512` → c=64 控制组。**不要砍掉控制组和“一次一个变量”。**
+
+> 2026-11-23 实际：FP16 下载约 1h（比预估长），实验 + 质量门约 3.2h，实例总时长约 4.9h；3h 是排序用的时间盒，不是硬承诺。
 
 ---
 
@@ -443,6 +445,22 @@ d2_bench control-c64 64 300 0    # TAG=control-c64；C=64 客户端并发；N=30
 # 目的：FP16 在 c=16 会受 KV 上限影响，c=8 才是纯量化对比
 d2_bench control-c8 8 100 0    # TAG=control-c8；C=8 客户端并发；N=100 总请求；PREFIX=0 无前缀
 ```
+
+#### 4.1.1 控制组结果（2026-11-23）
+
+条件：实例 `62184627`，L4 23,034 MiB / 40W，`Qwen/Qwen3-8B-AWQ`（W4A16），vLLM 0.34.0；`--max-model-len 8192 --max-num-seqs 64`，chunked prefill on，prefix caching on；input 1024 / output 256。KV cache **91,648 tokens**；三组 `preempts` delta 均为 **0**。
+
+| run | c | n | output tok/s | TTFT P50 | TTFT P99 | TPOT P50 | TPOT P95 | ITL P99.9 | >1s gaps/req | goodput |
+|---|---|---|---|---|---|---|---|---|---|---|
+| control-c8 | 8 | 100 | 90.4 | 2,780ms | 6,836ms | 76.5ms | 83.0ms | 1,760ms | 0（mean 0.4） | 0.0883（25%） |
+| control-c16 | 16 | 200 | 119.8 | 4,068ms | 12,104ms | 116.0ms | 126.4ms | 1,810ms | 3 | 0.0023（0.5%） |
+| control-c64 | 64 | 300 | 143.1 | 8,102ms | 57,706ms | 419.2ms | 426.2ms | 2,172ms | 31 | 0 |
+
+- **c=16 是延迟基准**：后续 4.3/4.3b/4.4/4.5 的 c=16 对比都以它或同预算的 `control-2k` 为参照。
+- **c=64 是吞吐基准**：output 143.1 tok/s 是这台 40W L4 在 D2 负载下的上限；TTFT P50 8.1s、P99 57.7s，goodput 0。
+- **c=8 是 4.5 的同并发对照**：output 90.4 tok/s、TPOT P95 83.0ms、goodput 25%，是 D2 里唯一 goodput 非零的 AWQ 点。
+- **c=64 比 D1 的 132.8 tok/s 高 7.8%**：D2 的 n=300 比 D1 的 n=1000 短，持续功耗/热节流更少；只做同一天、同一 n 的对比。
+- 三组的 KV 需求分别 `8×1,280`、`16×1,280`、`64×1,280`；c=64 需要 81,920，接近 91,648，但 `preempts` delta 仍是 0，说明这一轮是排队而不是 KV 抢占。
 
 ### 4.2 `max-num-seqs` 16 / 32
 
@@ -1043,19 +1061,19 @@ for f in sorted(glob.glob("results/d2-*.json")):
 
 ---
 
-## 7. 收尾
+## 7. 收尾（2026-11-23 已完成）
 
 ```bash
-# 目的：停掉当前服务后，确认 D2 结果都在
+# 目的：销毁前确认远端结果都在；本地已有一份，下面的 ls 只作交叉检查
 ls -lh /workspace/results/d2-*.json
 ls -lh /workspace/d2-*.log
 ls -lh /workspace/qgate-*.log
 ```
 
-- 把 `d2-*.json`、`d2-*.log`、`qgate-*.log` scp 回本地仓库；
-- 在本地 `git add results d2-*.log qgate-*.log d2-vllm-tuning-runbook.md README.md`，commit + push；
-- 成本：D2 约 3h × 实际 $/h（这台 $0.2611）≈ $0.8；FP16 下载是 ingress，通常不计带宽费；**Stop 期间存储照计费**，把 `vastai show instance <id>` 里的 storage 费用一并记入 README（D1 只记了 GPU+存储的账单总额，D2 要分开写清）；
-- Stop / Destroy 规则同 D1：24h 内做 D3 → Stop；隔几天 → Destroy。
+- **归档**：12 个 `d2-*.json`、10 个服务端日志（9 个 D2 实验 + `d2-qgate-awq.log`）、2 个 `qgate-*.log` 已 scp 回本地并 commit；`git status` 干净。
+- **成本**：实例 `62184627` 运行约 **4.9h**；Vast 最终账单 **$1.29**（GPU `$0.25/h` + 40GB 存储 `$0.0111/h` = `$0.2611/h`），FP16 下载是 ingress，未产生额外带宽费。按用户侧口径约 **$1.2**，D2 后账户余额 **$18.81**。
+- **实例已 Destroy**：D3 不在 24h 内，Stop 后 40GB 存储仍按 `$0.0111/h` 计费，且不保证能回到同一 host；权重/结果都已拉回本地，Destroy 更省。
+- **无残留**：D1 实例 `61674313` 已在 D1 结束时删除；当前 Vast 实例列表为 **0**，没有双实例计费。
 
 ---
 
@@ -1079,20 +1097,20 @@ ls -lh /workspace/qgate-*.log
 
 ---
 
-## 9. 验收清单
+## 9. 验收清单（2026-11-23 完成）
 
-- [ ] 同一天、同一台 L4 的 control（c=16 / c=64）
-- [ ] `max-num-seqs` 16（可选 32）结果
-- [ ] `max-num-batched-tokens 512` 结果（可选，但优先于 mns32）
-- [ ] chunked prefill off（含 `control-2k` 同预算对照）结果，或明确 deferred
-- [ ] prefix caching on/off（共享 512-token 前缀）+ 命中率
-- [ ] AWQ vs FP16：c=8 主对比 + 两边 KV cache 数字（时间不够可 deferred，但要写明）
-- [ ] GSM8K 50 条质量门（或明确 deferred；记录 max_gen_toks）
-- [ ] ITL P50/P99/P99.9 + `>1s gaps/req`（不只 TPOT）
-- [ ] 一张对照表 + 一句话结论（带数字和方向）
-- [ ] 结果和日志 scp 回本地，commit + push
-- [ ] 成本记录
-- [ ] 实例 Stop 或 Destroy，并注明理由
+- [x] 同一天、同一台 L4 的 control（c=16 / c=64）
+- [x] `max-num-seqs` 16（可选 32）结果
+- [x] `max-num-batched-tokens 512` 结果（可选，但优先于 mns32）
+- [x] chunked prefill off（含 `control-2k` 同预算对照）结果，或明确 deferred
+- [x] prefix caching on/off（共享 512-token 前缀）+ 命中率
+- [x] AWQ vs FP16：c=8 主对比 + 两边 KV cache 数字（时间不够可 deferred，但要写明）
+- [x] GSM8K 50 条质量门（或明确 deferred；记录 max_gen_toks）
+- [x] ITL P50/P99/P99.9 + `>1s gaps/req`（不只 TPOT）
+- [x] 一张对照表 + 一句话结论（带数字和方向）
+- [x] 结果和日志 scp 回本地，commit + push
+- [x] 成本记录
+- [x] 实例 Stop 或 Destroy，并注明理由
 
 ---
 
