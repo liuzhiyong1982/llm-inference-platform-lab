@@ -350,6 +350,7 @@ block 16 token = 2.25 MiB
 | `chunk-off` 差异巨大 | 不传 budget 时被自动抬到 max_model_len=8192，步长也变了 | 同预算 `control-2k` 对照；别把预算变化算成 chunking 效果 |
 | FP16 c=16 TTFT 明显变差 | FP16 KV 只剩约 1.9 万 token，16×1280 已压上限 | 主对比用 c=8；c=16 标“KV 受限”，看抢占 |
 | 质量门两边都接近 0 分 | lm-eval `max_gen_toks` 默认 256，thinking 模型的 CoT 被截断 | `max_gen_toks=1024,max_length=4096`；先查截断再看分数 |
+| lm-eval 的 `--batch_size` 当成 vLLM batch | 它控制客户端每个 HTTP 请求多少条 prompt | `local-completions` 可 batch，`local-chat-completions` 强制 1；服务端并发看 `num_concurrent × batch_size` 和 `Running/Waiting` |
 | `CUDA driver version is insufficient` | host Max CUDA < 镜像 CUDA | 换 host 或换低 CUDA 镜像；不要装 driver |
 | `no kernel image is available` | GPU arch 不在镜像编译列表 | 换镜像/换卡；和 CUDA 版本无关 |
 | `du -sh` 只有 4.4M | Xet 用符号链接 | `du -shL`；`df -h /` 看真实占用 |

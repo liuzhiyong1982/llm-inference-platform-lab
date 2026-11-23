@@ -399,6 +399,7 @@ AWQ 服务开着时：
 # 目的：用当前 vLLM 服务做 50 条 GSM8K，5-shot，greedy；记录 exact_match
 # max_gen_toks=1024 必须显式传：lm-eval 默认只生成 256 token，Qwen3 的 thinking CoT 会在中途被截断
 # max_length=4096 防止 5-shot prompt（约 1.2k token）被 2048-1024 的默认上限截掉
+# batch_size 8 × num_concurrent 8 = 客户端最多 64 条 prompt 在途；服务端 batch 仍由 vLLM 决定
 lm_eval --model local-completions \
   --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B-AWQ,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
@@ -643,3 +644,29 @@ step 2  [A decode 1][B decode 1][C prefill 1024]   = 1026
 - “`max-num-batched-tokens` 是一条请求的最大长度” → 不是，它是一步的总 token 预算。
 - “调小 `max-model-len` 会让 KV 每 token 变小” → 不会，KV/token 由模型结构和 dtype 决定（Qwen3-8B FP16 是 144KiB）。
 - “`max-model-len` 一定要 ≥ `max-num-batched-tokens`” → 反了；只有 chunking off 时要求 budget ≥ max_model_len。
+
+### Q10：lm-eval 的 `--batch_size 8` 是 8 条 vLLM 序列吗？
+
+不是。`--batch_size` 是 **lm-eval 客户端的评估 batch**，不是 vLLM 的 `max-num-seqs`，也不保证 8 条序列在同一个 forward 里。
+
+对 `local-completions`：
+
+- `--batch_size 8` 会把 8 条 prompt 放进**一个 HTTP 请求**的 `prompt` 数组（OpenAI completions 支持 list）；
+- vLLM 的 OpenAI 前端把它展开成 8 条独立序列，再按自己的 `max-num-seqs` / `max-num-batched-tokens` / KV 调度；
+- `--num_concurrent 8` 允许最多 8 个这样的 HTTP 请求同时在飞，所以客户端最多可能有 **64 条 prompt** 在途；
+- 服务端实际同时跑多少，看日志的 `Running` / `Waiting`，不是看 `--batch_size`。
+
+```text
+lm-eval: batch_size=8, num_concurrent=8
+  HTTP req 1: [p1..p8]    ─┐
+  HTTP req 2: [p9..p16]   ─┼─ 最多 8 个请求在飞
+  ...                      │
+  HTTP req 8: [p57..p64]  ─┘
+            ↓
+vLLM OpenAI 前端：最多 64 条独立序列
+            ↓
+scheduler：max_num_seqs=64, budget=2048
+  → 5-shot prompt 约 1.2k token，一个 prefill step 只装得下 1–2 条
+```
+
+所以：`batch_size 8` ≈ “每个 HTTP 请求 8 条 prompt”，`num_concurrent 8` ≈ “8 个请求并发”；两者相乘是**客户端在途上限**，最终 batch 仍由 vLLM 决定。`local-chat-completions` 不支持 batched chat，会把 `batch_size` 强制改成 1。
