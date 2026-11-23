@@ -784,7 +784,9 @@ d2_bench fp16-4k 8 100 0    # TAG=fp16-4k；C=8 客户端并发；N=100 总请�
 
 只在 AWQ 和 FP16 两个服务都跑过性能后做；它衡量“量化掉了多少质量”，不是性能。
 
-两个服务不能同时占 8000 端口。如果当前开着的是 FP16，就先测 FP16；测完 `Ctrl-C` 停掉。**两边 `max_gen_toks` 必须一致**。
+两个服务不能同时占 8000 端口。顺序可以互换：当前是哪个就先测哪个；测完 `Ctrl-C`，再启动另一个。**两边 `max_gen_toks` 必须一致**。
+
+### 5.1 AWQ 质量门
 
 如果当前不是 AWQ，先重启：
 
@@ -806,7 +808,27 @@ lm_eval --model local-completions \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
 ```
 
-换 FP16 服务后重复同一命令（tokenizer 可换 `Qwen/Qwen3-8B`）。记录 `exact_match,strict-match` 和 `exact_match,flexible-extract`。
+### 5.2 FP16 质量门
+
+如果当前是 FP16，可以直接从这里开始；否则先做完 5.1。换 FP16 服务：
+
+> **先重启服务**：在服务窗口 `Ctrl-C` 停掉当前服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后，再启动 FP16。
+
+```bash
+serve_fp16 qgate-fp16 --max-num-seqs 64
+```
+
+FP16 就绪后，跑同一套 GSM8K，只把 tokenizer 换成 `Qwen/Qwen3-8B`：
+
+```bash
+lm_eval --model local-completions \
+  --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
+  --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
+```
+
+> FP16 的 KV 只有 18,944，5-shot + 1024 output 大约每条 2.2k token，8 条并发已经接近上限；lm-eval 的 `batch_size 8 × num_concurrent 8 = 64` 条在途会在服务端排队。质量门看 greedy 结果，排队不影响正确性，但会慢；超时就把 `num_concurrent` 降到 4。
+
+记录两边的 `exact_match,strict-match` 和 `exact_match,flexible-extract`。
 
 > **先看是否被截断再看分数**：如果两边的 exact match 都接近 0，先检查 lm-eval 日志里的 `Some contexts exceeded` 和响应结尾——默认 256 token 下 Qwen3 还没写完 CoT 就被切断，这是测量假象，不是量化掉点。单配置超过 12 分钟就把两边都降到 `--limit 20`，**不要一个 50 一个 20**。
 
@@ -818,6 +840,8 @@ lm_eval --model vllm \
   --model_args pretrained=Qwen/Qwen3-8B-AWQ,max_model_len=4096,gpu_memory_utilization=0.85,max_gen_toks=1024 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
 ```
+
+> FP16 的退路把 `pretrained` 换成 `Qwen/Qwen3-8B`。
 
 > 50 条 GSM8K 只是指示性质量门，不是完整评测：n=50 时单个比例的 95% 置信区间约 ±11 个点，**分辨不了 1–2 个点的差异**。报告里写原始命中数（如 43/50 vs 44/50）和“未检测到明显掉点 / 检测到明显掉点”，不要写“AWQ 只掉 1.2 个点”。
 
