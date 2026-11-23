@@ -373,6 +373,20 @@ ls -lh /workspace/results/d2-control-c16-*.json
 
 ## 4. 逐个实验
 
+### 4.0 各小节在测什么
+
+| 小节 | 改的变量 | 对照 | 回答的问题 |
+|---|---|---|---|
+| 4.1 控制组 | **不改变量**：mns=64、chunk on、prefix on、budget 默认 2048 | — | 当天基线；c16/c64 给 4.2–4.4，c8 给 4.5 |
+| 4.2 `mns` 16/32 | `max-num-seqs` 64→16（可选 32） | 4.1 的 c=64 | 服务端并发上限的吞吐/延迟取舍 |
+| 4.3 `chunk-off` | chunked prefill on/off，**固定** `max-model-len=2048` + `budget=2048` | `control-2k` | prefill/decode 交错策略 |
+| 4.3b `bt512` | `max-num-batched-tokens` 2048→512，chunking 保持 on | 4.1 的 c=16 | 每步 token 预算/步长；验证 D1 的秒级停顿假设 |
+| 4.4 prefix on/off | prefix caching on/off，共享 512-token 前缀 | `prefix-on` vs `prefix-off` | 前缀复用能省多少 TTFT |
+| 4.5 AWQ vs FP16 | 权重 4-bit vs FP16 | `control-c8` vs `fp16-c8` | 量化对吞吐/显存的影响；c=16 只看 KV 容量 |
+| §5 质量门 | 模型精度 | AWQ vs FP16 | 量化对 GSM8K 质量的影响 |
+
+> 两个容易说错的点：**4.1 不是研究 `max-num-seqs`，它是所有对比的当天基准**；**4.3b 动的不是 chunked prefill 开关，而是 token 预算**。4.3 和 4.3b 都作用在 prefill 调度上，但一个测“交错策略”，一个测“步长”。
+
 每个实验的固定动作：
 
 1. Terminal A `Ctrl-C` 停旧服务；
