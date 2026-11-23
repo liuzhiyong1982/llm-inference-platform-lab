@@ -803,6 +803,59 @@ echo "preemptions delta: $((AFTER-BEFORE))"
 
 两个服务不能同时占 8000 端口。顺序可以互换：当前是哪个就先测哪个；测完 `Ctrl-C`，再启动另一个。**两边 `max_gen_toks` 必须一致**。
 
+### 5.0 lm-eval 是什么、质量门在测什么
+
+#### 5.0.1 lm-eval 的角色
+
+`lm_eval` 是 EleutherAI 的 lm-evaluation-harness。它负责三件事：
+
+1. 按 task 定义构造 prompt（GSM8K 的 5-shot 示例）；
+2. 把 prompt 发给模型，收集生成结果；
+3. 按 task 的规则抽取答案、算 `exact_match`，并给出标准误。
+
+我们的命令用 `--model local-completions`：**lm-eval 只是客户端**，通过 OpenAI 兼容的 `/v1/completions` 把请求发给已经跑着的 vLLM；它不加载权重、不额外占显存。退路 `--model vllm` 才会让 lm-eval 自己起一个 vLLM 引擎，所以必须先停掉 8000 端口的服务。
+
+#### 5.0.2 命令逐项解释
+
+| 参数 | 作用 |
+|---|---|
+| `--model local-completions` | 用 OpenAI 兼容的 completions API；每个 prompt 是一条 HTTP 请求 |
+| `base_url=.../v1/completions` | vLLM 服务地址；实例内用 `127.0.0.1` |
+| `model=qwen3-8b` | API 模型名，必须等于 `--served-model-name` |
+| `tokenizer=...` | **客户端** tokenizer；用于编码 prompt、数 token、截断；不影响服务端权重 |
+| `num_concurrent=8` | 客户端最多 8 个 HTTP 请求并发 |
+| `max_retries=3` | 请求失败重试 3 次 |
+| `max_gen_toks=1024` | 每条最多生成 1024 token；默认 256 会把 Qwen3 的 thinking CoT 截断 |
+| `max_length=4096` | 客户端上下文上限（prompt + generation）；5-shot prompt 约 1.2k，4096 够 |
+| `--tasks gsm8k` | GSM8K 任务定义 |
+| `--num_fewshot 5` | 5-shot；prompt 里带 5 个 Q/A 示例 |
+| `--limit 50` | 只跑前 50 条测试样本；两边必须一样 |
+| `--batch_size 8` | lm-eval 每个 HTTP 请求装 8 条 prompt；和 `num_concurrent=8` 相乘 = 最多 64 条在途 |
+
+Greedy：`local-completions` 的 payload 默认 `temperature=0`，我们的 `--model_args` 没有覆盖它，所以是确定性生成。
+
+#### 5.0.3 GSM8K 和两个 exact_match
+
+GSM8K 是小学数学应用题，最终答案是一个数字。5-shot prompt 里有 5 个“题目 + 推理 + 最终答案”的示例，模型需要生成推理并给出最终数字。
+
+lm-eval 报两个指标：
+
+| 指标 | 抽取规则 | 特点 |
+|---|---|---|
+| `exact_match,strict-match` | 要求模型按 `#### <数字>` 的格式给出答案 | 格式敏感；Qwen3 不一定会严格照做 |
+| `exact_match,flexible-extract` | 取回复里最后一个数字 | 更宽松；更接近“答案对不对” |
+
+两个都记录，不要拿一边的 strict 和另一边的 flexible 比。`Value` 是 0–1 的准确率，`Stderr` 是标准误。
+
+#### 5.0.4 质量门的原理和边界
+
+- **配对比较**：同一批 50 条题、同一 5-shot prompt、同一 `max_gen_toks` / `max_length` / `num_fewshot` / `limit`，只换权重（AWQ vs FP16）。所以它测的是**相对掉点**，不是绝对 benchmark 分数。
+- **n=50 只是 smoke test**：单个比例的 95% 置信区间约 ±11 个点，分辨不了 1–2 个点的差异。报告写原始命中数（如 43/50 vs 44/50），不要写“AWQ 只掉 1.2 个点”。
+- **先查截断再看分数**：如果两边都接近 0，先看 `Some contexts exceeded` 和响应结尾；`max_gen_toks=1024` 是防止 Qwen3 thinking 被截断，不是保证一定够。真被截断就同步提高两边，并注明。
+- **同样的设置**：不要一个 50 一个 20，也不要一边 1024 一边 256；否则差异不是模型带来的。
+- **质量 ≠ 性能**：lm-eval 的并发只影响墙钟时间，不影响 greedy 结果；性能数字仍然看 `d2_bench`，不要把质量门当吞吐测试。
+- **覆盖范围有限**：只测 GSM8K 数学题；官方 Qwen 表里 AWQ 在其他任务可能掉 1–5 个点，不能用一个任务代替全部质量。
+
 ### 5.1 AWQ 质量门
 
 如果当前不是 AWQ，先重启：
@@ -822,7 +875,7 @@ AWQ 就绪后：
 # batch_size 8 × num_concurrent 8 = 客户端最多 64 条 prompt 在途；服务端 batch 仍由 vLLM 决定
 lm_eval --model local-completions \
   --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B-AWQ,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
-  --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
+  --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8 2>&1 | tee /workspace/qgate-awq.log
 ```
 
 ### 5.2 FP16 质量门
@@ -840,12 +893,21 @@ FP16 就绪后，跑同一套 GSM8K，只把 tokenizer 换成 `Qwen/Qwen3-8B`：
 ```bash
 lm_eval --model local-completions \
   --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
-  --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
+  --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8 2>&1 | tee /workspace/qgate-fp16.log
 ```
 
 > FP16 的 KV 只有 18,944，5-shot + 1024 output 大约每条 2.2k token，8 条并发已经接近上限；lm-eval 的 `batch_size 8 × num_concurrent 8 = 64` 条在途会在服务端排队。质量门看 greedy 结果，排队不影响正确性，但会慢；超时就把 `num_concurrent` 降到 4。
 
 记录两边的 `exact_match,strict-match` 和 `exact_match,flexible-extract`。
+
+#### 5.2.1 FP16 这条命令和 AWQ 有什么不同
+
+> lm-eval 的角色、参数含义和 GSM8K 评分原理见 §5.0；这里只列 FP16 与 AWQ 的差异。
+
+- **tokenizer**：FP16 用 `Qwen/Qwen3-8B`；AWQ 用 `Qwen/Qwen3-8B-AWQ`。两者是同一个 Qwen3 tokenizer；如果要做严格 paired，建议两边都写 `Qwen/Qwen3-8B`，保证 prompt 编码完全一致。
+- **KV**：FP16 只有 18,944 token；5-shot prompt 约 1.2k + 最多 1024 output ≈ 2.2k/请求，8 条并发约 17.6k，已经接近上限；`batch_size 8 × num_concurrent 8 = 64` 条在途会在服务端排队。质量门看 greedy 结果，排队不影响正确性，但会慢；超时就把 `num_concurrent` 降到 4。
+- **其他参数**：`max_gen_toks=1024`、`max_length=4096`、`num_fewshot=5`、`limit=50`、`batch_size=8` 必须和 AWQ 完全一致；否则不是 paired。
+- **日志**：AWQ 写 `/workspace/qgate-awq.log`，FP16 写 `/workspace/qgate-fp16.log`；后面一起 scp 回本地。
 
 > **先看是否被截断再看分数**：如果两边的 exact match 都接近 0，先检查 lm-eval 日志里的 `Some contexts exceeded` 和响应结尾——默认 256 token 下 Qwen3 还没写完 CoT 就被切断，这是测量假象，不是量化掉点。单配置超过 12 分钟就把两边都降到 `--limit 20`，**不要一个 50 一个 20**。
 
@@ -913,10 +975,11 @@ for f in sorted(glob.glob("results/d2-*.json")):
 # 目的：停掉当前服务后，确认 D2 结果都在
 ls -lh /workspace/results/d2-*.json
 ls -lh /workspace/d2-*.log
+ls -lh /workspace/qgate-*.log
 ```
 
-- 把 `d2-*.json`、`d2-*.log` scp 回本地仓库；
-- 在本地 `git add results d2-*.log d2-vllm-tuning-runbook.md README.md`，commit + push；
+- 把 `d2-*.json`、`d2-*.log`、`qgate-*.log` scp 回本地仓库；
+- 在本地 `git add results d2-*.log qgate-*.log d2-vllm-tuning-runbook.md README.md`，commit + push；
 - 成本：D2 约 3h × 实际 $/h（这台 $0.2611）≈ $0.8；FP16 下载是 ingress，通常不计带宽费；**Stop 期间存储照计费**，把 `vastai show instance <id>` 里的 storage 费用一并记入 README（D1 只记了 GPU+存储的账单总额，D2 要分开写清）；
 - Stop / Destroy 规则同 D1：24h 内做 D3 → Stop；隔几天 → Destroy。
 
