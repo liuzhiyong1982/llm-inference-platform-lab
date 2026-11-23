@@ -513,7 +513,7 @@ v0.34 源码里有两条约束：
 
 ```bash
 # 目的：#4 的同预算对照；除了 chunked prefill 开关，其他都与 chunk-off 相同
-serve_awq control-2k --max-model-len 2048 --max-num-batched-tokens 2048
+serve_awq control-2k --max-model-len 2048 --max-num-batched-tokens 2048 --max-num-seqs 64
 ```
 
 就绪后：
@@ -528,7 +528,7 @@ d2_bench control-2k 16 200 0    # TAG=control-2k；C=16 客户端并发；N=200 
 
 ```bash
 # 目的：同一 2048 预算下，关掉 prefill/decode 交错
-serve_awq chunk-off --max-model-len 2048 --max-num-batched-tokens 2048 --disable-chunked-prefill
+serve_awq chunk-off --max-model-len 2048 --max-num-batched-tokens 2048 --max-num-seqs 64 --disable-chunked-prefill
 ```
 
 就绪后：
@@ -548,6 +548,8 @@ d2_bench chunk-off 16 200 0    # TAG=chunk-off；C=16 客户端并发；N=200 �
 #### 4.3.1 结果与归因（2026-11-23）
 
 条件：实例 `62184627`，L4 23,034 MiB / 40W，`Qwen/Qwen3-8B-AWQ`，vLLM 0.34.0；c=16、n=200、input 1024 / output 256。两边启动日志都确认 `max_model_len=2048`、`max_num_batched_tokens=2048`；`control-2k` 是 `enable_chunked_prefill=True`，`chunk-off` 是 `enable_chunked_prefill=False`。抢占均为 0；KV cache 88,064（control-2k）vs 92,672（chunk-off），都远高于 16×1280，不是 KV 压力。
+
+> 实际两轮启动时未显式传 `--max-num-seqs 64`，v0.34 默认 **128**；c=16 时 16 running < 64/128，mns 不绑定，所以结果不受影响。上面的命令已补 `--max-num-seqs 64`。
 
 | run | output tok/s | TTFT P50 | TTFT P95 | TTFT P99 | TPOT P95 | ITL P99 | ITL P99.9 | >1s gaps/req | goodput |
 |---|---|---|---|---|---|---|---|---|---|
@@ -647,7 +649,7 @@ ITL 尾部大致随“每步最大 prefill token 数”线性变化（约 0.9–
 
 ```bash
 # 目的：默认 prefix caching 已开；这批请求共享 512-token 前缀
-serve_awq prefix-on
+serve_awq prefix-on --max-num-seqs 64
 ```
 
 就绪后：
@@ -661,7 +663,7 @@ d2_bench prefix-on 16 200 512    # TAG=prefix-on；C=16 客户端并发；N=200 
 > **先重启服务**：先停掉 `prefix-on` 服务，确认端口空了再启动 `prefix-off`。
 
 ```bash
-serve_awq prefix-off --disable-prefix-caching
+serve_awq prefix-off --max-num-seqs 64 --disable-prefix-caching
 ```
 
 就绪后：
@@ -679,6 +681,36 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 ```
 
 预期：`prefix-on` 的 TTFT 明显低于 `prefix-off`；如果两者一样，先检查 `input_lens` 是否 1024、前缀是否真的相同。
+
+> **配置说明**：实际 4.4 两轮启动时没有显式传 `--max-num-seqs 64`，v0.34 默认 **128**；c=16 时 16 running < 64/128，mns 不绑定，所以结果不受影响。上面的命令已补 64，后续按 64 复现。
+
+#### 4.4.1 结果与归因（2026-11-23）
+
+条件：实例 `62184627`，L4 23,034 MiB / 40W，AWQ，vLLM 0.34.0；c=16、n=200、input 1024 / output 256、`PREFIX=512`。`prefix-on` 的启动日志是 `enable_prefix_caching=True`，`prefix-off` 是 `False`；两边 `enable_chunked_prefill=True`；抢占均为 0。`input_lens` 全为 1024，`output_lens` 全为 256。
+
+| run | output tok/s | total tok/s | TTFT P50 | TTFT P95 | TTFT P99 | TPOT P50 | TPOT P95 | ITL P99 | ITL P99.9 | >1s gaps/req | goodput | 命中率 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| prefix-off | 120.0 | 600.0 | 4,168ms | 7,081ms | 12,446ms | 115.3ms | 126.2ms | 1,685ms | 1,776ms | 3 | 0.0023（0.5%） | 0% |
+| prefix-on | 149.9 | 749.7 | 4,002ms | 5,324ms | 7,106ms | 90.0ms | 101.8ms | 534ms | 1,689ms | 2 | **0.1084（18.5%）** | **~50%** |
+
+**预期是否被证实：TTFT 证实，但效果不止 TTFT。**
+
+- TTFT：P50 只降 4.0%（4,168→4,002ms），但 P95 降 24.8%（7,081→5,324ms），P99 降 42.9%（12,446→7,106ms）。所以“TTFT 明显低于”主要体现在**尾部**，中位数变化不大。
+- 吞吐/TPOT：**意外的大收益**。output 120.0→149.9（+24.9%），total 600.0→749.7（+24.9%），TPOT P50 115.3→90.0ms（−21.9%），P95 126.2→101.8ms（−19.3%）。
+- ITL：P99 1,685→534ms（−68.3%），P99.9 1,776→1,689ms（−4.9%）。大多数 prefill step 减半，尾部尖峰频率下降；但非共享的 512-token 后缀仍偶尔形成一个完整 prefill step，所以 max ITL 仍在 ~1.7s。
+- goodput：0.0023（0.5%）→ **0.1084（18.5%）**，约 46×。
+- 命中率：prefix-on 稳态约 **49.5–50%**，正好等于 512/1024；prefix-off 为 0%。
+- KV cache：88,064（on）vs 92,672（off），差约 4,600 token，来自 prefix cache 元数据/profiling；两组都远高于 16×1,280，不是 KV 压力。
+
+**为什么吞吐和 TPOT 也会变好**：
+
+- prefix caching 省的是 **prefill 计算**：512-token 共享前缀的 KV 直接复用，不再重算。
+- c=16 时 prefill 和 decode 争同一张 40W 卡；每条请求少算 512 个 prefill token，decode 就能多拿回一部分算力。
+- 所以不只是 TTFT 下降：output tok/s +25%，TPOT −19%，goodput 从 0.5% 到 18.5%。
+
+**边界**：这是“所有请求共享同一段 512-token 前缀”的合成负载，命中率能稳定到 50%。真实 traffic 的前缀复用率取决于 system prompt / RAG 上下文 / 多轮对话的重合度；不要假设任何负载都能拿到 +25% 吞吐。
+
+> 这两轮实际用的是 v0.34 默认 `max_num_seqs=128`（命令里没显式传 64）；c=16 时 16 running < 64/128，mns 不绑定，所以对结果无影响。上面的命令已补 `--max-num-seqs 64`。
 
 ### 4.5 AWQ vs FP16
 
@@ -707,7 +739,7 @@ AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），�
 
 ```bash
 # 目的：同一 served name，换 FP16 权重；先确认显存够，OOM 就降 max-model-len
-serve_fp16 fp16-c8
+serve_fp16 fp16-c8 --max-num-seqs 64
 ```
 
 就绪后：
@@ -729,7 +761,7 @@ d2_bench fp16-c16 16 200 0    # TAG=fp16-c16；C=16 客户端并发；N=200 总�
 
 ```bash
 # 目的：FP16 权重太大时缩短上下文，先保证能跑；在 README 里注明
-serve_fp16 fp16-4k --max-model-len 4096
+serve_fp16 fp16-4k --max-num-seqs 64 --max-model-len 4096
 ```
 
 就绪后：
@@ -799,8 +831,8 @@ lm_eval --model vllm \
 | 4a | control-2k | 2k len + 2k budget | 16 | 200 | 119.4 | 4,152 | 12,324 | 126.6 | 1,811 | 3 | 0.0023（0.5%） | 0 | 88,064 | 同预算对照 |
 | 4 | chunk-off | chunked off, 2k budget | 16 | 200 | 120.4 | 2,761 | 11,467 | 125.6 | 993 | 0 | 0.0024（0.5%） | 0 | 92,672 | 0/200 条 >1s |
 | 4b | bt512 | batch-tokens=512 | 16 | 200 | 118.3 | 2,501 | 12,779 | 127.3 | 566 | 0 | 0.0023（0.5%） | 0 | 92,160 | 0/200 条 >1s |
-| 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | | | 命中率 __% |
-| 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | | | 命中率 0% |
+| 5 | prefix-on | prefix on | 16 | 200 | 149.9 | 4,002 | 7,106 | 101.8 | 1,689 | 2 | 0.1084（18.5%） | 0 | 88,064 | 命中率 ~50% |
+| 6 | prefix-off | prefix off | 16 | 200 | 120.0 | 4,168 | 12,446 | 126.2 | 1,776 | 3 | 0.0023（0.5%） | 0 | 92,672 | 命中率 0% |
 | 7 | fp16-c8 | FP16 | 8 | 100 | | | | | | | | | | |
 | 7b | fp16-c16 | FP16（可选） | 16 | 200 | | | | | | | | | | KV 受限，看抢占 |
 

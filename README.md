@@ -102,6 +102,15 @@ Vast Charges：**$1.01**（GPU + 存储，2026-11-20，实例 `61674313`）。GP
 
 `bt512` 验证了“prefill 步长”假设：ITL P99.9 从 1,811ms 降到 566ms，200 条请求里 0 条出现 `>1s gap`；代价是 TTFT P99 12.32→12.78s、吞吐 −0.9%。`chunk-off` 更均衡，`bt512` 是更激进的 ITL 尾部修复。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.3b.1。
 
+### 4.4 prefix caching（共享 512-token 前缀）
+
+| run | output tok/s | TTFT P50 | TTFT P99 | TPOT P95 | ITL P99.9 | goodput | 命中率 |
+|---|---|---|---|---|---|---|---|
+| prefix-off | 120.0 | 4.17s | 12.45s | 126.2ms | 1,776ms | 0.0023（0.5%） | 0% |
+| prefix-on | 149.9 | 4.00s | 7.11s | 101.8ms | 1,689ms | 0.1084（18.5%） | ~50% |
+
+`prefix-on` 命中率 ~50%（512/1024），output +24.9%，TTFT P99 −42.9%，TPOT P95 −19.3%，goodput 0.5%→18.5%。prefix caching 不只是 TTFT 优化：它减少 prefill 与 decode 的竞争，所以吞吐/TPOT 也改善。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.4.1。
+
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
