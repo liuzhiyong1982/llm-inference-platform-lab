@@ -200,6 +200,160 @@ preempts() {
 
 > `--random-prefix-len` 会在 `--random-input-len` 之外**再前置**一段共享前缀，所以函数里用 `IN = 1024 - PREFIX` 保证总输入仍是 1024。跑完看 JSON 的 `input_lens` 是否全为 1024，不是就调整。
 
+#### 3.4.1 四个函数的分工
+
+| 函数 | 作用 | 在哪跑 | 行为 |
+|---|---|---|---|
+| `serve_awq` | 起 AWQ 服务 | 服务窗口（tmux A） | 前台阻塞；`Ctrl-C` 停服务 |
+| `serve_fp16` | 起 FP16 服务 | 服务窗口（tmux A） | 前台阻塞；`Ctrl-C` 停服务 |
+| `d2_bench` | 跑一轮压测并写 JSON | bench 窗口（tmux B） | 前台跑完返回 |
+| `preempts` | 读当前累计抢占数 | bench 窗口（tmux B） | 立即返回一个整数 |
+
+它们都是**当前 shell 的函数**，不是脚本文件。新开 SSH / tmux 窗口 = 新 shell，要重新粘一次 §3.4 的代码块；`export` 的 `HF_HOME`、`VLLM_VERSION`、`POWER_LIMIT` 也要在新 shell 里重新设，否则 JSON metadata 会是空值。
+
+#### 3.4.2 `serve_awq` / `serve_fp16` 逐行解释
+
+调用形式：
+
+```bash
+serve_awq <TAG> [额外的 vllm serve 参数...]
+serve_fp16 <TAG> [额外的 vllm serve 参数...]
+```
+
+| 行 / 参数 | 作用 | 为什么这么设 | 坑 |
+|---|---|---|---|
+| `local TAG="$1"; shift` | 第一个位置参数是日志标签，`shift` 把它从 `$@` 移除 | 避免把 `control-c16` 当成 vLLM 参数 | 忘记传 TAG，第一个 flag 会被当成 TAG 吃掉，报错很难懂 |
+| `cd /workspace` | 固定工作目录 | 日志和 `./results` 都相对这里 | 不 `cd` 会在当前目录生成 `results/`，scp 时找不到 |
+| `Qwen/Qwen3-8B-AWQ` / `Qwen/Qwen3-8B` | 权重仓库 | AWQ 是 4-bit 预量化；FP16 是全精度 | 两个仓库的 tokenizer 必须一致，否则 token 数不可比 |
+| `--served-model-name qwen3-8b` | API 里的模型名 | bench 的 `--model` 必须匹配它 | 不匹配直接 404；它不是 HF 仓库名 |
+| `--max-model-len 8192` | **单条请求** prompt+output 的上限 | D1/D2 的请求是 1024+256，8192 足够；和 D1 对齐 | 不是每步 token 预算；OOM 时可降 4096，但要在报告里写 |
+| `--gpu-memory-utilization 0.90` | 权重 + KV + 激活可用的显存比例 | 与 D1 一致；0.90 留一点余量 | 同一组对比里不要改；OOM 先降这个或 `max-model-len` |
+| `"$@"` | 调用方追加的参数 | 让一个函数覆盖所有配置：`--max-num-seqs 16`、`--max-num-batched-tokens 512`、`--disable-chunked-prefill`、`--max-model-len 2048` | 同名参数会重复，argparse **后者优先**；写在 `"$@"` 之后的固定参数（host/port/log）会覆盖调用方 |
+| `--disable-log-requests` | 关闭逐请求日志 | 减少日志量和 CPU 噪声 | 不影响 metrics；排查 404/超时仍可临时去掉 |
+| `--host 0.0.0.0 --port 8000` | 监听地址 | Vast 通过端口映射暴露 8000；实例内压测用 `127.0.0.1` | 只绑 `127.0.0.1` 时实例外访问不到；写在 `"$@"` 之后，调用方改不了 |
+| `2>&1 \| tee /workspace/d2-${TAG}.log` | stdout+stderr 同时写终端和日志 | 后面要 grep `GPU KV cache size`、`Maximum concurrency`、`Prefix cache hit rate` | 同一个 TAG 重跑会**覆盖**旧日志；TAG 要唯一 |
+| `--dtype float16`（仅 FP16） | 强制 FP16 | Qwen3-8B 的 config 是 float16；和 AWQ 的 `auto_awq` 对齐 | 不要用 bf16 和 FP16 混比 |
+
+`serve_awq` 的 `"$@"` 在 `--max-model-len` / `--gpu-memory-utilization` **之后**，所以调用方可以覆盖这两个；但 `--host` / `--port` / `--disable-log-requests` 在 `"$@"` **之后**，调用方覆盖不了。这是故意设计的：地址和日志路径不应该在每个实验里变。
+
+例子：
+
+```bash
+serve_awq control-c16 --max-num-seqs 64
+# TAG=control-c16; "$@"="--max-num-seqs 64"
+# 最终：--max-model-len 8192 ... --max-num-seqs 64 --disable-log-requests ...
+
+serve_awq chunk-off --max-model-len 2048 --max-num-batched-tokens 2048 --disable-chunked-prefill
+# 调用方的 --max-model-len 2048 覆盖函数里的 8192（后者优先）
+```
+
+#### 3.4.3 `d2_bench` 逐行解释
+
+调用形式：
+
+```bash
+d2_bench <TAG> <C> <N> [PREFIX]
+```
+
+| 位置 | 变量 | 例子 | 含义 |
+|---|---|---|---|
+| `$1` | `TAG` | `control-c16` | 写进 JSON metadata 和文件名 |
+| `$2` | `C` | `16` | **客户端**并发（同时在飞的请求数） |
+| `$3` | `N` | `200` | 这一轮总共发多少条请求 |
+| `$4` | `PREFIX` | `0` / `512` | 共享前缀长度；默认 0 |
+
+逐行：
+
+| 行 / 参数 | 作用 | 为什么 | 坑 |
+|---|---|---|---|
+| `local IN=$((1024 - PREFIX))` | 随机后缀长度 | `--random-prefix-len` 是在随机输入**之外**再加前缀；总输入 = `IN + PREFIX` | 只有 `PREFIX <= 1024` 才合理；`PREFIX=1024` 会让 `IN=0`，bench 可能报错 |
+| `cd /workspace` | 固定目录 | `--result-dir ./results` 相对这里 | 不 `cd` 会把 JSON 写到别处 |
+| `curl -X POST /reset_prefix_cache` | 清空服务端 prefix cache | 同一服务上先跑 c16 再跑 c64 时，prompt 可能相同；不清会命中上一轮缓存 | 端点不存在时 `\|\| true` 静默跳过；如果服务没起，也会失败但继续 |
+| `--backend openai --endpoint /v1/completions` | 走 OpenAI 兼容 HTTP | 和真实服务路径一致；`/v1/chat/completions` 只用于 smoke test | 选错 endpoint 会 404；bench 不测 chat |
+| `--host 127.0.0.1 --port 8000` | 压测目标 | 实例内环回，不走公网 | 服务端口改了这里也要改 |
+| `--model qwen3-8b` | API 模型名 | 必须等于 `--served-model-name` | 写成 HF 仓库名会 404 |
+| `--tokenizer Qwen/Qwen3-8B` | 编码/统计 token 的 tokenizer | AWQ 和 FP16 用**同一个** tokenizer，保证 input/output 长度完全一致 | 不写会拿 `qwen3-8b` 去 HF 找，报 `not a local folder` |
+| `--dataset-name random` | 合成 token 序列 | 长度可控、无需下载数据；只适合性能测试 | 分布不真实；不能拿来推断真实文本的 TTFT |
+| `--random-input-len "$IN"` | 随机后缀长度 | 和 PREFIX 相加为 1024 | 和 `--random-prefix-len` 的关系别搞反 |
+| `--random-prefix-len "$PREFIX"` | 共享前缀长度 | 所有请求共享同一段前缀，测 prefix caching | 只对 `random` 数据集有效；前缀必须从第 0 个 token 开始完全相同 |
+| `--random-output-len 256` | 每条请求输出长度 | 固定工作量，吞吐/TPOT 可比 | 必须配 `--ignore-eos`，否则 EOS 提前截断 |
+| `--num-prompts "$N"` | 这一轮总请求数（样本量） | 统计样本量；n 不是并发，也不是 batch | `n < c` 时到不了目标并发；n 太小 P99 不稳；同一对比对内 n 必须一致 |
+| `--max-concurrency "$C"` | 客户端并发上限 | 闭路压测：保持 C 条在飞，完成一条补一条 | 不是服务端 `max-num-seqs`；C=64 时服务端可能只 admit 16 |
+| `--ignore-eos` | 强制生成到 256 token | 不让 EOS 改变输出长度 | 不写会让不同配置的输出长度不同，TPOT/吞吐不可比 |
+| `--seed 16` | 随机 prompt 的种子 | 所有配置用同一批 prompt，减少输入差异 | 固定 seed + 同一服务连续跑，必须配合 `reset_prefix_cache`，否则会命中上一轮 |
+| `--temperature 0` | 贪心解码 | v0.34 不再默认 0；不写可能按 1.0 采样 | 采样会让输出长度和延迟抖动 |
+| `--percentile-metrics ttft,tpot,itl,e2el` | 哪些指标算百分位 | 我们要 TTFT/TPOT/ITL/E2EL 的尾部 | 不列 `itl` 就没有 ITL P99.9 |
+| `--metric-percentiles 50,95,99,99.9` | 百分位点 | P50/P95/P99 + ITL P99.9 看秒级停顿 | 和 `--percentile-metrics` 是笛卡尔积；小数点的 JSON key 是 `p99.9_itl_ms` |
+| `--goodput ttft:2000 tpot:100` | SLO（ms） | 逐请求 AND：TTFT ≤ 2s 且 TPOT ≤ 100ms | goodput 单位是 **req/s**；达标比例 = `goodput / request_throughput` |
+| `--save-result --save-detailed` | 保存 JSON + per-request 数组 | 后面要复算 ITL/TPOT/停顿次数 | JSON 没有 `tpots` 数组；TPOT 用 `latencies`、`ttfts`、`output_lens` 重算 |
+| `--result-dir ./results` | 结果目录 | 相对 `/workspace` | 目录不存在时先 `mkdir -p`；scp 时别漏 |
+| `--result-filename "d2-${TAG}-c${C}-n${N}-$(date ...).json"` | 文件名 | tag/c/n/时间戳，避免覆盖 | 同一秒跑两次会撞名；TAG 要唯一 |
+| `--metadata ...` | 写进 JSON 的溯源信息 | gpu、vllm 版本、tag、c、n、prefix、长度、温度、power_limit | `VLLM_VERSION` / `POWER_LIMIT` 没 export 就是空值；metadata 里不要有空格 |
+
+#### 3.4.4 `preempts` 逐行解释
+
+```bash
+curl -s http://127.0.0.1:8000/metrics \
+  | awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}'
+```
+
+- `curl -s /metrics`：拿 Prometheus 文本格式；vLLM 的 counter 暴露时名字是 `vllm:num_preemptions_total`。
+- `awk '/^vllm:num_preemptions_total/{s+=$NF}'`：匹配所有带 label 的序列，把最后一列（数值）累加；单卡通常只有一条。
+- `END{print s+0}`：没有匹配时打印 0，避免空输出。
+- 它是**服务启动以来的累计值**，不是本轮增量。用法是 bench 前后各读一次，相减：
+
+```bash
+BEFORE=$(preempts)
+d2_bench control-c16 16 200 0
+AFTER=$(preempts)
+echo "preemptions delta: $((AFTER-BEFORE))"
+```
+
+- `>0` 说明本轮发生了 KV 抢占（序列被换出/重算），这一组的 TTFT/ITL 已经受 KV 压力影响，不能把差异全算到旋钮头上。
+- 如果读出来一直是 0，先确认 `curl -s /metrics | grep -c preempt` 不是 0；**curl 失败也会打印 0**，不要把“没连上”当成“没抢占”。D1 的三个日志里也没有 `Preemptions:` 行（vLLM 只在 >0 时打印），可以交叉验证。
+
+#### 3.4.5 一次完整调用示例
+
+服务窗口（tmux A）：
+
+```bash
+export HF_HOME=/workspace/hf
+export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader | tr -d ' W')
+# 粘贴 §3.4 的四个函数
+serve_awq control-c16 --max-num-seqs 64
+```
+
+bench 窗口（tmux B）：
+
+```bash
+export HF_HOME=/workspace/hf
+export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader | tr -d ' W')
+# 同一个代码块再粘一次
+preempts
+d2_bench control-c16 16 200 0
+preempts
+ls -lh /workspace/results/d2-control-c16-*.json
+```
+
+`serve_*` 是前台命令，**不要加 `&`**；放 tmux 窗口里，`Ctrl-C` 才是干净地停服务。`d2_bench` 跑完会回到提示符；如果卡住，先看服务窗口是不是还在加载/已经崩了。
+
+#### 3.4.6 常见错误
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `unrecognized arguments: control-c16` | 忘了第一个参数是 TAG，或 TAG 写在了 flag 后面 | 调用形式是 `serve_awq <TAG> [flags]` |
+| `--model qwen3-8b` 404 | served name 不匹配 | 检查 `--served-model-name` 和 bench `--model` |
+| `qwen3-8b is not a local folder` | bench 拿 `--model` 找 tokenizer | 加 `--tokenizer Qwen/Qwen3-8B` |
+| `input_lens` 不是 1024 | `IN` 和 `PREFIX` 没配平 | 确认 `PREFIX=512` 时 `IN=512`，且看 JSON |
+| 输出长度不是 256 | 没加 `--ignore-eos`，或模型提前 EOS | 加 `--ignore-eos`；看 JSON `output_lens` |
+| 两轮结果异常接近 | 固定 seed + 没清 prefix cache | `d2_bench` 已带 `reset_prefix_cache`；仍异常就手动 POST 一次 |
+| metadata 为空 | `VLLM_VERSION` / `POWER_LIMIT` 没 export | 在当前 shell 重新 export，再跑 |
+| 日志被覆盖 | 同一 TAG 重跑 | 用新 TAG，或先把旧日志改名 |
+| `preempts` 一直是 0 | curl 失败 / 指标名变了 | `curl -s /metrics \| grep preempt` 确认 |
+| 函数找不到 | 新 shell 没粘代码块 | 每个新窗口重新粘 §3.4 |
+
 ---
 
 ## 4. 逐个实验
@@ -670,3 +824,24 @@ scheduler：max_num_seqs=64, budget=2048
 ```
 
 所以：`batch_size 8` ≈ “每个 HTTP 请求 8 条 prompt”，`num_concurrent 8` ≈ “8 个请求并发”；两者相乘是**客户端在途上限**，最终 batch 仍由 vLLM 决定。`local-chat-completions` 不支持 batched chat，会把 `batch_size` 强制改成 1。
+
+### Q11：`--num-prompts` 是什么？和并发数、batch size 有什么区别？
+
+`--num-prompts N` = **这一轮总共发多少条请求**，也就是样本量 n。它不是并发数，不是 batch size，不是输出长度。
+
+- 闭路压测：客户端最多保持 `--max-concurrency C` 条在飞；完成一条补一条，直到总共发完 N 条。
+- 如果 `N < C`，永远到不了 C 并发；N 至少要是 C 的几倍，稳态才占主导。
+- N 决定运行时长和百分位的分辨率：
+  - c=16、n=200 约 12.5 波，稳态够；P99 只有第 2 慢的请求，仍然粗。
+  - c=64、n=300 约 4.7 波，ramp-up 占比更大；吞吐和 P99 要注明。
+  - per-request P99.9 在 n=200 时基本就是最慢的一条，不要当稳定百分位；ITL P99.9 有 N×255 个 gap，才有意义。
+- 我们的时间估算（D1 实测，n=500/1000 线性折算）：
+
+| 配置 | n | 预计时长 |
+|---|---|---|
+| c=16 | 200 | ~7.6 min |
+| c=64 | 300 | ~9.6 min |
+| c=8 | 100 | ~5 min |
+
+- 同一对比对内 n 必须一致；跨并发比较时 n 不同会影响 ramp-up 占比，报告里要写。
+- `--num-prompts` 不是 `--limit`（lm-eval 的 50 条样本），也不是 `--max-num-seqs`；它只是客户端的样本量。

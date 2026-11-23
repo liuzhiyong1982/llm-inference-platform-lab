@@ -46,6 +46,7 @@ GPU 架构 (L4 = sm_89)
 | prefill vs decode | prefill 并行算 prompt、写 KV；decode 每步 1 token、读 KV | TTFT≈排队+prefill；TPOT/ITL≈decode step |
 | `max-num-batched-tokens` | 一次 forward 的 token 预算，prefill+decode 共用 | 默认 2048；不是并发数；调小→ITL 稳、吞吐降、长 prompt TTFT 升 |
 | `max-model-len` | 单条请求 prompt+output 的上限（空间） | 不预分配 KV；关 chunking 时 budget 必须 ≥ 它 |
+| `--num-prompts` | 一轮总请求数（样本量），不是并发 | `n < c` 到不了目标并发；per-request P99.9 需 N≥1000，看 ITL P99.9 更稳 |
 | chunked prefill | 预算不够时把 prefill 拆到多步，与 decode 交错 | 默认开；`--disable-chunked-prefill`；**关掉时 budget 必须 ≥ max_model_len，否则自动抬到 max_model_len** |
 | prefix caching | 按 block 复用相同前缀的 KV | 默认开；block 对齐；命中率按 token 计；512/1024≈50% |
 | AWQ | W4A16：权重 4-bit，激活/KV 仍是 FP16 | group_size=128；文件 5.7GB；质量掉 1–5 点，50 条 GSM8K 分辨不了 1–2 点 |
