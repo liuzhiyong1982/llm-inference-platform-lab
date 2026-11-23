@@ -688,6 +688,19 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 >
 > D1 与 D2 的 AWQ KV 差约 4,600 token（96,256 vs 91,648），来自不同 host / 启动 profiling；4.5 用 D2 控制组的值估算 FP16，因为 FP16 也跑在 D2 这台机器上。
 
+#### 4.5.1 这笔账怎么算：为什么主对比用 c=8
+
+1. **AWQ 只省权重，不省 KV/token。** AWQ 是 W4A16：权重 4-bit，激活和 KV cache 仍是 FP16。所以 Qwen3-8B 每 token 的 KV 在 AWQ 和 FP16 下都是 **144KiB**。
+2. **权重差多少。** AWQ 文件 5.7GB，FP16 16.4GB，差 **10.7GB**。换算成 GiB：`10.7×10^9 / 1024^3 ≈ 9.96GiB`。（5.7GB 不是纯 4-bit 的 4GB：embedding/lm_head 仍是 BF16，另有 scale/zero。）
+3. **这些显存能放多少 KV。** `9.96GiB / 144KiB ≈ 72,500 token`。
+4. **FP16 还剩多少 KV。** D2 的 AWQ 控制组 KV 是 91,648 token；FP16 权重多占 9.96GiB，所以 KV 大约剩 `91,648 − 72,500 ≈ 19,100 token`。
+5. **c=16 要多少 KV。** 每条请求最多 1024 input + 256 output = **1,280 token**；16 条同时跑满需要 `16 × 1,280 = 20,480 token > 19,100`。**差约 1,300 token**，至少一条请求会被排队/抢占，TTFT 会被 KV 压力污染。
+6. **c=8 要多少。** `8 × 1,280 = 10,240 < 19,100`，留约 8,900 token 余量；AWQ 和 FP16 都不会因为 KV 不够而排队，吞吐/TPOT 的差异才能归因到“权重 4-bit vs FP16”。
+
+所以：**c=8 是纯量化对比；c=16 是“量化 + KV 容量”的混合效应**，只能作观察，不能当因果。
+
+> 这是估算：实际 FP16 的 KV 以启动日志 `GPU KV cache size` 为准；FP16 的激活显存可能比 AWQ 略大，实际 KV 可能比 19,100 更小，所以 c=8 是保守选择。
+
 AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
 
 > **先重启服务**：tmux A `Ctrl-C` 停掉 `prefix-off` 服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动 FP16。
