@@ -87,12 +87,14 @@ vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 # 目的：权重和结果都放容器盘；新 shell 也要有
 export HF_HOME=/workspace/hf
 export HF_XET_HIGH_PERFORMANCE=1
-export HF_TOKEN=hf_xxx          # 可选；FP16 很大，强烈建议设置，不要提交进 git
+# export HF_TOKEN=hf_xxx        # 可选；需要时取消注释并替换，不要提交进 git
 export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
 # 目的：把功耗上限写进每条结果的 metadata；换 host 后这是判断可比性的第一依据
 export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader | tr -d ' W')
 mkdir -p /workspace/results
 ```
+
+> 这段 export 在 §3.4 的公共函数代码块里也完整包含一次；新 shell 直接粘 §3.4 即可，两处的 `HF_HOME` / `VLLM_VERSION` / `POWER_LIMIT` 必须一致。
 
 ### 3.2 下载模型（先下 AWQ，再下 FP16）
 
@@ -130,73 +132,92 @@ lm_eval --help >/dev/null && echo "lm-eval ok"
 
 ### 3.4 公共函数（每个新 shell 粘一次）
 
+> 为了让每个 flag 后面都能写注释，函数用 bash 数组收集参数；`"${args[@]}"` 会原样展开成多个参数，和逐行反斜杠写法等价。代码块里的 `#` 是逐行速查，3.4.2 / 3.4.3 的表补充“为什么 / 坑”。
+
 ```bash
-# 目的：统一启动 AWQ 服务；额外参数由调用方传，比如 --max-num-seqs 16
-# 注意：v0.34 的 max_num_seqs 默认是 128；控制组必须显式传 --max-num-seqs 64 才能和 D1 对齐
-# 调用方传的同名参数会覆盖上面的默认值（argparse 后者优先），比如 --max-model-len 2048
+# ---- 每个新 shell 先执行这一段 ----
+export HF_HOME=/workspace/hf                                            # 模型缓存；所有 shell 必须一致
+export HF_XET_HIGH_PERFORMANCE=1                                        # Xet 高吞吐下载
+# export HF_TOKEN=hf_xxx                                                # 可选；需要时取消注释并替换
+export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)") # 写进 JSON metadata
+export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit \
+  --format=csv,noheader | tr -d ' W')                                   # 例如 40.00；换 host 要重记
+mkdir -p /workspace/results                                             # d2_bench 的输出目录
+# ------------------------------------
+
 serve_awq() {
-  local TAG="$1"; shift
-  cd /workspace
-  vllm serve Qwen/Qwen3-8B-AWQ \
-    --served-model-name qwen3-8b \
-    --max-model-len 8192 \
-    --gpu-memory-utilization 0.90 \
-    "$@" \
-    --disable-log-requests \
-    --host 0.0.0.0 --port 8000 \
-    2>&1 | tee "/workspace/d2-${TAG}.log"
+  local TAG="$1"; shift                                                 # $1=日志标签；shift 后 $@ 只剩额外参数
+  cd /workspace                                                        # 日志和 results 相对这里
+  local args=(
+    --served-model-name qwen3-8b                                       # API 模型名；bench --model 必须匹配
+    --max-model-len 8192                                               # 单请求 prompt+output 上限，不是每步预算
+    --gpu-memory-utilization 0.90                                      # 权重+KV+激活可用的显存比例
+    "$@"                                                               # 调用方追加；同名参数后者优先
+    --disable-log-requests                                             # 关闭逐请求日志，降噪
+    --host 0.0.0.0                                                     # Vast 端口映射需要；实例内压测走 127.0.0.1
+    --port 8000                                                        # 和 bench 的 --port 一致
+  )
+  vllm serve Qwen/Qwen3-8B-AWQ "${args[@]}" 2>&1 | tee "/workspace/d2-${TAG}.log"  # 终端+日志
 }
 
-# 目的：统一启动 FP16 服务；OOM 时把 max-model-len 降到 4096
 serve_fp16() {
-  local TAG="$1"; shift
+  local TAG="$1"; shift                                                 # 同上
   cd /workspace
-  vllm serve Qwen/Qwen3-8B \
-    --served-model-name qwen3-8b \
-    --dtype float16 \
-    --max-model-len 8192 \
-    --gpu-memory-utilization 0.90 \
-    "$@" \
-    --disable-log-requests \
-    --host 0.0.0.0 --port 8000 \
-    2>&1 | tee "/workspace/d2-${TAG}.log"
+  local args=(
+    --served-model-name qwen3-8b                                       # 和 AWQ 用同一个 API 名
+    --dtype float16                                                    # 强制 FP16；和 AWQ 的 auto_awq 对齐
+    --max-model-len 8192                                               # OOM 时改 4096，并在报告注明
+    --gpu-memory-utilization 0.90                                      # 和 AWQ 控制组一致
+    "$@"                                                               # 可追加 --max-model-len 4096 等
+    --disable-log-requests                                             # 同上
+    --host 0.0.0.0                                                     # 同上
+    --port 8000                                                        # 同上
+  )
+  vllm serve Qwen/Qwen3-8B "${args[@]}" 2>&1 | tee "/workspace/d2-${TAG}.log"
 }
 
-# 目的：统一 bench；PREFIX=0 表示不构造共享前缀
 d2_bench() {
-  local TAG="$1" C="$2" N="$3" PREFIX="${4:-0}"
-  local IN=$((1024 - PREFIX))
+  local TAG="$1" C="$2" N="$3" PREFIX="${4:-0}"                         # TAG=标签；C=客户端并发；N=总请求数；PREFIX=共享前缀
+  local IN=$((1024 - PREFIX))                                          # 随机后缀；总输入 = IN + PREFIX = 1024
   cd /workspace
-  # 目的：清 prefix cache，避免同一服务上上一轮的 prompt 命中缓存；刚起的服务上是 no-op
-  curl -s -X POST http://127.0.0.1:8000/reset_prefix_cache >/dev/null || true
-  vllm bench serve \
-    --backend openai --endpoint /v1/completions \
-    --host 127.0.0.1 --port 8000 \
-    --model qwen3-8b \
-    --tokenizer Qwen/Qwen3-8B \
-    --dataset-name random \
-    --random-input-len "$IN" \
-    --random-prefix-len "$PREFIX" \
-    --random-output-len 256 \
-    --num-prompts "$N" --max-concurrency "$C" \
-    --ignore-eos --seed 16 --temperature 0 \
-    --percentile-metrics ttft,tpot,itl,e2el \
-    --metric-percentiles 50,95,99,99.9 \
-    --goodput ttft:2000 tpot:100 \
-    --save-result --save-detailed \
-    --result-dir ./results \
-    --result-filename "d2-${TAG}-c${C}-n${N}-$(date +%Y%m%d-%H%M%S).json" \
-    --metadata gpu=l4-24gb vllm="$VLLM_VERSION" tag="$TAG" concurrency="$C" n="$N" \
-      prefix_len="$PREFIX" input_len=1024 output_len=256 temperature=0 \
-      power_limit="$POWER_LIMIT"
+  curl -s -X POST http://127.0.0.1:8000/reset_prefix_cache >/dev/null || true  # 清 prefix cache，避免跨轮命中
+  local args=(
+    --backend openai                                                   # OpenAI 兼容 HTTP 客户端
+    --endpoint /v1/completions                                         # 压测走 completions，不是 chat
+    --host 127.0.0.1                                                   # 实例内环回，不走公网
+    --port 8000                                                        # 和服务端一致
+    --model qwen3-8b                                                   # 必须等于 --served-model-name
+    --tokenizer Qwen/Qwen3-8B                                          # 编码/统计 token；AWQ/FP16 共用
+    --dataset-name random                                              # 合成 token，长度可控
+    --random-input-len "$IN"                                           # 随机后缀长度
+    --random-prefix-len "$PREFIX"                                      # 共享前缀长度；0=不构造
+    --random-output-len 256                                            # 每条固定输出 256 token
+    --num-prompts "$N"                                                 # 这一轮总请求数（样本量），不是并发
+    --max-concurrency "$C"                                             # 客户端同时在飞的上限
+    --ignore-eos                                                       # 强制生成到 256，不被 EOS 截断
+    --seed 16                                                          # prompt 采样固定；配 reset_prefix_cache
+    --temperature 0                                                    # greedy；v0.34 不再默认 0
+    --percentile-metrics ttft,tpot,itl,e2el                            # 这些指标算百分位
+    --metric-percentiles 50,95,99,99.9                                 # 百分位点；ITL P99.9 看停顿
+    --goodput ttft:2000 tpot:100                                       # SLO（ms）；逐请求 AND
+    --save-result                                                      # 保存汇总 JSON
+    --save-detailed                                                    # 加 per-request 数组
+    --result-dir ./results                                             # 相对 /workspace
+    --result-filename "d2-${TAG}-c${C}-n${N}-$(date +%Y%m%d-%H%M%S).json"  # tag/c/n/时间戳，避免覆盖
+    --metadata gpu=l4-24gb vllm="$VLLM_VERSION" tag="$TAG" \
+      concurrency="$C" n="$N" prefix_len="$PREFIX" input_len=1024 \
+      output_len=256 temperature=0 power_limit="$POWER_LIMIT"          # 溯源信息；值里不要有空格
+  )
+  vllm bench serve "${args[@]}"
 }
 
-# 目的：读抢占计数，bench 前后各一次，相减就是本轮增量
 preempts() {
-  curl -s http://127.0.0.1:8000/metrics \
-    | awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}'
+  curl -s http://127.0.0.1:8000/metrics |                              # Prometheus 文本
+    awk '/^vllm:num_preemptions_total/{s+=$NF} END{print s+0}'         # 累加 counter；bench 前后相减
 }
 ```
+
+> 这段 export 与 §3.1 的 `HF_HOME` / `VLLM_VERSION` / `POWER_LIMIT` 保持一致；`HF_TOKEN` 在这里默认注释，避免把占位符 `hf_xxx` 当成真 token 导出。新 shell 整段粘 §3.4 即可。
 
 > `--random-prefix-len` 会在 `--random-input-len` 之外**再前置**一段共享前缀，所以函数里用 `IN = 1024 - PREFIX` 保证总输入仍是 1024。跑完看 JSON 的 `input_lens` 是否全为 1024，不是就调整。
 
@@ -209,7 +230,7 @@ preempts() {
 | `d2_bench` | 跑一轮压测并写 JSON | bench 窗口（tmux B） | 前台跑完返回 |
 | `preempts` | 读当前累计抢占数 | bench 窗口（tmux B） | 立即返回一个整数 |
 
-它们都是**当前 shell 的函数**，不是脚本文件。新开 SSH / tmux 窗口 = 新 shell，要重新粘一次 §3.4 的代码块；`export` 的 `HF_HOME`、`VLLM_VERSION`、`POWER_LIMIT` 也要在新 shell 里重新设，否则 JSON metadata 会是空值。
+它们都是**当前 shell 的函数**，不是脚本文件。新开 SSH / tmux 窗口 = 新 shell，要重新粘一次 §3.4 的**整段**代码块（含 export）；否则函数找不到，JSON metadata 也会是空值。
 
 #### 3.4.2 `serve_awq` / `serve_fp16` 逐行解释
 
@@ -317,20 +338,14 @@ echo "preemptions delta: $((AFTER-BEFORE))"
 服务窗口（tmux A）：
 
 ```bash
-export HF_HOME=/workspace/hf
-export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
-export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader | tr -d ' W')
-# 粘贴 §3.4 的四个函数
+# 粘贴 §3.4 的整段代码块（export + 四个函数）
 serve_awq control-c16 --max-num-seqs 64
 ```
 
 bench 窗口（tmux B）：
 
 ```bash
-export HF_HOME=/workspace/hf
-export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
-export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader | tr -d ' W')
-# 同一个代码块再粘一次
+# 在另一个 shell 里再粘一次整段（函数和 export 都不会跨 shell）
 preempts
 d2_bench control-c16 16 200 0
 preempts
