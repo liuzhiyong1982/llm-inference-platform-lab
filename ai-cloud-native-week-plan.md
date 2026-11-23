@@ -345,6 +345,8 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 | **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试 |
 | **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单 |
 
+> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，2026-11-23，未执行）；执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
+
 **冲刺版验收（可选；只做 D1 不要用这张表）**
 - [ ] `make bench` 一键复现（尚未实现；做 D3 时补）
 - [ ] 3 张图：throughput vs concurrency / TTFT P99 / llm-d 路由前后 P99

@@ -152,3 +152,5 @@ c=8 是纯量化对比：FP16 比 AWQ 慢 **36.8%**，TPOT P95 高 **60.6%**，g
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
+
+D3（k3s + vLLM Deployment、冷启动、KEDA）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，未执行）。
