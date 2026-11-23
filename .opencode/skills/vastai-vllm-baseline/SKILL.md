@@ -51,6 +51,8 @@ GPU 架构 (L4 = sm_89)
 
 > 1024-token prompt 在 2048 预算下通常一次 prefill 就能算完，chunking 不会强行切开；真正决定“一步卡多久”的是 `max-num-batched-tokens`。所以测步长用 `bt512`，不要只做 chunk on/off。
 
+> 三个容易混的数：**并发数 c** 是客户端在飞请求（含排队）；**batch size** 在 serving 里要么指序列数（受 `max_num_seqs` 限制），要么指 token 数；**`max-num-batched-tokens`** 是每步 token 预算。`c=64` + `mns=16` 时是 64 在飞、16 admitted、48 排队，不是 64 路同时算。
+
 ### 指标口径
 
 **单请求**

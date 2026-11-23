@@ -582,3 +582,23 @@ D2 用 `--random-prefix-len 512` 造一段所有请求共享的 512-token 前缀
 ### Q7：为什么一定要当天控制组？
 
 host 噪声、功耗墙、邻居、驱动/clock 都可能变；D1 的数字只作参考。跨 host / power limit 的数字不能放进同一张表，`power_limit` 已写进每条 JSON 的 metadata。一次只动一个变量，同一对比对内的 n 必须一致。
+
+### Q8：并发数、batch size、`max-num-batched-tokens` 有什么区别？
+
+一句话：**并发数是“有多少请求在飞”，batch size 是“一次 forward 里有多少序列”，`max-num-batched-tokens` 是“一次 forward 里最多多少 token”。**
+
+| 概念 | 层级 | 定义 | 谁控制 | D2 取值 |
+|---|---|---|---|---|
+| 并发数 `c` | 客户端 / 负载 | 同时在飞的请求数，包含排队、prefill、decode | bench `--max-concurrency` | 1/4/8/16/64 |
+| batch size（序列） | 服务端调度 | 一次 forward 调度的序列数 | `--max-num-seqs` 是上限 | 64（控制组） |
+| `max-num-batched-tokens` | 服务端调度 | 一次 forward 的 token 总预算，prefill+decode 共用 | CLI flag | 2048；bt512=512 |
+
+关键：**`c=64` 不等于 64 条序列在同一个 forward 里算。**
+
+- `c=64`、`max-num-seqs=16`：64 条在飞，服务端只 admit 16 条，48 条排队；decode 一步是 16 条 × 1 token = 16 token，离 2048 的 token 预算很远。这时瓶颈是序列数，不是 token 预算。
+- `c=16`、`max-num-seqs=64`、一条新请求 prefill 1024 token、15 条在 decode：一步是 1024 + 15 = 1039 token，16 条序列。token 预算 2048 没打满，但这一步要算 1039 个 token，decode 要等它。
+- `c=1`：只有 1 条序列，但第一步 prefill 就是 1024 token；之后每步 1 token。**序列 batch size = 1，token batch size 却是 1024。**
+
+为什么 vLLM 不用一个固定的 “batch size”：训练时序列等长、阶段单一，batch size 是一个数；serving 时序列长度不同、prefill 和 decode 混在一起、prefill 还能分块，所以用两个上限分别控制“序列数”和“token 数”。
+
+别把 lm-eval 的 `--batch_size 8` 当成 vLLM 的 batch：那是客户端一次发 8 条请求，服务端仍按 `max-num-seqs` / `max-num-batched-tokens` 调度。
