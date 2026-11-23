@@ -39,6 +39,18 @@ GPU 架构 (L4 = sm_89)
 
 `cuda_vers` 是 driver 推导出来的上限，不是 toolkit 版本；具体 driver 版本只在排查已知 bug 时看。
 
+### 核心概念
+
+| 概念 | 一句话 | v0.34 关键数字 / 坑 |
+|---|---|---|
+| prefill vs decode | prefill 并行算 prompt、写 KV；decode 每步 1 token、读 KV | TTFT≈排队+prefill；TPOT/ITL≈decode step |
+| `max-num-batched-tokens` | 一次 forward 的 token 预算，prefill+decode 共用 | 默认 2048；不是并发数；调小→ITL 稳、吞吐降、长 prompt TTFT 升 |
+| chunked prefill | 预算不够时把 prefill 拆到多步，与 decode 交错 | 默认开；`--disable-chunked-prefill`；**关掉时 budget 必须 ≥ max_model_len，否则自动抬到 max_model_len** |
+| prefix caching | 按 block 复用相同前缀的 KV | 默认开；block 对齐；命中率按 token 计；512/1024≈50% |
+| AWQ | W4A16：权重 4-bit，激活/KV 仍是 FP16 | group_size=128；文件 5.7GB；质量掉 1–5 点，50 条 GSM8K 分辨不了 1–2 点 |
+
+> 1024-token prompt 在 2048 预算下通常一次 prefill 就能算完，chunking 不会强行切开；真正决定“一步卡多久”的是 `max-num-batched-tokens`。所以测步长用 `bt512`，不要只做 chunk on/off。
+
 ### 指标口径
 
 **单请求**
@@ -329,6 +341,9 @@ block 16 token = 2.25 MiB
 | `--help \| grep` 为空 | v0.34 的 help 分组 | `--help=all` |
 | `--no-enable-*` 在 help 里搜不到 | v0.34 的 EnableDisableAction 只显示 `--enable-x` / `--disable-x`，`--no-enable-x` 是隐藏兼容别名 | 用 `--disable-chunked-prefill` / `--disable-prefix-caching` |
 | 控制组并发悄悄变大 | v0.34 `max_num_seqs` 默认 **128**（不是 64） | 显式 `--max-num-seqs 64`；启动日志 `non-default args` 里核对 |
+| `chunk-off` 启动报 budget < max_model_len | 关 chunked prefill 的硬校验 | 固定 `--max-model-len 2048 --max-num-batched-tokens 2048` |
+| `chunk-off` 差异巨大 | 不传 budget 时被自动抬到 max_model_len=8192，步长也变了 | 同预算 `control-2k` 对照；别把预算变化算成 chunking 效果 |
+| FP16 c=16 TTFT 明显变差 | FP16 KV 只剩约 1.9 万 token，16×1280 已压上限 | 主对比用 c=8；c=16 标“KV 受限”，看抢占 |
 | 质量门两边都接近 0 分 | lm-eval `max_gen_toks` 默认 256，thinking 模型的 CoT 被截断 | `max_gen_toks=1024,max_length=4096`；先查截断再看分数 |
 | `CUDA driver version is insufficient` | host Max CUDA < 镜像 CUDA | 换 host 或换低 CUDA 镜像；不要装 driver |
 | `no kernel image is available` | GPU arch 不在镜像编译列表 | 换镜像/换卡；和 CUDA 版本无关 |
@@ -344,7 +359,7 @@ block 16 token = 2.25 MiB
 
 ## 下一步学习路径
 
-- **D2 参数**：`max-num-seqs`、chunked prefill、prefix caching、AWQ vs FP16 + 质量门。一次一个变量，同 host，先 c=16 找拐点；执行细节见 `d2-vllm-tuning-runbook.md`。参数网格可以用 `vllm bench sweep serve` 编排（run 之间会清 server cache）。D2 比的是 **goodput 曲线**，不是“最大并发”。
+- **D2 参数**：`max-num-seqs`、chunked prefill、prefix caching、AWQ vs FP16 + 质量门。一次一个变量，同 host，先 c=16 找拐点；执行细节见 `d2-vllm-tuning-runbook.md`。测步长用 `bt512`；`chunk-off` 固定 2048 预算并配 `control-2k`；AWQ vs FP16 在 c=8 比（FP16 KV 约 1.9 万 token），50 条 GSM8K 只是 smoke test。参数网格可以用 `vllm bench sweep serve` 编排（run 之间会清 server cache）。D2 比的是 **goodput 曲线**，不是“最大并发”。
 - **D3 K8s**：k3s + Deployment；initContainer 现下 vs node-local 缓存测冷启动；KEDA 按 `num_requests_waiting` 扩缩。
 - **D4 路由**：2×L4，llm-d EPP prefix-cache 路由 vs round-robin，共享长前缀看 P99 和命中率。
 - **D5 策略**：Kueue 配额 + Kyverno 校验，留下被拒 manifest 日志。

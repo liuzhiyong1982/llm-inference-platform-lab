@@ -6,6 +6,8 @@
 > 前置：D1 已完成（4 个 baseline JSON + README 表）。D2 不是“调到最快”，而是“说清楚每个旋钮换了什么”。
 >
 > 纪律：**同 host、同 power limit、同输入/输出长度、同 SLO、一次一个变量**。换机器就重跑控制组，不能拿 40W 和 72W 的数字比。
+>
+> 概念不清楚先读 **§10 概念与问答**：prefill/decode、`max-num-batched-tokens`、chunked prefill、prefix caching、AWQ W4A16。
 
 ---
 
@@ -510,3 +512,73 @@ ls -lh /workspace/d2-*.log
 - [ ] 结果和日志 scp 回本地，commit + push
 - [ ] 成本记录
 - [ ] 实例 Stop 或 Destroy，并注明理由
+
+---
+
+## 10. 概念与问答（执行前读）
+
+这一节记录 D2 讨论中被问到的问题；操作命令仍以第 3–4 节为准，这里解释“为什么”和“数字从哪来”。
+
+### Q1：prefill 和 decode 到底在争什么？
+
+**Prefill** 把整段 prompt 的所有 token 并行算一遍，写 KV cache，产出首 token；计算密集。**Decode** 每条运行中的序列每步只生成 1 个 token，读 KV cache；显存带宽密集。TTFT 主要是排队 + prefill，TPOT/ITL 主要是 decode step 的时间。
+
+一个 scheduler step 的 token 预算由 `max_num_batched_tokens` 控制，prefill 和 decode 共用这个预算，所以一条新请求的 prefill 会拖慢同一 step 里正在 decode 的请求。
+
+### Q2：`max-num-batched-tokens` 是什么？和 `max-num-seqs` 有什么区别？
+
+- `max-num-batched-tokens`：**一次 forward 最多处理多少个 token**，prefill token 和 decode token 都算；v0.34 默认 **2048**。
+- `max-num-seqs`：**同时最多有多少条序列**；v0.34 默认 **128**，D1/D2 控制组显式用 64。
+
+例子：64 条序列各 decode 1 token = 64 token；一条 1024-token prompt 做 prefill = 1024 token；两条 1024-token prompt 同一步 = 2048 token，正好打满。
+
+调大 budget：每步塞更多 token，吞吐上升，但单步变长、ITL 尾部变差；调小：ITL 更平滑，但步数变多、吞吐下降、长 prompt 的 TTFT 变差。D1 的 ~2.3s 停顿，量级等于一个 1024–2048 token 的 prefill step，所以 `bt512` 是直接检验。
+
+### Q3：chunked prefill 是什么？
+
+关闭时，一条 prefill 必须**整体**放进一个 step；它占满 step 时，所有正在 decode 的序列都得等。开启后，预算不够就把 prefill 拆成多个 chunk，和 decode 混在同一 step：decode 更平滑、GPU 利用率更高，但长 prompt 的 TTFT 可能变大。
+
+v0.34 默认开启，关闭用 `--disable-chunked-prefill`。
+
+两个容易误解的点：
+
+1. **chunked prefill 不是强行切碎**。1024-token prompt 在 2048 预算下通常一次就能算完；只有预算不够（多条 prefill 竞争，或你把 budget 调小）时才切。所以 `chunk-off` 在 2048 预算下可能和 control 几乎没差异；`bt512` 才是“步长”实验。
+2. **关掉 chunking 会连带改预算**。v0.34 要求 `max_num_batched_tokens >= max_model_len`，否则启动 `ValueError`；不显式传 budget 时，EngineArgs 会自动把它抬到 `max_model_len`（8192）。这样就不是单变量了。§4.3 因此固定 `max-model-len 2048` + `budget 2048`，并加 `control-2k` 对照。
+
+### Q4：prefix caching 是什么？
+
+Prefill 的 KV 按 **block** 对齐做哈希；新请求从第 0 个 block 开始匹配，命中就复用 KV，不重算。只有完整 block 能复用，且前缀必须从第 0 个 token 开始完全相同；中间改一个 token，后面的 block 全部失效。
+
+它省的是 **prefill 计算**，不是 decode：TTFT 下降，output tok/s 基本不变，每 token 的 KV 仍是 144KiB。缓存和运行中的请求共用 KV 池，显存紧张时会被驱逐。
+
+D2 用 `--random-prefix-len 512` 造一段所有请求共享的 512-token 前缀，总输入仍是 1024。命中率按 token 计，所以 `prefix-on` 稳态大约 **50%**（512/1024），不是 100%；首波请求会 miss。
+
+### Q5：AWQ 量化后的“精度”是多少？
+
+要分两个层面：
+
+**数值位宽**：`Qwen/Qwen3-8B-AWQ` 是 **W4A16**——权重 4-bit（`bits=4, group_size=128, zero_point=true, gemm`），激活和 KV cache 仍是 FP16。文件 5.7GB 而不是理论 4GB，是因为 embedding/lm_head 保留 BF16（各约 1.2GB），再加 scale/zero。
+
+**模型质量**：没有固定值。Qwen 官方模型卡给的 bf16 vs AWQ-int4（厂商数字，不是我们这台机器的测量）：
+
+| 模式 | Benchmark | bf16 | AWQ-int4 | 差值 |
+|---|---|---|---|---|
+| Thinking | LiveBench 2024-11-25 | 67.1 | 65.5 | −1.6 |
+| Thinking | GPQA | 62.0 | 59.0 | −3.0 |
+| Thinking | MMLU-Redux | 87.5 | 86.4 | −1.1 |
+| Thinking | AIME24 | 76.0 | 71.3 | −4.7 |
+| Non-Thinking | LiveBench 2024-11-25 | 53.5 | 48.9 | −4.6 |
+| Non-Thinking | GPQA | 39.3 | 35.9 | −3.4 |
+| Non-Thinking | MMLU-Redux | 79.5 | 79.1 | −0.4 |
+
+合理预期是 1–5 个点，随任务而变。D2 的 50 条 GSM8K 只是 smoke test：n=50 时单个比例的 95% CI 约 ±11 个点，分辨不了 1–2 个点；报告写原始命中数（如 43/50 vs 44/50），不要写“只掉 1.2 个点”。
+
+**容量**：AWQ 权重 5.7GB、FP16 16.4GB，差 10.7GB ≈ 7.2 万 token 的 KV；D1 的 AWQ KV 是 91,648 token，所以 FP16 大约只剩 1.9 万。c=16 × 1280 = 20,480 已经压到 FP16 的 KV 上限，因此 AWQ vs FP16 的主对比放 c=8，c=16 只作 KV 容量观察（看抢占）。
+
+### Q6：TPOT 和 ITL 有什么区别？
+
+单条请求内，`mean(ITL) = TPOT`；差别在聚合层级：ITL 是 token 级（N×255 个样本），TPOT 是请求级（N 个样本）。ITL 保留尖峰，TPOT 把尖峰平均掉。查抖动看 ITL，算 SLO/容量看 TPOT；`--goodput tpot:100` 用 per-request TPOT，是偏乐观的口径。D1 的实测对比和复算脚本在 `d1-vllm-baseline-runbook.md` §1.1。
+
+### Q7：为什么一定要当天控制组？
+
+host 噪声、功耗墙、邻居、驱动/clock 都可能变；D1 的数字只作参考。跨 host / power limit 的数字不能放进同一张表，`power_limit` 已写进每条 JSON 的 metadata。一次只动一个变量，同一对比对内的 n 必须一致。
