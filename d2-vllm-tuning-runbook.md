@@ -534,6 +534,8 @@ d2_bench bt512 16 200 0    # TAG=bt512；C=16 客户端并发；N=200 总请求�
 
 预期：如果 D1 的秒级停顿（c=16 的 ITL P99.9 ≈ 2.0s，c=64 的 ITL P99 ≈ 2.3s）来自“一个 step 里 1024–2048 个 prefill token 和 decode 同批”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
 
+> 机制细节（为什么大段 prefill 会拉高同一 step 里其他序列的 ITL）见 §10 **Q14**。
+
 ### 4.4 prefix caching on/off（共享前缀）
 
 先跑“缓存开 + 共享前缀”：
@@ -1011,10 +1013,36 @@ chunked prefill 只在“剩余预算装不下这段 prefill”时才切。D1 �
 >
 > 注意：被延迟的是**同一 step 里已经在 decode 的序列**；发起 prefill 的那条请求此时还在 prefill，它的首 token 延迟算在 TTFT，不是 ITL。
 
+用 step 画出来：
+
+```text
+step t:   [1024 prefill][16 decode]  → 这一步 1–2s
+          → 16 条 decode 的下一 token 都要等它算完
+
+step t+1: [16 decode]                → ~80ms
+          → ITL 恢复正常
+```
+
+c=16 的 ITL 分布（D1 主跑，n=500，255 gap/请求）：
+
+| P50 | P95 | P99 | P99.9 | >1s gaps/req |
+|---|---|---|---|---|
+| 80ms | 83ms | 1,082ms | 2,006ms | 13 |
+
+大多数 gap 在 80ms；只有含 prefill 的 step 把尾部拉到 1–2s。
+
 所以 `bt512` 不是“打开 chunking”，而是**把预算压到 prompt 以下，强制 chunking 发生**。
 
 注意：它降的是 **ITL 尾部**（P99/P99.9、`>1s gaps`），不是 P50；decode-only step 仍然是 ~80ms。不要期待中位数变化。
 
 为什么 2.3s 不一定是“2048 个 prefill token”：2048 是上限，不是每步实际值。c=16 时一步大约是 1024 prefill + 15–16 decode；c=64 时是 1024 + 63–64 decode。2.3s 的尾部更像是“1024-token prefill 在这张 40W 卡上的耗时”，或者偶尔两步 prefill 挤在一起。具体每步多少 token，vLLM 默认不打印；`bt512` 就是用来验证这个因果关系的。
+
+支持这个解释的证据：
+
+- 四轮抢占都是 0，排除 KV 抢占；
+- 排队延迟体现在 TTFT，不是 ITL；
+- ~2s 的 gap 量级和 1024-token prefill 的耗时对得上。
+
+但这不是已证实的因果：D1 没有打印每步 token 组成，`bt512` 才是对照实验。
 
 一句话类比：prefill 是“大货车”，decode 是“小包裹”。预算 2048 时，大货车一次装完，小包裹要等它卸完；预算 512 时，大货车分几趟，小包裹可以在每趟之间走。总工作量差不多，但小包裹的单次等待变短。
