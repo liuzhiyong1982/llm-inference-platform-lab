@@ -90,9 +90,91 @@ B 线验收：§16 至少 1 条简历 bullet 能脱稿讲 10 分钟，并接住 
 | KEDA 0→1 | 可以测 | 可以测 |
 | KEDA 1→2 | 第二个 Pod 会 `Pending`（`Insufficient nvidia.com/gpu`） | 可以测真实扩容曲线 |
 | 驱逐 | 可以测，但删掉唯一副本会短暂 0 可用 | 可以测 PDB / 滚动更新 |
-| 成本（按 D2 同型 L4 估） | `$0.2611/h` | `$0.5111/h`（GPU ×2 + 存储） |
+| 成本（L4 容器 / 24GB VM） | `$0.2611/h` / 约 `$0.41–0.48/h` | `$0.5111/h`（GPU ×2 + 存储） |
 
 > 机制可以用 CPU + 小模型（如 `Qwen3-0.6B`）练，但**冷启动秒数只能用目标 GPU 测**；不要把 CPU 数字写进作品集。
+
+> 2026-11-23 实测：Vast 上搜不到 L4 VM（`gpu_name=L4 vms_enabled=true` 返回空），24GB VM 只有 3090/4090/5090。用 3090/4090 时，D3 只做内部 cold/warm 对比，**不要**把吞吐或冷启动秒数和 D1/D2 的 L4 数字直接比。
+
+### 2.1 在 Vast 租一台 GPU VM（CLI）
+
+k3s 需要 systemd/cgroup；**普通容器实例不行**，必须选 `vms_enabled=true` 的 VM。下面命令按顺序执行。
+
+**0）账号与 SSH key：**
+
+```bash
+vastai show user -q
+vastai show ssh-keys
+
+# 没有 key 时，把路径换成你的公钥
+vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
+```
+
+**1）搜 VM offer：**
+
+```bash
+# L4 VM：先试；当前返回空是正常的
+vastai search offers -n \
+  'gpu_name=L4 num_gpus=1 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.95' \
+  -o 'dph' --storage 130 --limit 10
+
+# 24GB VM 兜底：3090/4090/5090
+vastai search offers -n \
+  'num_gpus=1 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.98' \
+  -o 'dph' --storage 130 --limit 10
+```
+
+挑 `R >= 0.98`、`Net_down >= 500`、`Disk >= 100`、`Max_Days >= 1`、`ports >= 1` 的。**必须用 `vms_enabled=true` 查询返回的 offer ID**；同一个 GPU 的 VM 和容器 offer ID 不同，拿容器 ID 建 VM 会失败。
+
+**2）创建 VM：**
+
+```bash
+vastai create instance <OFFER_ID> \
+  --template_hash 2c18cabd8f2f0525c2ff8446f5d4e063 \
+  --disk 130 \
+  --label d3-k3s-vm \
+  --cancel-unavail
+```
+
+模板是官方 `Ubuntu 22.04 VM`（`vm=True`、SSH、自带 CUDA/Docker），自带 `vms_enabled` 过滤。不要用 `vllm/vllm-openai` 镜像建 VM：那是容器模板，不会给你 systemd。
+
+如果建出来不是 VM（下一步 `ps -p 1` 不是 `systemd`），destroy 后走 API：
+
+```bash
+curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
+  -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
+  -H "Content-Type: application/json" \
+  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"runtype":"ssh_direct","label":"d3-k3s-vm","cancel_unavail":true}'
+```
+
+**3）SSH 与 VM 确认：**
+
+```bash
+vastai show instances
+vastai ssh-url <ID>
+
+# ssh-url 输出形如 ssh://root@host:port；换成：
+ssh -p <PORT> root@<HOST>
+
+# 在 VM 里执行：
+ps -p 1 -o comm=                 # 必须是 systemd
+systemctl is-system-running      # running/degraded 都算起来了
+stat -fc %T /sys/fs/cgroup       # 期望 cgroup2fs
+nvidia-smi
+df -h /
+```
+
+`ps -p 1` 不是 `systemd` 就说明拿到的是容器，立刻 `vastai destroy instance <ID> -y`，不要继续装 k3s。
+
+**4）计费与清理：**
+
+```bash
+vastai show instances
+vastai stop instance <ID>        # 保留磁盘，继续收存储费
+vastai destroy instance <ID> -y  # 结果 scp 回本地后再执行
+```
+
+2026-11-23 实测：3090 VM 约 `$0.41/h`（含 130GB 盘），4090 约 `$0.48/h`；3h 约 `$1.2–1.5`。比 D2 的 L4 容器贵，但在 `$15` 预算内。
 
 开工前记录：
 
@@ -227,7 +309,7 @@ terminationGracePeriodSeconds > preStop 秒数 + --shutdown-timeout + 进程清�
 
 ### 5.0 先检查“能不能跑 k3s”
 
-你以前在 Vast 的 GPU VM 上跑过 k8s，说明 Vast 这条路可行；但 Vast 也有普通容器实例，先在**当前实例**上确认它是 VM/privileged：
+先按 §2.1 租 VM。你以前在 Vast 的 GPU VM 上跑过 k8s，说明 Vast 这条路可行；但 Vast 也有普通容器实例，租完先在**当前实例**上确认它是 VM/privileged：
 
 ```bash
 # 目的：确认有 systemd / cgroup v2 / 能写 /var/lib/rancher
@@ -246,8 +328,8 @@ sudo test -w /var/lib && echo "var-lib writable"
 ### 5.1 安装 k3s
 
 ```bash
-# 目的：单节点 k3s；--write-kubeconfig-mode 让普通用户也能 kubectl
-curl -sfL https://get.k3s.io | sudo sh -s - --write-kubeconfig-mode 644
+# 目的：单节点 k3s；版本固定为 2026-11-23 的 stable，避免版本漂移
+curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.37.2+k3s1 sh -s - --write-kubeconfig-mode 644
 
 # 目的：确认节点 Ready（k3s 自带 kubectl）
 sudo k3s kubectl get nodes -o wide
@@ -257,7 +339,7 @@ sudo chown "$USER" ~/.kube/config
 kubectl get nodes
 ```
 
-> 复用上次成功的 k3s 版本：`curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.xx.y+k3s1 sh -s - --write-kubeconfig-mode 644`。版本不同，冷启动数字不可比；把版本记进结果。
+> 复用上次成功的 k3s 版本时，把 `INSTALL_K3S_VERSION` 换成你记录的那版；版本不同，冷启动数字不可比。把 `k3s --version` 记进结果。
 
 ### 5.2 让 k3s 识别 NVIDIA runtime
 
@@ -1049,11 +1131,12 @@ SLO 沿用 D1/D2：`TTFT ≤ 2,000ms`、`TPOT ≤ 100ms`（per-request）。不�
 
 | 项目 | 单价 | 成本 |
 |---|---|---|
-| 单卡 L4 | `$0.2611/h`（GPU + 40GB 存储） | 3h 约 `$0.78` |
-| 2×L4 | `2 × $0.25 + $0.0111 = $0.5111/h` | 3h 约 `$1.53`；4h 约 `$2.04` |
+| 单卡 L4 容器 | `$0.2611/h`（GPU + 40GB 存储） | 3h 约 `$0.78` |
+| 单卡 3090/4090 VM | 约 `$0.41–0.48/h`（含 130GB 盘） | 3h 约 `$1.2–1.5` |
+| 2×L4 容器 | `2 × $0.25 + $0.0111 = $0.5111/h` | 3h 约 `$1.53`；4h 约 `$2.04` |
 | 公网/存储 | ingress 通常不计费；Stop 后存储照计 | 见 Vast 账单 |
 
-D2 后账户余额 `$18.81`；D3 单卡 3h 约 `$0.8`，2 卡 4h 约 `$2.0`，预算足够。**先 scp 结果再 Destroy**。
+D2 后账户余额 `$18.81`；D3 单卡 VM 3h 约 `$1.3`，2 卡 4h 约 `$2.0`，预算足够。**先 scp 结果再 Destroy**。VM 创建比容器慢（几分钟），`creating` 不是失败；用 `vastai logs <ID>` 看进度。
 
 ---
 
@@ -1061,7 +1144,8 @@ D2 后账户余额 `$18.81`；D3 单卡 3h 约 `$0.8`，2 卡 4h 约 `$2.0`，�
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
-| k3s 起不来 / 卡在 `Starting` | 当前是 Vast 普通容器，没有 systemd/cgroup/privileged | 换 Vast GPU VM 或本地/云 VM；不要在普通容器里硬装 |
+| k3s 起不来 / 卡在 `Starting` | 当前是 Vast 普通容器，没有 systemd/cgroup/privileged | 按 §2.1 用 `vms_enabled=true` + VM 模板重建；不要在普通容器里硬装 |
+| 建 VM 报 `no_such_ask` / 创建失败 | offer 被租走，或用了非 VM 的 offer ID | 重新搜；必须用 `vms_enabled=true` 查询返回的 ID |
 | `nvidia.com/gpu` allocatable 是 0 | device plugin 没 Ready，或 runtime 没配 | 看 `kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`；`grep nvidia .../config.toml` |
 | device plugin 日志报 `No devices found` | static manifest 没写 `runtimeClassName: nvidia`，Pod 用 runc 看不到 GPU | patch DaemonSet 加 `runtimeClassName: nvidia`（§5.3） |
 | k3s 安装脚本报 permission denied | 没有用 root 执行 | 用 `sudo sh -s -` 安装，不要直接 `sh` |
@@ -1165,10 +1249,18 @@ nvidia-smi
 
 云端实例：先 `scp` 结果和 manifest，再 Stop/Destroy；规则同 D1/D2（24h 内继续 → Stop；隔几天 → Destroy）。
 
+```bash
+# 在本地执行，不在 VM 里
+vastai show instances
+vastai scp-url <ID>
+vastai destroy instance <ID> -y
+```
+
 ---
 
 ## 15. 验收清单（执行后勾）
 
+- [ ] Vast 实例是 VM：`ps -p 1` 输出 `systemd`
 - [ ] k3s 单节点 Ready；`nvidia.com/gpu` allocatable = 1（或 2）
 - [ ] GPU smoke test 通过
 - [ ] vLLM Deployment Ready；`/v1/models` + completion 成功

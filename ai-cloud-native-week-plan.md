@@ -593,7 +593,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 4. 先开 1 小时验证能跑通，再决定要不要长开
 5. 设一个 $15 预算上限，周末复盘花了多少、换到几个数字
 6. 实验脚本全部进 git，机器随时可以删——**机器是租的，数字是你的**
-7. **D3 的 k3s 要 VM/privileged**：你在 Vast GPU VM 上跑过 k8s，租的时候选同类 VM/template；普通容器实例没有 systemd/cgroup，k3s 起不来
+7. **D3 的 k3s 要 VM/privileged**：你在 Vast GPU VM 上跑过 k8s，租的时候选同类 VM/template；普通容器实例没有 systemd/cgroup，k3s 起不来。2026-11-23 实测 Vast 没有 L4 VM，24GB VM 主要是 3090/4090，约 `$0.41–0.48/h`
 
 ## 4.5 推理平台要不要 K8s（价值、替代方案、什么时候不要）
 
