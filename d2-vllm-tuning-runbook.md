@@ -1007,6 +1007,10 @@ chunked prefill 只在“剩余预算装不下这段 prefill”时才切。D1 �
 - `max-num-batched-tokens=2048`：一步 ≈ 1024 prefill + 16 decode = 1040 token；prefill 占主导，这一步在 40W L4 上约 1–2s；16 条 decode 在这段时间内出不了下一个 token → ITL gap 变成秒级。
 - `max-num-batched-tokens=512`：1024 prompt 必须拆成约 2–3 个 chunk（每步扣掉 16 个 decode token，实际 prefill 约 496）；每个 step 里 decode 仍能各出 1 个 token，但只需等这个 ~496-token chunk 算完，不用等整段 1024。单步 prefill 工作量减半，ITL 尾部下降，但 TTFT 可能上升（prefill 分更多步），吞吐也可能因步数变多而略降。
 
+> **一句话确认**：是的。当 scheduler 把一段 1024-token prefill 和正在 decode 的序列放进同一个 step 时，这个 step 的耗时由 prefill 主导；所有 decode 序列的下一个 token 都要等它算完，所以它们这一轮的 ITL gap 会变成 ~1–2s。2.3s 是 c=64 的 P99 尾部，不是每个 step、每条请求都这样；大多数 decode-only step 仍然很快。
+>
+> 注意：被延迟的是**同一 step 里已经在 decode 的序列**；发起 prefill 的那条请求此时还在 prefill，它的首 token 延迟算在 TTFT，不是 ITL。
+
 所以 `bt512` 不是“打开 chunking”，而是**把预算压到 prompt 以下，强制 chunking 发生**。
 
 注意：它降的是 **ITL 尾部**（P99/P99.9、`>1s gaps`），不是 P50；decode-only step 仍然是 ~80ms。不要期待中位数变化。
