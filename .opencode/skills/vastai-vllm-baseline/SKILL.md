@@ -361,6 +361,7 @@ block 16 token = 2.25 MiB
 | `du -sh` 只有 4.4M | Xet 用符号链接 | `du -shL`；`df -h /` 看真实占用 |
 | `qwen3-8b is not a local folder` | bench 拿 `--model` 找 tokenizer | 加 `--tokenizer Qwen/Qwen3-8B-AWQ` |
 | 抢占 > 0 | KV cache 不足 | 降并发/上下文，或升 `gpu-memory-utilization` |
+| 日志没有 `Preemptions:` 行就以为 0 抢占 | engine stats 可能没打印/日志没取全 | 用 `preempts` 前后差值或 `curl -s /metrics \| grep num_preemptions` |
 | goodput 当百分比 | 它是 **req/s** | 比例 = `goodput / request_throughput` |
 | `server_queue_times` 当 ms | JSON 里是**秒** | P99 算完 ×1000 再和客户端 TTFT 比 |
 | P99 相加 | 百分位不可加 | 先把同一请求的 queue+prefill 相加，再算 P99 |

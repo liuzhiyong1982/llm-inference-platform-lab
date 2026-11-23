@@ -338,7 +338,7 @@ echo "preemptions delta: $((AFTER-BEFORE))"
 ```
 
 - `>0` 说明本轮发生了 KV 抢占（序列被换出/重算），这一组的 TTFT/ITL 已经受 KV 压力影响，不能把差异全算到旋钮头上。
-- 如果读出来一直是 0，先确认 `curl -s /metrics | grep -c preempt` 不是 0；**curl 失败也会打印 0**，不要把“没连上”当成“没抢占”。D1 的三个日志里也没有 `Preemptions:` 行（vLLM 只在 >0 时打印），可以交叉验证。
+- 如果读出来一直是 0，先确认 `curl -s /metrics | grep -c preempt` 不是 0；**curl 失败也会打印 0**，不要把“没连上”当成“没抢占”。反例：D2 的 FP16 c16 日志没有 `Preemptions:` 行，但 `preempts` delta=26；**日志行不是权威，`/metrics` counter 才是**。
 
 #### 3.4.5 一次完整调用示例
 
@@ -802,14 +802,14 @@ echo "preemptions delta: $((AFTER-BEFORE))"
 
 #### 4.5.2 结果与归因（2026-11-23）
 
-条件：实例 `62184627`，L4 23,034 MiB / 40W，vLLM 0.34.0；AWQ 和 FP16 都用 `--max-model-len 8192`、`--max-num-seqs 64`；c=8/n=100 是主对比，c=16/n=200 是可选 KV 容量观察。`input_lens` 全 1024，`output_lens` 全 256；两边日志都没有 `Preemptions:` 行（计数 0）。
+条件：实例 `62184627`，L4 23,034 MiB / 40W，vLLM 0.34.0；AWQ 和 FP16 都用 `--max-model-len 8192`、`--max-num-seqs 64`；c=8/n=100 是主对比，c=16/n=200 是可选 KV 容量观察。`input_lens` 全 1024，`output_lens` 全 256；c8 抢占 0，c16 抢占 **26**（`preempts` 前后差值；`/metrics` 当前也是 `vllm:num_preemptions_total=26`）。
 
-| run | output tok/s | vs AWQ | TTFT P50 | TTFT P99 | TPOT P50 | TPOT P95 | ITL P99.9 | >1s gaps/req | goodput | KV |
-|---|---|---|---|---|---|---|---|---|---|---|
-| AWQ c8 | 90.4 | — | 2,780ms | 6,836ms | 76.5ms | 83.0ms | 1,760ms | 0（mean 0.4） | 0.0883（25%） | 91,648 |
-| FP16 c8 | 57.2 | −36.8% | 3,166ms | 6,678ms | 126.3ms | 133.3ms | 1,699ms | 5 | 0 | 18,944 |
-| AWQ c16 | 119.8 | — | 4,068ms | 12,104ms | 116.0ms | 126.4ms | 1,810ms | 3 | 0.0023（0.5%） | 91,648 |
-| FP16 c16（KV 受限） | 77.0 | −35.7% | 4,829ms | 13,627ms | 177.1ms | 240.1ms | 1,888ms | 8 | 0 | 18,944 |
+| run | output tok/s | vs AWQ | TTFT P50 | TTFT P99 | TPOT P50 | TPOT P95 | ITL P99.9 | >1s gaps/req | goodput | 抢占 Δ | KV |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| AWQ c8 | 90.4 | — | 2,780ms | 6,836ms | 76.5ms | 83.0ms | 1,760ms | 0（mean 0.4） | 0.0883（25%） | 0 | 91,648 |
+| FP16 c8 | 57.2 | −36.8% | 3,166ms | 6,678ms | 126.3ms | 133.3ms | 1,699ms | 5 | 0 | 0 | 18,944 |
+| AWQ c16 | 119.8 | — | 4,068ms | 12,104ms | 116.0ms | 126.4ms | 1,810ms | 3 | 0.0023（0.5%） | 0 | 91,648 |
+| FP16 c16（KV 受限） | 77.0 | −35.7% | 4,829ms | 13,627ms | 177.1ms | 240.1ms | 1,888ms | 8 | 0 | **26** | 18,944 |
 
 **c=8 是纯量化对比：**
 
@@ -820,7 +820,7 @@ echo "preemptions delta: $((AFTER-BEFORE))"
 **c=16 只能当 KV 容量观察：**
 
 - FP16 c16 需要 `16 × 1,280 = 20,480 > 18,944`；日志主要是 `Running: 16`，偶尔 `14/2`、`15/1`，KV 非常紧。
-- 结果：output 77.0 tok/s，TPOT P95 240.1ms，TTFT P50 4.8s，ITL max 18.8s；`Preemptions:` 计数为 0，但排队/KV 压力已经把尾部拉爆。
+- 结果：output 77.0 tok/s，TPOT P95 240.1ms，TTFT P50 4.8s，ITL max 18.8s；`preempts` delta = **26**，`/metrics` 的 `vllm:num_preemptions_total=26`。日志里没有 `Preemptions:` 行，不能靠 grep 日志判断；KV 压力是真实存在的。
 - 所以 c16 的差异不能全算成量化；不要在结论里用 240ms 当“FP16 的 TPOT”。
 
 **怎么读**：AWQ 的速度优势很大（c8 快 37%，TPOT 好 60%），但这是**性能**；AWQ 的质量掉点要用 §5 的 GSM8K 质量门判断。如果质量掉点在可接受范围，AWQ 是明显更优的 24GB 配置；如果不可接受，才考虑 FP16 或换更大显存。
@@ -975,7 +975,7 @@ FP16 就绪后，跑同一套 GSM8K，只把 tokenizer 换成 `Qwen/Qwen3-8B`：
 | 5 | prefix-on | prefix on | 16 | 200 | 149.9 | 4,002 | 7,106 | 101.8 | 1,689 | 2 | 0.1084（18.5%） | 0 | 88,064 | 命中率 ~50% |
 | 6 | prefix-off | prefix off | 16 | 200 | 120.0 | 4,168 | 12,446 | 126.2 | 1,776 | 3 | 0.0023（0.5%） | 0 | 92,672 | 命中率 0% |
 | 7 | fp16-c8 | FP16 | 8 | 100 | 57.2 | 3,166 | 6,678 | 133.3 | 1,699 | 5 | 0 | 0 | 18,944 | 0 抢占 |
-| 7b | fp16-c16 | FP16（可选） | 16 | 200 | 77.0 | 4,829 | 13,627 | 240.1 | 1,888 | 8 | 0 | 0 | 18,944 | KV 受限（20,480>18,944） |
+| 7b | fp16-c16 | FP16（可选） | 16 | 200 | 77.0 | 4,829 | 13,627 | 240.1 | 1,888 | 8 | 0 | 26 | 18,944 | KV 受限（20,480>18,944）；preempts Δ=26 |
 
 `ITL P99.9` 也可以直接读 JSON 的 `p99.9_itl_ms`（bench 已加 `99.9`；**key 里是小数点，不是下划线**）；`>1s gaps/req` 要自己从 `itls` 数：
 
@@ -1024,6 +1024,7 @@ ls -lh /workspace/qgate-*.log
 | 两次结果差很多 | host 噪声 / 功耗墙波动 | 同一配置重复 2 次；报中位数/范围；不要拿单次最好值 |
 | FP16 启动 OOM | 16.4GB 权重 + 8k KV 放不下 | `--max-model-len 4096`；或只跑 c=1/4/8 |
 | FP16 c=16 TTFT 明显变差 | FP16 KV 只剩约 1.9 万 token，16×1280 已压上限 | 主对比用 c=8；c=16 单独标“KV 受限”，看抢占 |
+| 日志没有 `Preemptions:` 行就以为 0 抢占 | engine stats 可能没打印/日志没取全 | 用 `preempts` 前后差值或 `curl -s /metrics \| grep num_preemptions` |
 | `--no-enable-*` 在 help 里搜不到 | v0.34 的 EnableDisableAction 只显示 `--enable-x` / `--disable-x`；`--no-enable-x` 是隐藏兼容别名 | 用 `--disable-*`；`grep -E "disable-(chunked-prefill\|prefix-caching)"` 对一遍 |
 | `--max-num-seqs 64` 没生效 | v0.34 默认是 128 | 控制组命令里显式写；看启动日志 `non-default args` 的 `max_num_seqs` |
 | `chunk-off` 启动报 `max_num_batched_tokens < max_model_len` | v0.34 关 chunked prefill 时 budget 必须 ≥ max_model_len | 同时传 `--max-model-len 2048 --max-num-batched-tokens 2048` |
