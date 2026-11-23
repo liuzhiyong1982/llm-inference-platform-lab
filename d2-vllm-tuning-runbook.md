@@ -29,14 +29,15 @@
 ## 1. 前置检查
 
 - [ ] D1 的 4 个 JSON 和 README 表还在；知道 D1 的 c=16/c=64 数字
-- [ ] 实例还是 D1 那台（Stop 后重启）；如果 Destroy 了，重租同规格 L4 并**重跑控制组**
-- [ ] `nvidia-smi` 的 `power.limit` 与 D1 一致（这台是 40W；换到 72W 必须重跑控制组）
-- [ ] 容器盘 ≥ 40GB：AWQ 5.7GB + FP16 16.4GB + 结果，约 23GB
+- [ ] 确认今天用的是哪台：同 host 就重跑控制组；**新 host 也必须重跑控制组**，D1 数字只作参考
+- [ ] `nvidia-smi` 的 `power.limit` 已记录（D1 是 40W；本台若不同，报告里必须写明“D1/D2 不可直接比”）
+- [ ] `vllm --version` 是 `0.34.0`；不是就先核对 `--no-enable-*` / bench flag，再决定是否继续
+- [ ] 容器盘 ≥ 40GB：AWQ 5.7GB + FP16 16.4GB + 结果，约 23GB（新实例缓存为空，两个都要下）
 - [ ] 有 HF token（FP16 约 16GB，匿名下载可能 80 分钟）
 - [ ] `vllm serve --help=all` 能查到 `--no-enable-chunked-prefill` / `--no-enable-prefix-caching`
 
 ```bash
-# 目的：确认还是同一张卡、同一个功耗上限；power.limit 变了就不能直接和 D1 比
+# 目的：记录这张卡的规格和功耗上限；和 D1 不同时，D1 只能当参考，不能混在一张表里比
 nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit,power.draw --format=csv,noheader
 
 # 目的：确认盘够放 FP16
@@ -83,13 +84,26 @@ export HF_HOME=/workspace/hf
 export HF_XET_HIGH_PERFORMANCE=1
 export HF_TOKEN=hf_xxx          # 可选；FP16 很大，强烈建议设置，不要提交进 git
 export VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+# 目的：把功耗上限写进每条结果的 metadata；换 host 后这是判断可比性的第一依据
+export POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader | tr -d ' W')
 mkdir -p /workspace/results
 ```
 
-### 3.2 下载 FP16（先起下载，再去跑控制组）
+### 3.2 下载模型（先下 AWQ，再下 FP16）
+
+新实例的 HF cache 是空的，先下 AWQ；否则 `serve_awq` 会在启动时现场下载 5.7GB，看起来像卡住。
 
 ```bash
-# 目的：把 FP16 权重下到同一个 HF cache；约 16.4GB
+# 目的：控制组和大部分实验用 AWQ；约 5.7GB
+python3 - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download("Qwen/Qwen3-8B-AWQ")
+PY
+
+# 目的：确认真实占用约 5.7GB（Xet 用符号链接，必须 -L）
+du -shL "$HF_HOME/hub/models--Qwen--Qwen3-8B-AWQ"
+
+# 目的：把 FP16 权重下到同一个 HF cache；约 16.4GB，可与控制组并行
 python3 - <<'PY'
 from huggingface_hub import snapshot_download
 snapshot_download("Qwen/Qwen3-8B")
@@ -99,7 +113,7 @@ PY
 du -shL "$HF_HOME/hub/models--Qwen--Qwen3-8B"
 ```
 
-如果 2 分钟后速度仍然 < 5MB/s，ETA 会超过 30 分钟：先跳过 #7 和质量门，把其余实验做完；README 里注明“FP16/质量门 deferred”。
+如果 FP16 下载 2 分钟后速度仍然 < 5MB/s，ETA 会超过 30 分钟：先跳过 #7 和质量门，把其余实验做完；README 里注明“FP16/质量门 deferred”。AWQ 是控制组必需，不能跳过。
 
 ### 3.3 安装质量门工具（可与下载并行）
 
@@ -167,7 +181,8 @@ d2_bench() {
     --result-dir ./results \
     --result-filename "d2-${TAG}-c${C}-n${N}-$(date +%Y%m%d-%H%M%S).json" \
     --metadata gpu=l4-24gb vllm="$VLLM_VERSION" tag="$TAG" concurrency="$C" n="$N" \
-      prefix_len="$PREFIX" input_len=1024 output_len=256 temperature=0
+      prefix_len="$PREFIX" input_len=1024 output_len=256 temperature=0 \
+      power_limit="$POWER_LIMIT"
 }
 
 # 目的：读抢占计数，bench 前后各一次，相减就是本轮增量
