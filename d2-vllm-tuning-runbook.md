@@ -382,7 +382,16 @@ ls -lh /workspace/results/d2-control-c16-*.json
 5. Terminal C 跑 `d2_bench`；记录 bench 前后的 `preempts`；
 6. 把结果记到 §6 的表。
 
+停服务后确认端口真的空了：
+
+```bash
+# 目的：旧服务还在时会抢 8000 端口；返回非 0 才说明端口空了
+curl -sf http://127.0.0.1:8000/v1/models >/dev/null && echo "旧服务还在" || echo "端口空闲"
+```
+
 ### 4.1 控制组（当天 baseline）
+
+> **先重启服务**：第一次启动可跳过；如果已有服务，先在 tmux A `Ctrl-C`，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动。
 
 ```bash
 # 目的：用当天、当台机器的控制配置；不要直接拿几小时前的 D1 数字当对照
@@ -416,6 +425,8 @@ d2_bench control-c8 8 100 0
 
 ### 4.2 `max-num-seqs` 16 / 32
 
+> **先重启服务**：tmux A `Ctrl-C` 停旧服务 → `curl -sf http://127.0.0.1:8000/v1/models` 失败 → 再启动下面的配置。
+
 ```bash
 # 目的：把服务端并发上限压到 16，观察 c=64 客户端负载下的排队和吞吐
 serve_awq mns16 --max-num-seqs 16
@@ -429,8 +440,15 @@ d2_bench mns16 64 300 0
 
 可选，时间够再做 32：
 
+> **先重启服务**：同样先 `Ctrl-C` 停掉 mns16，确认端口空了再启动 mns32。
+
 ```bash
 serve_awq mns32 --max-num-seqs 32
+```
+
+就绪后：
+
+```bash
 d2_bench mns32 64 300 0
 ```
 
@@ -445,6 +463,8 @@ v0.34 源码里有两条约束：
 
 所以“直接关 chunking”会同时把步长预算从 2048 改成 8192，两个变量一起动。要单变量，就把 `max-model-len` 和 budget 都钉在 2048，先跑一个 chunking 仍开着的对照：
 
+> **先重启服务**：tmux A `Ctrl-C` 停掉当前服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动。
+
 ```bash
 # 目的：#4 的同预算对照；除了 chunked prefill 开关，其他都与 chunk-off 相同
 serve_awq control-2k --max-model-len 2048 --max-num-batched-tokens 2048
@@ -457,6 +477,8 @@ d2_bench control-2k 16 200 0
 ```
 
 再关：
+
+> **先重启服务**：先停掉 `control-2k` 服务，确认端口空了再启动 `chunk-off`。
 
 ```bash
 # 目的：同一 2048 预算下，关掉 prefill/decode 交错
@@ -475,6 +497,8 @@ d2_bench chunk-off 16 200 0
 
 ### 4.3b `max-num-batched-tokens` 512（可选，优先于 mns32）
 
+> **先重启服务**：tmux A `Ctrl-C` 停掉 `chunk-off` 服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动。
+
 ```bash
 # 目的：把每个调度步的 prefill 预算从默认 2048 压到 512，直接检验“步长造成 decode 停顿”
 serve_awq bt512 --max-num-seqs 64 --max-num-batched-tokens 512
@@ -492,6 +516,8 @@ d2_bench bt512 16 200 0
 
 先跑“缓存开 + 共享前缀”：
 
+> **先重启服务**：tmux A `Ctrl-C` 停掉 `bt512` 服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动。
+
 ```bash
 # 目的：默认 prefix caching 已开；这批请求共享 512-token 前缀
 serve_awq prefix-on
@@ -505,8 +531,15 @@ d2_bench prefix-on 16 200 512
 
 再跑“缓存关 + 同样前缀”：
 
+> **先重启服务**：先停掉 `prefix-on` 服务，确认端口空了再启动 `prefix-off`。
+
 ```bash
 serve_awq prefix-off --disable-prefix-caching
+```
+
+就绪后：
+
+```bash
 d2_bench prefix-off 16 200 512
 ```
 
@@ -526,6 +559,8 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 
 AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
 
+> **先重启服务**：tmux A `Ctrl-C` 停掉 `prefix-off` 服务，确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后再启动 FP16。
+
 ```bash
 # 目的：同一 served name，换 FP16 权重；先确认显存够，OOM 就降 max-model-len
 serve_fp16 fp16-c8
@@ -538,7 +573,7 @@ grep -E "GPU KV cache size|Maximum concurrency" /workspace/d2-fp16-c8.log | tail
 d2_bench fp16-c8 8 100 0
 ```
 
-可选：再跑 c=16，观察 KV 容量效应。**先看抢占增量**；如果 `>0`，这一行只能说明“FP16 的 KV 不够”，不是纯量化对比：
+可选：在同一个 FP16 服务上再跑 c=16（不用重启），观察 KV 容量效应。**先看抢占增量**；如果 `>0`，这一行只能说明“FP16 的 KV 不够”，不是纯量化对比：
 
 ```bash
 d2_bench fp16-c16 16 200 0
@@ -546,9 +581,16 @@ d2_bench fp16-c16 16 200 0
 
 如果启动 OOM：
 
+> **先重启服务**：先停掉当前 FP16 服务（或失败的启动进程），确认端口空了再降上下文重试。
+
 ```bash
 # 目的：FP16 权重太大时缩短上下文，先保证能跑；在 README 里注明
 serve_fp16 fp16-4k --max-model-len 4096
+```
+
+就绪后：
+
+```bash
 d2_bench fp16-4k 8 100 0
 ```
 
@@ -560,9 +602,17 @@ d2_bench fp16-4k 8 100 0
 
 只在 AWQ 和 FP16 两个服务都跑过性能后做；它衡量“量化掉了多少质量”，不是性能。
 
-两个服务不能同时占 8000 端口：如果当前开着的是 FP16，就先测 FP16；测完 `Ctrl-C`，用 `serve_awq qgate-awq --max-num-seqs 64` 重启 AWQ 再测 AWQ。**两边的 `max_gen_toks` 必须一致**。
+两个服务不能同时占 8000 端口。如果当前开着的是 FP16，就先测 FP16；测完 `Ctrl-C` 停掉。**两边 `max_gen_toks` 必须一致**。
 
-AWQ 服务开着时：
+如果当前不是 AWQ，先重启：
+
+> **先重启服务**：确认 `curl -sf http://127.0.0.1:8000/v1/models` 失败后，再启动 AWQ。
+
+```bash
+serve_awq qgate-awq --max-num-seqs 64
+```
+
+AWQ 就绪后：
 
 ```bash
 # 目的：用当前 vLLM 服务做 50 条 GSM8K，5-shot，greedy；记录 exact_match
