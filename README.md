@@ -92,6 +92,16 @@ Vast Charges：**$1.01**（GPU + 存储，2026-11-20，实例 `61674313`）。GP
 
 `--disable-chunked-prefill` 同时降低 ITL 尾部和 TTFT，吞吐/TPOT 基本不变；200 条请求里 **0 条**出现 `>1s gap`。这是 c=16、1024-token prompt 的结果，不能外推到高并发/长 prompt。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.3.1。
 
+### 4.3b max-num-batched-tokens 512
+
+| run | output tok/s | TTFT P50 | TTFT P99 | TPOT P95 | ITL P99.9 | >1s gaps/req |
+|---|---|---|---|---|---|---|
+| control-2k（budget 2048） | 119.4 | 4.15s | 12.32s | 126.6ms | 1,811ms | 3 |
+| chunk-off（budget 2048，off） | 120.4 | 2.76s | 11.47s | 125.6ms | 993ms | 0 |
+| bt512（budget 512） | 118.3 | 2.50s | 12.78s | 127.3ms | 566ms | 0 |
+
+`bt512` 验证了“prefill 步长”假设：ITL P99.9 从 1,811ms 降到 566ms，200 条请求里 0 条出现 `>1s gap`；代价是 TTFT P99 12.32→12.78s、吞吐 −0.9%。`chunk-off` 更均衡，`bt512` 是更激进的 ITL 尾部修复。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.3b.1。
+
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。

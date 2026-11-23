@@ -600,6 +600,45 @@ d2_bench bt512 16 200 0    # TAG=bt512；C=16 客户端并发；N=200 总请求�
 
 > 机制细节（为什么大段 prefill 会拉高同一 step 里其他序列的 ITL）见 §10 **Q14**。
 
+> **结果（2026-11-23）：假设成立。** ITL P99.9 1,811→566ms（−68.7%），`>1s gap` 190/200→0/200；TTFT P99 12,324→12,779ms（+3.7%），output 119.4→118.3（−0.9%）。见 §4.3b.1。
+
+#### 4.3b.1 结果与归因（2026-11-23）
+
+条件：实例 `62184627`，L4 23,034 MiB / 40W，AWQ，vLLM 0.34.0；c=16、n=200、input 1024 / output 256。`bt512` 的启动日志确认 `max_model_len=8192`、`max_num_batched_tokens=512`、`max_num_seqs=64`、chunked prefill on、prefix caching on；抢占 0；KV cache 92,160。
+
+| run | 每步最大 prefill（推断） | output tok/s | TTFT P50 | TTFT P95 | TTFT P99 | TPOT P95 | ITL P99 | ITL P99.9 | max ITL | >1s gaps/req | goodput |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| control-2k（budget 2048，on） | ~2032 | 119.4 | 4,152 | 7,194 | 12,324 | 126.6 | 1,678 | 1,811 | 1,820 | 3 | 0.0023 |
+| chunk-off（budget 2048，off） | ~1024 | 120.4 | 2,761 | 4,715 | 11,467 | 125.6 | 939 | 993 | 999 | 0 | 0.0024 |
+| bt512（budget 512，on） | ~496 | 118.3 | 2,501 | 5,514 | 12,779 | 127.3 | 516 | 566 | 574 | 0 | 0.0023 |
+
+**预期是否被证实：是，ITL 假设成立。**
+
+- ITL P99.9：1,811→566ms（−68.7%）；max ITL 1,820→574ms；`>1s gap` 190/200→**0/200**。
+- TTFT：P50 4,152→2,501ms（−39.8%），P95 7,194→5,514ms（−23.3%），**P99 12,324→12,779ms（+3.7%）**。预期的“TTFT P99 上升”成立，但代价只在尾部；中位数/P95 反而更好。
+- 吞吐/TPOT：output 119.4→118.3（−0.9%），total 596.8→591.7（−0.9%），TPOT P95 126.6→127.3（+0.6%）。代价很小。
+- goodput：0.0023，0.5% 达标；SLO 仍不满足（TTFT P50 2.50s、TPOT P95 127.3ms 都超）。
+
+**三点连起来看，证据很强**：
+
+| 每步最大 prefill | ITL P99.9 | max ITL |
+|---|---|---|
+| ~2032 token（budget 2048） | 1,811ms | 1,820ms |
+| ~1024 token（chunk-off，整条 prompt） | 993ms | 999ms |
+| ~496 token（budget 512） | 566ms | 574ms |
+
+ITL 尾部大致随“每步最大 prefill token 数”线性变化（约 0.9–1.2ms/token）。这和“一个 prefill step 要 ~1ms/token”的估算一致，而不是 KV 抢占或排队造成的——三组抢占都是 0。
+
+**和 chunk-off 的取舍**：
+
+- `bt512` 的 ITL 尾部更低（566 vs 993ms），但 TTFT P95/P99 更差（5,514/12,779 vs 4,715/11,467ms），吞吐略低（118.3 vs 120.4 tok/s）。
+- `chunk-off` 是更均衡的点：ITL 尾部 ~1s，TTFT 比 control 更好，吞吐不降。
+- `bt512` 是更激进的 ITL 尾部修复：用 TTFT 尾部和 ~1% 吞吐换 0.57s 的 max ITL。
+
+**结论**：D1 的秒级停顿主要来自 **prefill step 的 token 数**，不是 KV 抢占；把每步 prefill 从 ~2032 压到 ~496，ITL P99.9 从 1.81s 降到 0.57s，代价是 TTFT P99 +3.7% 和吞吐 −0.9%。这也解释了为什么 `mns16` 只能把 TPOT 降下来、却去不掉 ~1.8s 的 ITL 尖峰：mns 改的是 decode batch，不是 prefill step。
+
+> JSON metadata 仍为 `null`；配置从启动日志确认（`max_num_batched_tokens=512`）。
+
 ### 4.4 prefix caching on/off（共享前缀）
 
 先跑“缓存开 + 共享前缀”：
@@ -742,7 +781,7 @@ lm_eval --model vllm \
 | 3 | mns32 | mns=32 | 64 | 300 | 137.5 | 63,271 | 82,912 | 226.4 | 1,883 | 17 | 0 | 0 | 92,672 | Running 32 / Waiting 32 |
 | 4a | control-2k | 2k len + 2k budget | 16 | 200 | 119.4 | 4,152 | 12,324 | 126.6 | 1,811 | 3 | 0.0023（0.5%） | 0 | 88,064 | 同预算对照 |
 | 4 | chunk-off | chunked off, 2k budget | 16 | 200 | 120.4 | 2,761 | 11,467 | 125.6 | 993 | 0 | 0.0024（0.5%） | 0 | 92,672 | 0/200 条 >1s |
-| 4b | bt512 | batch-tokens=512 | 16 | 200 | | | | | | | | | | |
+| 4b | bt512 | batch-tokens=512 | 16 | 200 | 118.3 | 2,501 | 12,779 | 127.3 | 566 | 0 | 0.0023（0.5%） | 0 | 92,160 | 0/200 条 >1s |
 | 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | | | 命中率 __% |
 | 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | | | 命中率 0% |
 | 7 | fp16-c8 | FP16 | 8 | 100 | | | | | | | | | | |
