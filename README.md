@@ -111,6 +111,16 @@ Vast Charges：**$1.01**（GPU + 存储，2026-11-20，实例 `61674313`）。GP
 
 `prefix-on` 命中率 ~50%（512/1024），output +24.9%，TTFT P99 −42.9%，TPOT P95 −19.3%，goodput 0.5%→18.5%。prefix caching 不只是 TTFT 优化：它减少 prefill 与 decode 的竞争，所以吞吐/TPOT 也改善。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.4.1。
 
+### 4.5 AWQ vs FP16
+
+| run | output tok/s | TTFT P50 | TPOT P95 | goodput | KV |
+|---|---|---|---|---|---|
+| AWQ c8 | 90.4 | 2.78s | 83.0ms | 0.0883（25%） | 91,648 |
+| FP16 c8 | 57.2 | 3.17s | 133.3ms | 0 | 18,944 |
+| FP16 c16（KV 受限） | 77.0 | 4.83s | 240.1ms | 0 | 18,944 |
+
+c=8 是纯量化对比：FP16 比 AWQ 慢 **36.8%**，TPOT P95 高 **60.6%**，goodput 25%→0。c=16 需要 20,480 > 18,944，是 KV 受限的混合效应，不能当纯量化。质量掉点见 §5 的 GSM8K 质量门。完整表与归因见 `d2-vllm-tuning-runbook.md` §4.5.2。
+
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
