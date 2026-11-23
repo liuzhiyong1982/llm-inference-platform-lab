@@ -16,13 +16,13 @@
 | 前置检查 + 下载 FP16 | 20 min | `Qwen/Qwen3-8B` 可用；flag 核对完 |
 | 控制组（c=16 / c=64） | 25 min | 当天的 AWQ baseline |
 | `max-num-seqs` 16/32 | 25 min | 吞吐 vs TPOT 拐点 |
-| chunked prefill off | 10 min | TTFT/TPOT 变化 |
+| chunked prefill off + `bt512` | 20 min | TTFT/TPOT/ITL 变化，步长假设 |
 | prefix caching on/off | 20 min | 共享前缀下的 TTFT、命中率 |
 | AWQ vs FP16 | 15 min | 吞吐/显存对比 |
 | 质量门（GSM8K 50 条） | 30 min | exact match delta |
 | 记录 + 收尾 | 25 min | 对照表 + 一句话结论 + commit |
 
-**时间不够按这个顺序砍：** 质量门（先注明 deferred）→ `max-num-seqs=32` → c=64 控制组。**不要砍掉控制组和“一次一个变量”。**
+**时间不够按这个顺序砍：** 质量门（先注明 deferred）→ `max-num-seqs=32` → `bt512` → c=64 控制组。**不要砍掉控制组和“一次一个变量”。**
 
 ---
 
@@ -33,7 +33,7 @@
 - [ ] `nvidia-smi` 的 `power.limit` 与 D1 一致（这台是 40W；换到 72W 必须重跑控制组）
 - [ ] 容器盘 ≥ 40GB：AWQ 5.7GB + FP16 16.4GB + 结果，约 23GB
 - [ ] 有 HF token（FP16 约 16GB，匿名下载可能 80 分钟）
-- [ ] `vllm serve --help=all` 能查到 `--disable-chunked-prefill` / `--disable-prefix-caching`
+- [ ] `vllm serve --help=all` 能查到 `--no-enable-chunked-prefill` / `--no-enable-prefix-caching`
 
 ```bash
 # 目的：确认还是同一张卡、同一个功耗上限；power.limit 变了就不能直接和 D1 比
@@ -42,28 +42,32 @@ nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit,power.draw -
 # 目的：确认盘够放 FP16
 df -h /
 
-# 目的：确认两个负向 flag 的名字（0.34 默认 chunked prefill 和 prefix caching 都是开）
-vllm serve --help=all | grep -E "enable-(chunked-prefill|prefix-caching)"
+# 目的：确认两个负向 flag 的名字；v0.34 是 BooleanOptionalAction，只有 --no-enable-*，没有 --disable-*
+vllm serve --help=all | grep -E "no-enable-(chunked-prefill|prefix-caching)"
 ```
 
-> v0.34 默认：chunked prefill = on，prefix caching = on。关闭用 `--disable-chunked-prefill` / `--disable-prefix-caching`。
+> v0.34 默认：chunked prefill = on，prefix caching = on，`max_num_seqs` = **128**（不是 64）。
+> 关闭用 `--no-enable-chunked-prefill` / `--no-enable-prefix-caching`。D1 显式传了 `--max-num-seqs 64`，所以 D2 的控制组也必须显式传 64，否则控制组不是同一配置。
 
 ---
 
 ## 2. 实验矩阵
 
-所有 bench 固定：`random` 数据集、输入 1024、输出 256、`--ignore-eos`、`--temperature 0`、P50/P95/P99。
+所有 bench 固定：`random` 数据集、输入 1024、输出 256、`--ignore-eos`、`--temperature 0`、P50/P95/P99/99.9。
 
 | # | tag | 服务端配置 | bench | 目的 |
 |---|---|---|---|---|
-| 0 | `control-c16` | AWQ，默认（mns=64, chunked on, prefix on） | c=16, n=200 | 当天延迟基准 |
+| 0 | `control-c16` | AWQ，`--max-num-seqs 64`，chunked on，prefix on | c=16, n=200 | 当天延迟基准 |
 | 1 | `control-c64` | 同上 | c=64, n=300 | 当天吞吐基准 |
 | 2 | `mns16` | `--max-num-seqs 16` | c=64, n=300 | 服务端并发上限的影响 |
 | 3 | `mns32` | `--max-num-seqs 32`（可选） | c=64, n=300 | 找拐点 |
-| 4 | `chunk-off` | `--disable-chunked-prefill` | c=16, n=200 | prefill 调度策略 |
+| 4 | `chunk-off` | `--no-enable-chunked-prefill` | c=16, n=200 | 整段 prefill 不再切块 |
+| 4b | `bt512`（可选，优先于 mns32） | `--max-num-batched-tokens 512` | c=16, n=200 | 直接验证“大步 prefill 造成 decode 停顿” |
 | 5 | `prefix-on` | 默认（prefix on） | c=16, n=200, prefix=512 | 共享前缀的缓存收益 |
-| 6 | `prefix-off` | `--disable-prefix-caching` | c=16, n=200, prefix=512 | 无缓存对照 |
+| 6 | `prefix-off` | `--no-enable-prefix-caching` | c=16, n=200, prefix=512 | 无缓存对照 |
 | 7 | `fp16` | `Qwen/Qwen3-8B` + `--dtype float16` | c=16, n=200 | 量化 vs 半精度 |
+
+> 默认 `max_num_batched_tokens` 是 2048。D1 看到的 ~2.3s decode 停顿，量级正好等于“一个调度步塞进 2048 个 prefill token”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
 
 为什么 c=16/c=64：c=16 看延迟和 TPOT，c=64 看吞吐上限和排队。D2 的 n 比 D1 小，是为了在 3 小时内跑完多个配置；**同一张表内所有行必须用同样的 n**。
 
@@ -109,6 +113,7 @@ lm_eval --help >/dev/null && echo "lm-eval ok"
 
 ```bash
 # 目的：统一启动 AWQ 服务；额外参数由调用方传，比如 --max-num-seqs 16
+# 注意：v0.34 的 max_num_seqs 默认是 128；控制组必须显式传 --max-num-seqs 64 才能和 D1 对齐
 serve_awq() {
   local TAG="$1"; shift
   cd /workspace
@@ -142,6 +147,8 @@ d2_bench() {
   local TAG="$1" C="$2" N="$3" PREFIX="${4:-0}"
   local IN=$((1024 - PREFIX))
   cd /workspace
+  # 目的：清 prefix cache，避免同一服务上上一轮的 prompt 命中缓存；刚起的服务上是 no-op
+  curl -s -X POST http://127.0.0.1:8000/reset_prefix_cache >/dev/null || true
   vllm bench serve \
     --backend openai --endpoint /v1/completions \
     --host 127.0.0.1 --port 8000 \
@@ -154,7 +161,7 @@ d2_bench() {
     --num-prompts "$N" --max-concurrency "$C" \
     --ignore-eos --seed 16 --temperature 0 \
     --percentile-metrics ttft,tpot,itl,e2el \
-    --metric-percentiles 50,95,99 \
+    --metric-percentiles 50,95,99,99.9 \
     --goodput ttft:2000 tpot:100 \
     --save-result --save-detailed \
     --result-dir ./results \
@@ -188,8 +195,9 @@ preempts() {
 ### 4.1 控制组（当天 baseline）
 
 ```bash
-# 目的：用当天、当台机器的 AWQ 默认配置做控制组；不要直接拿几小时前的 D1 数字当对照
-serve_awq control-c16
+# 目的：用当天、当台机器的控制配置；不要直接拿几小时前的 D1 数字当对照
+# 必须显式 --max-num-seqs 64：v0.34 默认 128，不传就不是 D1 的配置
+serve_awq control-c16 --max-num-seqs 64
 ```
 
 等就绪后，另开窗口：
@@ -235,7 +243,7 @@ d2_bench mns32 64 300 0
 
 ```bash
 # 目的：关闭 chunked prefill，对比默认（控制组 c=16）
-serve_awq chunk-off --disable-chunked-prefill
+serve_awq chunk-off --no-enable-chunked-prefill
 ```
 
 就绪后：
@@ -244,7 +252,22 @@ serve_awq chunk-off --disable-chunked-prefill
 d2_bench chunk-off 16 200 0
 ```
 
-预期：关闭后 prefill 不再和 decode 交错，长 prompt 的 TTFT 可能变大、TPOT 可能更稳；用 TTFT P99 和 TPOT P95 两个数看取舍。
+预期：关闭后每段 prefill 一次算完，不再按 2048-token 预算切块；TTFT P99 可能变大，但 ITL P99.9 / `>1s gaps` 可能变小。**这组主要看 ITL，不只看 TPOT**——TPOT 会把秒级停顿平均掉。
+
+### 4.3b `max-num-batched-tokens` 512（可选，优先于 mns32）
+
+```bash
+# 目的：把每个调度步的 prefill 预算从默认 2048 压到 512，直接检验“步长造成 decode 停顿”
+serve_awq bt512 --max-num-seqs 64 --max-num-batched-tokens 512
+```
+
+就绪后：
+
+```bash
+d2_bench bt512 16 200 0
+```
+
+预期：如果 D1 的 ~2.3s 停顿来自“一个 step 塞进约 2048 个 prefill token”，这组应看到 ITL P99.9 和 `>1s gaps/req` 明显下降，代价是 TTFT P99 上升（同样多的 prefill 要拆成更多步）。若 ITL 不变，假设被否定，停顿另有来源。
 
 ### 4.4 prefix caching on/off（共享前缀）
 
@@ -264,7 +287,7 @@ d2_bench prefix-on 16 200 512
 再跑“缓存关 + 同样前缀”：
 
 ```bash
-serve_awq prefix-off --disable-prefix-caching
+serve_awq prefix-off --no-enable-prefix-caching
 d2_bench prefix-off 16 200 512
 ```
 
@@ -310,19 +333,23 @@ AWQ 服务还开着时：
 
 ```bash
 # 目的：用当前 vLLM 服务做 50 条 GSM8K，5-shot，greedy；记录 exact_match
+# max_gen_toks=1024 必须显式传：lm-eval 默认只生成 256 token，Qwen3 的 thinking CoT 会在中途被截断
+# max_length=4096 防止 5-shot prompt（约 1.2k token）被 2048-1024 的默认上限截掉
 lm_eval --model local-completions \
-  --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B-AWQ,num_concurrent=8,max_retries=3 \
+  --model_args base_url=http://127.0.0.1:8000/v1/completions,model=qwen3-8b,tokenizer=Qwen/Qwen3-8B-AWQ,num_concurrent=8,max_retries=3,max_gen_toks=1024,max_length=4096 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
 ```
 
 换 FP16 服务后重复同一命令（tokenizer 可换 `Qwen/Qwen3-8B`）。记录 `exact_match,strict-match` 和 `exact_match,flexible-extract`。
+
+> **先看是否被截断再看分数**：如果两边的 exact match 都接近 0，先检查 lm-eval 日志里的 `Some contexts exceeded` 和响应结尾——默认 256 token 下 Qwen3 还没写完 CoT 就被切断，这是测量假象，不是量化掉点。单配置超过 12 分钟就把两边都降到 `--limit 20`，**不要一个 50 一个 20**。
 
 如果 `local-completions` 不兼容，退路：
 
 ```bash
 # 目的：退路——让 lm-eval 自己起 vLLM 引擎；先停掉 8000 端口的服务，避免抢显存
 lm_eval --model vllm \
-  --model_args pretrained=Qwen/Qwen3-8B-AWQ,max_model_len=4096,gpu_memory_utilization=0.85 \
+  --model_args pretrained=Qwen/Qwen3-8B-AWQ,max_model_len=4096,gpu_memory_utilization=0.85,max_gen_toks=1024 \
   --tasks gsm8k --num_fewshot 5 --limit 50 --batch_size 8
 ```
 
@@ -334,20 +361,37 @@ lm_eval --model vllm \
 
 复制到 D2 报告或 README 的 D2 小节：
 
-| # | tag | 配置 | c | n | output tok/s | TTFT P50 | TTFT P99 | TPOT P95 | goodput | 抢占 Δ | KV cache | 备注 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | control-c16 | AWQ 默认 | 16 | 200 | | | | | | | | |
-| 1 | control-c64 | AWQ 默认 | 64 | 300 | | | | | | | | |
-| 2 | mns16 | mns=16 | 64 | 300 | | | | | | | | |
-| 3 | mns32 | mns=32 | 64 | 300 | | | | | | | | |
-| 4 | chunk-off | chunked off | 16 | 200 | | | | | | | | |
-| 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | 命中率 __% |
-| 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | 命中率 0% |
-| 7 | fp16 | FP16 | 16 | 200 | | | | | | | | |
+| # | tag | 配置 | c | n | output tok/s | TTFT P50 | TTFT P99 | TPOT P95 | ITL P99.9 | >1s gaps/req | goodput | 抢占 Δ | KV cache | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | control-c16 | AWQ mns=64 | 16 | 200 | | | | | | | | | | |
+| 1 | control-c64 | AWQ mns=64 | 64 | 300 | | | | | | | | | | |
+| 2 | mns16 | mns=16 | 64 | 300 | | | | | | | | | | |
+| 3 | mns32 | mns=32 | 64 | 300 | | | | | | | | | | |
+| 4 | chunk-off | chunked off | 16 | 200 | | | | | | | | | | |
+| 4b | bt512 | batch-tokens=512 | 16 | 200 | | | | | | | | | | |
+| 5 | prefix-on | prefix on | 16 | 200 | | | | | | | | | | 命中率 __% |
+| 6 | prefix-off | prefix off | 16 | 200 | | | | | | | | | | 命中率 0% |
+| 7 | fp16 | FP16 | 16 | 200 | | | | | | | | | | |
+
+`ITL P99.9` 也可以直接读 JSON 的 `p99.9_itl_ms`（bench 已加 `99.9`；**key 里是小数点，不是下划线**）；`>1s gaps/req` 要自己从 `itls` 数：
+
+```python
+# 目的：补 ITL 尾部与每条请求的秒级停顿次数；这是验证“步长假设”的直接证据
+import glob, json, numpy as np
+
+for f in sorted(glob.glob("results/d2-*.json")):
+    d = json.load(open(f))
+    flat = np.array([x for r in d["itls"] for x in r]) * 1000
+    gaps = [sum(1 for x in r if x > 1.0) for r in d["itls"]]
+    print(f.split("/")[-1],
+          "ITL p50/p99/p99.9 = %.1f/%.1f/%.1f ms" % tuple(np.percentile(flat, [50, 99, 99.9])),
+          "| >1s gaps/req median = %d" % int(np.median(gaps)),
+          "| output = %.1f tok/s" % d["output_throughput"])
+```
 
 一句话结论模板：
 
-> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；关闭 chunked prefill 使 TTFT P99 变化 __%、TPOT P95 变化 __%；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
+> 在 40W L4 上，`max-num-seqs` 从 64 降到 16 使 output tok/s 变化 __%、TPOT P95 变化 __%；`max-num-batched-tokens` 从 2048 降到 512 使 ITL P99.9 从 __ 变为 __、TTFT P99 从 __ 变为 __；关闭 chunked prefill 使 ITL P99.9 __、TTFT P99 __；共享 512-token 前缀时 prefix caching 使 TTFT P99 从 __ 降到 __（命中率 __%）；AWQ 相对 FP16 吞吐 __%、GSM8K exact match 变化 __ 个点。因此 D3/D4 应优先保留 ______ 配置。
 
 每条结论必须带数字和方向（+x% / −y%），不要写“效果更好”。
 
@@ -363,7 +407,7 @@ ls -lh /workspace/d2-*.log
 
 - 把 `d2-*.json`、`d2-*.log` scp 回本地仓库；
 - 在本地 `git add results d2-*.log d2-vllm-tuning-runbook.md README.md`，commit + push；
-- 成本：D2 约 3h × 实际 $/h（这台 $0.2611）≈ $0.8；FP16 下载是 ingress，通常不计带宽费；
+- 成本：D2 约 3h × 实际 $/h（这台 $0.2611）≈ $0.8；FP16 下载是 ingress，通常不计带宽费；**Stop 期间存储照计费**，把 `vastai show instance <id>` 里的 storage 费用一并记入 README（D1 只记了 GPU+存储的账单总额，D2 要分开写清）；
 - Stop / Destroy 规则同 D1：24h 内做 D3 → Stop；隔几天 → Destroy。
 
 ---
@@ -374,7 +418,8 @@ ls -lh /workspace/d2-*.log
 |---|---|---|
 | 两次结果差很多 | host 噪声 / 功耗墙波动 | 同一配置重复 2 次；报中位数/范围；不要拿单次最好值 |
 | FP16 启动 OOM | 16.4GB 权重 + 8k KV 放不下 | `--max-model-len 4096`；或只跑 c=1/4/16 |
-| `--disable-prefix-caching` 不识别 | 版本 flag 名不同 | `vllm serve --help=all \| grep prefix-caching` 对一遍 |
+| `--disable-prefix-caching` 不识别 | v0.34 没有 `--disable-*`，只有 BooleanOptionalAction | 用 `--no-enable-prefix-caching`；`--help=all \| grep no-enable-` 对一遍 |
+| `--max-num-seqs 64` 没生效 | v0.34 默认是 128 | 控制组命令里显式写；看启动日志 `non-default args` 的 `max_num_seqs` |
 | prefix 实验没差异 | 前缀不是共享的，或总长度不是 1024 | 看 JSON `input_lens`；确认 `PREFIX=512` 且 `IN=512` |
 | `max-num-seqs` 改了没变化 | 客户端 c 低于服务端上限 | 用 c=64 才看得出 16/32 的差别 |
 | `local-completions` 报错 | lm-eval 与当前 API 不兼容 | 用 `--model vllm` 退路；先停 8000 服务 |
@@ -387,10 +432,12 @@ ls -lh /workspace/d2-*.log
 
 - [ ] 同一天、同一台 L4 的 control（c=16 / c=64）
 - [ ] `max-num-seqs` 16（可选 32）结果
+- [ ] `max-num-batched-tokens 512` 结果（可选，但优先于 mns32）
 - [ ] chunked prefill off 结果
 - [ ] prefix caching on/off（共享 512-token 前缀）+ 命中率
 - [ ] AWQ vs FP16 吞吐/显存对比（时间不够可 deferred，但要写明）
-- [ ] GSM8K 50 条质量门（或明确 deferred）
+- [ ] GSM8K 50 条质量门（或明确 deferred；记录 max_gen_toks）
+- [ ] ITL P50/P99/P99.9 + `>1s gaps/req`（不只 TPOT）
 - [ ] 一张对照表 + 一句话结论（带数字和方向）
 - [ ] 结果和日志 scp 回本地，commit + push
 - [ ] 成本记录
