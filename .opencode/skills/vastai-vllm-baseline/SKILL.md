@@ -45,6 +45,7 @@ GPU 架构 (L4 = sm_89)
 |---|---|---|
 | prefill vs decode | prefill 并行算 prompt、写 KV；decode 每步 1 token、读 KV | TTFT≈排队+prefill；TPOT/ITL≈decode step |
 | `max-num-batched-tokens` | 一次 forward 的 token 预算，prefill+decode 共用 | 默认 2048；不是并发数；调小→ITL 稳、吞吐降、长 prompt TTFT 升 |
+| `max-model-len` | 单条请求 prompt+output 的上限（空间） | 不预分配 KV；关 chunking 时 budget 必须 ≥ 它 |
 | chunked prefill | 预算不够时把 prefill 拆到多步，与 decode 交错 | 默认开；`--disable-chunked-prefill`；**关掉时 budget 必须 ≥ max_model_len，否则自动抬到 max_model_len** |
 | prefix caching | 按 block 复用相同前缀的 KV | 默认开；block 对齐；命中率按 token 计；512/1024≈50% |
 | AWQ | W4A16：权重 4-bit，激活/KV 仍是 FP16 | group_size=128；文件 5.7GB；质量掉 1–5 点，50 条 GSM8K 分辨不了 1–2 点 |
@@ -52,6 +53,8 @@ GPU 架构 (L4 = sm_89)
 > 1024-token prompt 在 2048 预算下通常一次 prefill 就能算完，chunking 不会强行切开；真正决定“一步卡多久”的是 `max-num-batched-tokens`。所以测步长用 `bt512`，不要只做 chunk on/off。
 
 > 三个容易混的数：**并发数 c** 是客户端在飞请求（含排队）；**batch size** 在 serving 里要么指序列数（受 `max_num_seqs` 限制），要么指 token 数；**`max-num-batched-tokens`** 是每步 token 预算。`c=64` + `mns=16` 时是 64 在飞、16 admitted、48 排队，不是 64 路同时算。
+
+> `max-model-len` 和 `max-num-batched-tokens` 是正交的：8192/512 合法（chunking 把 8k prompt 拆成 16 步），2048/8192 也合法（一步多条短请求）；只有关 chunking 时才要求 budget ≥ max_model_len。
 
 ### 指标口径
 

@@ -602,3 +602,44 @@ host 噪声、功耗墙、邻居、驱动/clock 都可能变；D1 的数字只�
 为什么 vLLM 不用一个固定的 “batch size”：训练时序列等长、阶段单一，batch size 是一个数；serving 时序列长度不同、prefill 和 decode 混在一起、prefill 还能分块，所以用两个上限分别控制“序列数”和“token 数”。
 
 别把 lm-eval 的 `--batch_size 8` 当成 vLLM 的 batch：那是客户端一次发 8 条请求，服务端仍按 `max-num-seqs` / `max-num-batched-tokens` 调度。
+
+### Q9：`max-num-batched-tokens` 和 `max-model-len` 有什么区别？
+
+一句话：**`max-model-len` 管“一条请求最长能有多长”，`max-num-batched-tokens` 管“一步最多算多少 token”。** 一个是空间/上下文上限，一个是时间/每步计算上限。
+
+| | `max-model-len` | `max-num-batched-tokens` |
+|---|---|---|
+| 限制对象 | 单条请求的 prompt + output 长度 | 一次 forward 所有序列的 token 总数 |
+| 维度 | 空间 / 上下文 | 时间 / 每步计算 |
+| 默认 | 模型 config 的 `max_position_embeddings`（Qwen3-8B 是 40960），我们设 8192 | 2048 |
+| 影响 | 单请求能否被接受、单请求 KV 上限 | 每步 prefill/decode 多少、ITL/TTFT/吞吐 |
+| 调小 | 拒绝更长请求；每 token KV 不变 | 步长变小、ITL 更稳、吞吐下降、TTFT 上升 |
+| 调大 | 接受更长请求；单请求 KV 上限变大 | 步长变大、吞吐上升、ITL 尾部变差 |
+| 与 chunking | 长于 budget 的 prompt 需要分块 | 预算小于 prompt 时触发分块 |
+
+关键：
+
+- `max-model-len` **不预分配** KV；KV 块按需分配，总池由显存决定。它只限制单条序列最多能长到多少。8192 token × 144KiB = **1.125GiB**，是一条 8k 请求的 KV 上限；40960 token 则要 **5.6GiB**。
+- `max-num-batched-tokens` **不限制单条请求长度**。`max-model-len=8192`、budget=512 是合法的（chunking on）：一条 8192-token prompt 会被拆成 16 个 prefill step，只是 TTFT 变长。
+- 反过来，`max-model-len=2048`、budget=8192 也合法：单条请求最多 2048 token，但一步可以同时 prefill 多条短请求。
+- 只有关掉 chunked prefill 时，才有 `budget >= max_model_len` 的硬约束：一条 prefill 必须整体塞进一个 step。D2 的 `control-2k` / `chunk-off` 就是为这个约束设计的。
+
+图示：
+
+```text
+max_model_len = 8192        一条请求最多 8192 token
+        ┌──────────────────────────────────────────────┐
+req A   │ prompt 1024 + output 256 = 1280              │
+        └──────────────────────────────────────────────┘
+
+max_num_batched_tokens = 2048   一步最多 2048 token
+step 1  [req A prefill 1024][req B prefill 1024]  = 2048
+step 2  [A decode 1][B decode 1][C prefill 1024]   = 1026
+```
+
+常见误解：
+
+- “`max-model-len` 是 batch size” → 不是，它是单条序列长度。
+- “`max-num-batched-tokens` 是一条请求的最大长度” → 不是，它是一步的总 token 预算。
+- “调小 `max-model-len` 会让 KV 每 token 变小” → 不会，KV/token 由模型结构和 dtype 决定（Qwen3-8B FP16 是 144KiB）。
+- “`max-model-len` 一定要 ≥ `max-num-batched-tokens`” → 反了；只有 chunking off 时要求 budget ≥ max_model_len。
