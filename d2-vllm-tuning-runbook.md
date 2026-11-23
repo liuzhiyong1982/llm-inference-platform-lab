@@ -732,6 +732,8 @@ grep "Prefix cache hit rate" /workspace/d2-prefix-off.log | tail -3
 所以：**c=8 是纯量化对比；c=16 是“量化 + KV 容量”的混合效应**，只能作观察，不能当因果。
 
 > 这是估算：实际 FP16 的 KV 以启动日志 `GPU KV cache size` 为准；FP16 的激活显存可能比 AWQ 略大，实际 KV 可能比 19,100 更小，所以 c=8 是保守选择。
+>
+> 2026-11-23 实测：FP16 启动日志 `GPU KV cache size: 18,944 tokens`，和估算 19,100 基本一致；`c=8` 需要 `8 × 1,280 = 10,240`（够），`c=16` 需要 `20,480`（不够）。
 
 AWQ 的 c=8 对照已经在 §4.1 用控制组服务跑过（`control-c8`），这里直接换 FP16：
 
