@@ -338,7 +338,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 | 天 | 时长 | 干什么 | 当天必须落地 |
 |---|---|---|---|
 | **D1** | 4h | 按 `d1-vllm-baseline-runbook.md` 跑 baseline；短课当手册，时间不够就跳过[14] | 4 个 baseline JSON + README 表 + 一句话归因 |
-| **D2** | 3h | `max-num-seqs`、chunked prefill on/off、prefix caching 有/无（用 `--no-enable-prefix-caching` + `--random-prefix-len` 构造共享前缀）；AWQ vs FP16 + 质量门；读 KV cache / batching 那两节[15] | 一张对照表 + 一句话结论（吞吐 +x%，TTFT −y%，质量 Δ） |
+| **D2** | 3h | `max-num-seqs`、chunked prefill on/off、prefix caching 有/无（用 `--disable-prefix-caching` + `--random-prefix-len` 构造共享前缀）；AWQ vs FP16 + 质量门；读 KV cache / batching 那两节[15] | 一张对照表 + 一句话结论（吞吐 +x%，TTFT −y%，质量 Δ） |
 | **D3** | 3h | k3s + vLLM Deployment；**权重分发实测**：initContainer 现下 vs node-local 缓存，测冷启动秒数；KEDA 按 `vllm:num_requests_waiting` 扩缩 | 冷启动对比（秒）+ 扩容曲线 |
 | **D4** | 4h | **llm-d 日**：租 2×L4，按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字 |
 | **D5** | 3h | Kueue `ClusterQueue` 两团队配额[9] + Kyverno 强制 GPU workload 带 priorityClass / quota label；跑"抢卡"演示 | 两条被拒 manifest 日志（这是你独有的交叉点） |

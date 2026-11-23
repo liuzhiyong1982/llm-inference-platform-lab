@@ -31,10 +31,10 @@
 - [ ] D1 的 4 个 JSON 和 README 表还在；知道 D1 的 c=16/c=64 数字
 - [ ] 确认今天用的是哪台：同 host 就重跑控制组；**新 host 也必须重跑控制组**，D1 数字只作参考
 - [ ] `nvidia-smi` 的 `power.limit` 已记录（D1 是 40W；本台若不同，报告里必须写明“D1/D2 不可直接比”）
-- [ ] `vllm --version` 是 `0.34.0`；不是就先核对 `--no-enable-*` / bench flag，再决定是否继续
+- [ ] `vllm --version` 是 `0.34.0`；不是就先核对 `--disable-*` / bench flag，再决定是否继续
 - [ ] 容器盘 ≥ 40GB：AWQ 5.7GB + FP16 16.4GB + 结果，约 23GB（新实例缓存为空，两个都要下）
 - [ ] 有 HF token（FP16 约 16GB，匿名下载可能 80 分钟）
-- [ ] `vllm serve --help=all` 能查到 `--no-enable-chunked-prefill` / `--no-enable-prefix-caching`
+- [ ] `vllm serve --help=all` 能查到 `--disable-chunked-prefill` / `--disable-prefix-caching`
 
 ```bash
 # 目的：记录这张卡的规格和功耗上限；和 D1 不同时，D1 只能当参考，不能混在一张表里比
@@ -43,12 +43,12 @@ nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit,power.draw -
 # 目的：确认盘够放 FP16
 df -h /
 
-# 目的：确认两个负向 flag 的名字；v0.34 是 BooleanOptionalAction，只有 --no-enable-*，没有 --disable-*
-vllm serve --help=all | grep -E "no-enable-(chunked-prefill|prefix-caching)"
+# 目的：确认两个负向 flag 的名字；v0.34 用 EnableDisableAction，help 显示 --enable-x / --disable-x
+vllm serve --help=all 2>&1 | grep -E "disable-(chunked-prefill|prefix-caching)"
 ```
 
 > v0.34 默认：chunked prefill = on，prefix caching = on，`max_num_seqs` = **128**（不是 64）。
-> 关闭用 `--no-enable-chunked-prefill` / `--no-enable-prefix-caching`。D1 显式传了 `--max-num-seqs 64`，所以 D2 的控制组也必须显式传 64，否则控制组不是同一配置。
+> 关闭用 `--disable-chunked-prefill` / `--disable-prefix-caching`（v0.34 的 `EnableDisableAction` 在 help 里只显示 `--enable-x` / `--disable-x`；`--no-enable-x` 是隐藏的兼容别名，也能用，但不要写进文档）。D1 显式传了 `--max-num-seqs 64`，所以 D2 的控制组也必须显式传 64，否则控制组不是同一配置。
 
 ---
 
@@ -62,10 +62,10 @@ vllm serve --help=all | grep -E "no-enable-(chunked-prefill|prefix-caching)"
 | 1 | `control-c64` | 同上 | c=64, n=300 | 当天吞吐基准 |
 | 2 | `mns16` | `--max-num-seqs 16` | c=64, n=300 | 服务端并发上限的影响 |
 | 3 | `mns32` | `--max-num-seqs 32`（可选） | c=64, n=300 | 找拐点 |
-| 4 | `chunk-off` | `--no-enable-chunked-prefill` | c=16, n=200 | 整段 prefill 不再切块 |
+| 4 | `chunk-off` | `--disable-chunked-prefill` | c=16, n=200 | 整段 prefill 不再切块 |
 | 4b | `bt512`（可选，优先于 mns32） | `--max-num-batched-tokens 512` | c=16, n=200 | 直接验证“大步 prefill 造成 decode 停顿” |
 | 5 | `prefix-on` | 默认（prefix on） | c=16, n=200, prefix=512 | 共享前缀的缓存收益 |
-| 6 | `prefix-off` | `--no-enable-prefix-caching` | c=16, n=200, prefix=512 | 无缓存对照 |
+| 6 | `prefix-off` | `--disable-prefix-caching` | c=16, n=200, prefix=512 | 无缓存对照 |
 | 7 | `fp16` | `Qwen/Qwen3-8B` + `--dtype float16` | c=16, n=200 | 量化 vs 半精度 |
 
 > 默认 `max_num_batched_tokens` 是 2048。D1 看到的 ~2.3s decode 停顿，量级正好等于“一个调度步塞进 2048 个 prefill token”的耗时；`bt512` 把一步的 prefill 预算压到 512，是比 `chunk-off` 更直接的假设检验。`chunk-off` 则是另一个极端（整段 1024 一次算完），两者一起看能分清“停顿来自步长”还是“来自 prefill 与 decode 交错”。
@@ -258,7 +258,7 @@ d2_bench mns32 64 300 0
 
 ```bash
 # 目的：关闭 chunked prefill，对比默认（控制组 c=16）
-serve_awq chunk-off --no-enable-chunked-prefill
+serve_awq chunk-off --disable-chunked-prefill
 ```
 
 就绪后：
@@ -302,7 +302,7 @@ d2_bench prefix-on 16 200 512
 再跑“缓存关 + 同样前缀”：
 
 ```bash
-serve_awq prefix-off --no-enable-prefix-caching
+serve_awq prefix-off --disable-prefix-caching
 d2_bench prefix-off 16 200 512
 ```
 
@@ -433,7 +433,7 @@ ls -lh /workspace/d2-*.log
 |---|---|---|
 | 两次结果差很多 | host 噪声 / 功耗墙波动 | 同一配置重复 2 次；报中位数/范围；不要拿单次最好值 |
 | FP16 启动 OOM | 16.4GB 权重 + 8k KV 放不下 | `--max-model-len 4096`；或只跑 c=1/4/16 |
-| `--disable-prefix-caching` 不识别 | v0.34 没有 `--disable-*`，只有 BooleanOptionalAction | 用 `--no-enable-prefix-caching`；`--help=all \| grep no-enable-` 对一遍 |
+| `--no-enable-*` 在 help 里搜不到 | v0.34 的 EnableDisableAction 只显示 `--enable-x` / `--disable-x`；`--no-enable-x` 是隐藏兼容别名 | 用 `--disable-*`；`grep -E "disable-(chunked-prefill\|prefix-caching)"` 对一遍 |
 | `--max-num-seqs 64` 没生效 | v0.34 默认是 128 | 控制组命令里显式写；看启动日志 `non-default args` 的 `max_num_seqs` |
 | prefix 实验没差异 | 前缀不是共享的，或总长度不是 1024 | 看 JSON `input_lens`；确认 `PREFIX=512` 且 `IN=512` |
 | `max-num-seqs` 改了没变化 | 客户端 c 低于服务端上限 | 用 c=64 才看得出 16/32 的差别 |

@@ -327,7 +327,7 @@ block 16 token = 2.25 MiB
 | `python: command not found` | 镜像只有 `python3` | 全部用 `python3` |
 | `df: /workspace 不存在` | 镜像没预建 | `mkdir -p /workspace`；`df -h /` |
 | `--help \| grep` 为空 | v0.34 的 help 分组 | `--help=all` |
-| `--disable-*` 不识别 | v0.34 用 BooleanOptionalAction，没有 `--disable-` 前缀 | 关 chunked prefill / prefix caching 用 `--no-enable-chunked-prefill` / `--no-enable-prefix-caching` |
+| `--no-enable-*` 在 help 里搜不到 | v0.34 的 EnableDisableAction 只显示 `--enable-x` / `--disable-x`，`--no-enable-x` 是隐藏兼容别名 | 用 `--disable-chunked-prefill` / `--disable-prefix-caching` |
 | 控制组并发悄悄变大 | v0.34 `max_num_seqs` 默认 **128**（不是 64） | 显式 `--max-num-seqs 64`；启动日志 `non-default args` 里核对 |
 | 质量门两边都接近 0 分 | lm-eval `max_gen_toks` 默认 256，thinking 模型的 CoT 被截断 | `max_gen_toks=1024,max_length=4096`；先查截断再看分数 |
 | `CUDA driver version is insufficient` | host Max CUDA < 镜像 CUDA | 换 host 或换低 CUDA 镜像；不要装 driver |
