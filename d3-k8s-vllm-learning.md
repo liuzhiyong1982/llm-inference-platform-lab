@@ -1275,7 +1275,7 @@ D3 不测 scale-to-zero，原因是 vLLM 本身不排队：
 
 本机是 2×4090，GPU 够，但只有 **15 vCPU / 48GiB**。Deployment 默认每 Pod `cpu: 8` / `memory: 20Gi`，两个副本需要 16 CPU / 40GiB；内存够，但 CPU 超过 15，第二个会先因 CPU Pending，不是 KEDA 失败。
 
-做 1→2 前把 Deployment 的 `cpu` 临时降到 `4`（`memory` 保持 `20Gi`，2×20=40GiB，留约 8GiB 给系统），并标注这是 scale-out 专用配置，不和单卡吞吐数字对比。单副本实验保持 `8 CPU / 20Gi`。`maxReplicaCount: 2` 也不要超过实际 GPU 数，否则第三个副本会 Pending 在 GPU 上。另外 `shm` 是 `medium: Memory` 的 2Gi，会计入 Pod 实际内存；2×20Gi + 2×2Gi + 系统接近 48GiB，跑 1→2 时要盯 `kubectl top pod` 和 OOMKilled。
+做 1→2 前在 §8.4 开始压测时就把 Deployment 的 `cpu` 降到 `4`（`memory` 保持 `20Gi`，2×20=40GiB，留约 8GiB 给系统），不要等 HPA 已经算出 2 再改。§7 的单副本基线实验是 `8 CPU / 20Gi`；§8 的 KEDA 实验从第一轮压测起就用 `4 CPU / 20Gi`，两组数字不要混。`maxReplicaCount: 2` 也不要超过实际 GPU 数，否则第三个副本会 Pending 在 GPU 上。另外 `shm` 是 `medium: Memory` 的 2Gi，会计入 Pod 实际内存；2×20Gi + 2×2Gi + 系统接近 48GiB，跑 1→2 时要盯 `kubectl top pod` 和 OOMKilled。
 
 ### 8.3.4 排障顺序
 
@@ -1339,6 +1339,16 @@ KEDA 不是“队列一超 8 立刻多一个 Pod”。实际链路是：
 > 不要再给同一个 Deployment 手建 HPA；KEDA 已经生成了 `keda-hpa-vllm-scaler`，两个 HPA 会互相打架。删除 ScaledObject 时也要确认 HPA 一起被清理。
 
 ### 8.4 压测
+
+**开始前先把 vLLM Deployment 的 CPU 降到 4。** 这台 VM 只有 15 vCPU；`cpu: 8` 时 HPA 扩到 2 需要 16 vCPU，第二个 Pod 会先因 CPU Pending。不要等 HPA 已经算出 2 再改；第一次压测前就改成 `cpu: 4`（memory 保持 `20Gi`）：
+
+```bash
+kubectl set resources deploy/vllm-qwen3-8b \
+  --requests=cpu=4 --limits=cpu=4
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
+```
+
+这一步会触发一次 rollout；新 Pod Ready 后再跑 bench。后面 §8.6 的 1→2 曲线都基于这个 4 CPU 配置，不要和 §7 的 8 CPU 数字混。如果 §8 是重新 apply `k8s/vllm.yaml`，直接把 YAML 里两处 `cpu: "8"` 改成 `cpu: "4"`；§6.2 的基线 manifest 仍保持 8 CPU，§7 的数字也是 8 CPU 下测的。
 
 在集群内跑 bench（镜像里自带 `vllm bench`）：
 
