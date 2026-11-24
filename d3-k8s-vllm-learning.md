@@ -1,6 +1,6 @@
 # D3 学习文档：k3s + vLLM 的冷启动、扩缩容与驱逐
 
-> 状态：**执行中（2026-11-24）**。§5–§6 已完成；§7 warm 已测，cold 与 §8–§9 待执行。后续把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
+> 状态：**执行中（2026-11-24）**。§5–§6 已完成；§7 warm 已测，cold 已跑一版但 initContainer 路径未对齐（provisional，需重跑）；image-cold 与 §8–§9 待执行。后续把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
 >
 > 计划中的位置：`ai-cloud-native-week-plan.md` §4 Q1 的 **B 线 artifact**；B 线讲法见该文件 §3「D3 / D5 的 B 线讲法」。执行后同时回填该文件 §5 的“三个 B 线数”。
 >
@@ -939,15 +939,19 @@ kubectl get pod "$pod" -o json | jq -r '
 
 | 场景 | 调度 (s) | 镜像 (s) | 权重下载 (s) | 模型加载+引擎 (s) | 总到 Ready (s) |
 |---|---|---|---|---|---|
-| cold | | | | | |
+| cold（2026-11-24，provisional） | 0 | 1 | 56 | 83 | 141 |
 | warm（2026-11-24） | 0 | 2 | 0 | 83 | 86 |
 | image-cold（可选） | | | | | |
 
+> cold 原始时间点：`created=16:50:38Z` → `scheduled=16:50:38Z` → `init_start=16:50:39Z` → `init_end=16:51:35Z` → `main_start=16:51:36Z` → `ready=16:52:59Z`。initContainer 日志 `Fetching 12 files` 从 `16:50:40.468Z` 到 `16:51:35.464Z`，实际下载约 55.0s，5.7GB ≈ 104MB/s；模型加载+引擎仍是 83s（`Loading model from scratch` `16:52:10Z`，torch.compile 27.28s，engine init 41.11s，KV cache 101,376 tokens）。init 结束到主容器启动还有 1s 未单列，故 0+1+56+83=140，总时间 141s。
+>
+> **这次 cold 只是 provisional：** initContainer 仍用旧脚本检查/下载 `/models/Qwen3-8B-AWQ`，实际服务的 `/models/Qwen3-8B-AWQ-v1` 没被删（`config.json` mtime 仍是 16:18Z）。所以 56s 是真实的 5.7GB 下载，但下载到了不被服务的目录；它不是“服务路径 cold”的干净对照，不要作为最终数字写进 README/简历。干净重跑：先把 §6.5 的 initContainer 改成共用 `$MODEL_PATH` 并 `kubectl apply`，再按 §7.2 删 `-v1` 重跑。
+>
 > warm 原始时间点：`created=16:45:59Z` → `scheduled=16:45:59Z` → `init_start=16:46:01Z` → `init_end=16:46:01Z`（`weights cached`）→ `main_start=16:46:02Z` → `ready=16:47:25Z`。镜像已在节点上（event `Container image ... already present`），所以“镜像 2s”是 pause/容器创建开销，不是拉取；init 结束到主容器启动还有 1s 未单列，故 0+2+0+83=85，总时间 86s。
 >
 > warm 的 83s 内部：vLLM banner `16:46:12Z`；`Loading model from scratch` `16:46:36Z`；torch.compile `16:46:43Z`→`16:47:10Z`（27.23s）；engine init 共 41.01s；`GPU KV cache size: 101,376 tokens`（8192 上下文最大并发 12.38x）；`Application startup complete` `16:47:24Z`；Ready `16:47:25Z`。
 >
-> 这次实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`，`weights cached` 并没有校验 `-v1`。§6.5 已改成两者共用 `MODEL_PATH`；跑 cold 前先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
+> 两次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；跑下一轮 cold/image-cold 前先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
 
 归因规则：
 
