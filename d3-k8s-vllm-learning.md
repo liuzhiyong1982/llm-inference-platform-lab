@@ -1526,8 +1526,27 @@ done
 
 - 新 Pod 从调度到 Ready 要经历镜像（已缓存则≈0）+ 权重（缓存则≈0）+ 模型加载（几十秒）；
 - 在它 Ready 之前，所有流量仍压在旧 Pod 上，**P99 会先恶化**；
-- Ready 之后 Endpoint 加入，P99 才回落；
+- Ready 之后 Endpoint 加入，后续请求才会分到新 Pod；但如果压测在 Ready 前结束，新 Pod 一个请求都接不到（本次实测就是）；
 - 所以“KEDA 扩容”不是立刻变好，而是“先更糟，几十秒后才更好”。这就是 D3 要写进结论的曲线。
+
+**2026-11-24 实测（4 CPU / 20Gi，2×4090，KEDA 2.21.1）：**
+
+| 时间点 | 实测 | 说明 |
+|---|---|---|
+| `t_trigger` | 18:27:15Z | `sum(vllm:num_requests_waiting)=107`，第一次超过 8 |
+| HPA 决策 | 18:27:22Z | `SuccessfulRescale New size: 2` |
+| `t_scheduled` | 18:27:22Z | 第二个 Pod 创建/调度 |
+| `t_running` | ≈18:27:50Z | 主容器 running（Prometheus 第一个采样点） |
+| `t_ready` | 18:29:18Z | 第二个 Pod Ready；距 HPA 决策 **116s** |
+| `t_first_success` | **未发生** | 第二个 Pod 处理 **0** 个请求 |
+| 队列归零 | 18:29:05Z | bench 600 个请求结束，比第二个 Pod Ready 早 **13s** |
+| 缩回 1 | 18:33:53Z | `New size: 1`，约 5 分钟后 |
+
+**这次扩容没有帮到这批流量。** 第二个 Pod 在 18:29:18 Ready，但 600 个请求在 18:29:05 就全部完成；`vllm:request_success_total{finished_reason="length"}` 显示第一个 Pod **600**、第二个 Pod **0**。HPA 确实扩到了 2，第二个 Pod 也确实用了第二张 GPU（`nvidia-smi` 同时有两个 `VLLM::EngineCore`），但它 Ready 时队列已经空了。
+
+要看到第二个 Pod 真正分担请求，必须让压测持续到 Ready 之后：把 `--num-prompts` 加到 `1000–2000`，或提高 `--random-output-len` / 降低吞吐。否则只能证明“扩容机制通了”，不能证明“扩容降低了 P99”。
+
+这也正是 D3 的结论：扩容的代价是 **116s 冷启动**；如果流量窗口短于这个时间，扩容对当前这批请求没有帮助，只是为后续流量准备容量。
 
 ### 8.7 scale-to-zero 实验（可选，但很有说服力）
 
