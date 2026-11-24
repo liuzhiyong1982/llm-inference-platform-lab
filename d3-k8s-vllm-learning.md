@@ -1,6 +1,6 @@
 # D3 学习文档：k3s + vLLM 的冷启动、扩缩容与驱逐
 
-> 状态：**执行中（2026-11-24）**。§5–§6 已完成；§7 warm 已测，cold 已跑一版但 initContainer 路径未对齐（provisional，需重跑）；image-cold 与 §8–§9 待执行。后续把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
+> 状态：**执行中（2026-11-24）**。§5–§6 已完成；§7 warm 已测，cold 已跑一版但 initContainer 路径未对齐（provisional，需重跑）；image-cold 已测，但 containerd 本地复用了层，不是网络冷拉；§8–§9 待执行。后续把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
 >
 > 计划中的位置：`ai-cloud-native-week-plan.md` §4 Q1 的 **B 线 artifact**；B 线讲法见该文件 §3「D3 / D5 的 B 线讲法」。执行后同时回填该文件 §5 的“三个 B 线数”。
 >
@@ -861,7 +861,7 @@ kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 |---|---|---|---|
 | **cold** | 已缓存 | 删除当前 `MODEL_PATH` 对应的宿主机目录 | 权重下载 + 模型加载 + 引擎初始化，最接近“新节点” |
 | **warm** | 已缓存 | 保留 | 只测模型加载 + 引擎初始化 |
-| **image-cold**（可选） | `sudo k3s crictl rmi docker.io/vllm/vllm-openai:v0.34.0` 删除镜像 | 保留 | 单独测镜像拉取 |
+| **image-cold**（可选） | `sudo k3s crictl rmi docker.io/vllm/vllm-openai:v0.34.0` 删除镜像 | 保留 | 单独测镜像拉取；`crictl rmi` 后 containerd 若保留层，只会测到本地重新注册，不是网络拉取 |
 
 > 镜像引用名先用 `sudo k3s crictl images | grep vllm` 确认；不同 registry 前缀可能不同。
 >
@@ -941,7 +941,7 @@ kubectl get pod "$pod" -o json | jq -r '
 |---|---|---|---|---|---|
 | cold（2026-11-24，provisional） | 0 | 1 | 56 | 83 | 141 |
 | warm（2026-11-24） | 0 | 2 | 0 | 83 | 86 |
-| image-cold（可选） | | | | | |
+| image-cold（2026-11-24，本地复用） | 0 | 4 | 0 | 90 | 95 |
 
 > cold 原始时间点：`created=16:50:38Z` → `scheduled=16:50:38Z` → `init_start=16:50:39Z` → `init_end=16:51:35Z` → `main_start=16:51:36Z` → `ready=16:52:59Z`。initContainer 日志 `Fetching 12 files` 从 `16:50:40.468Z` 到 `16:51:35.464Z`，实际下载约 55.0s，5.7GB ≈ 104MB/s；模型加载+引擎仍是 83s（`Loading model from scratch` `16:52:10Z`，torch.compile 27.28s，engine init 41.11s，KV cache 101,376 tokens）。init 结束到主容器启动还有 1s 未单列，故 0+1+56+83=140，总时间 141s。
 >
@@ -951,7 +951,11 @@ kubectl get pod "$pod" -o json | jq -r '
 >
 > warm 的 83s 内部：vLLM banner `16:46:12Z`；`Loading model from scratch` `16:46:36Z`；torch.compile `16:46:43Z`→`16:47:10Z`（27.23s）；engine init 共 41.01s；`GPU KV cache size: 101,376 tokens`（8192 上下文最大并发 12.38x）；`Application startup complete` `16:47:24Z`；Ready `16:47:25Z`。
 >
-> 两次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；跑下一轮 cold/image-cold 前先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
+> image-cold 原始时间点：`created=17:00:19Z` → `scheduled=17:00:19Z` → `init_start=17:00:23Z` → `init_end=17:00:23Z`（`weights cached`）→ `main_start=17:00:24Z` → `ready=17:01:54Z`。event：`Pulling` → `Pulled ... in 942ms ... Image size: 10036574238 bytes`；`init_start - scheduled` = 4s（0.9s 拉取 + 容器创建）。模型加载+引擎 90s：`Loading model from scratch` `17:00:59Z`，torch.compile 28.14s，engine init 44.00s，KV cache 101,376 tokens。init 结束到主容器启动还有 1s 未单列，故 0+4+0+90=94，总时间 95s。
+>
+> **image-cold 不是网络冷拉：** 10GB 镜像 942ms 拉完，等效 10GB/s 以上，说明 `crictl rmi` 只删了 image record，containerd 的 content store/snapshot 还在本地复用了层。这个数字只证明“镜像记录删除后能重新注册”，不能回答“新节点从 Docker Hub 拉 10GB 要多久”。真实网络冷拉要用干净 VM/节点，或在另一个从没拉过该镜像的 host 上测；不要手删 content store。90s 对 83s 的差异是单次噪声，不要归因到镜像拉取（镜像只占 0.9s）。
+>
+> 三次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；跑下一轮 cold/image-cold 前先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
 
 归因规则：
 
