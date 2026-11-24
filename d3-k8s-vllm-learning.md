@@ -396,14 +396,54 @@ df -h /var/lib
 | k8s | 无 `k3s`、无 `kubeadm`（干净 VM，模板 `2c18...` 的 `onstart` 为空） |
 | image | `docker.io/vastai/kvm:cuda-12.9.1-auto`，template id `781848` |
 
-> 2026-11-24 17:01 `unattended-upgrades` 把 NVIDIA 用户态包从 580.95.05 升到 580.178.04，内核模块仍是 580.95.05；新 Pod 因此报 `failed to initialize NVML: Driver/library version mismatch`。同一轮还装上了 6.8.0-149 内核。重启后以实际 `nvidia-smi` / `uname -r` 为准，并确认 `nvidia-smi` 正常后再继续。
+> 2026-11-24 16:57 `apt-daily-upgrade.timer` 补跑 `unattended-upgrade`，把 NVIDIA 用户态包从 580.95.05 升到 580.178.04，内核模块仍是 580.95.05；新 Pod 因此报 `failed to initialize NVML: Driver/library version mismatch`。同一轮还装上了 6.8.0-149 内核。重启后以实际 `nvidia-smi` / `uname -r` 为准，并确认 `nvidia-smi` 正常后再继续。
 
 > 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
 
 - 如果 `stat -fc %T /sys/fs/cgroup` 不是 `cgroup2fs`（例如 `tmpfs`），说明还是 cgroup v1，k3s/kubelet 可能起不来。Ubuntu 22.04 可在 `/etc/default/grub` 的 `GRUB_CMDLINE_LINUX` 里加 `systemd.unified_cgroup_hierarchy=1`，`sudo update-grub` 后重启；改不了就换支持 cgroup v2 的 VM。
 - `/var/lib` 不可写，通常是权限或磁盘满；先解决再装。
-- **关掉自动升级。** `unattended-upgrades` 会在实验中途升级 NVIDIA 用户态驱动/内核；用户态 580.178 配内核模块 580.95 会 `Driver/library version mismatch`，新 Pod 全部起不来。开工前跑 `sudo systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer`；如果已经升级，先等 apt/dpkg 锁释放，再重启 VM 让新模块加载。
+- **关掉自动升级。** 见下面的“关掉自动升级”命令；Vast 的 Ubuntu VM 默认带 `apt-daily-upgrade.timer`，`unattended-upgrades.service` 可能是 inactive/disabled，但 timer 仍会触发。
 - 如果检查失败，换 RTX VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
+
+#### 关掉自动升级（必须）
+
+Vast 的 Ubuntu VM 默认带 `apt-daily-upgrade.timer` + `/etc/apt/apt.conf.d/20auto-upgrades`。触发链是：
+
+```text
+apt-daily-upgrade.timer
+  → apt-daily-upgrade.service
+  → /usr/lib/apt/apt.systemd.daily install
+  → /usr/bin/unattended-upgrade
+```
+
+`unattended-upgrades.service` 本身可能是 `inactive/disabled`，但 timer 仍然会跑。timer 的配置是：
+
+```ini
+[Timer]
+OnCalendar=*-*-* 6:00
+RandomizedDelaySec=60m
+Persistent=true
+```
+
+`Persistent=true` 表示 6:00 没开机时会补跑；`RandomizedDelaySec=60m` 会把它推到开机后 0–60 分钟内的某个点。2026-11-24 这台 VM 约 15:57 开机，16:57 被 timer 补跑，把 NVIDIA 用户态驱动从 `580.95.05` 升到 `580.178.04`，内核模块还是旧版，于是新 Pod 报 `Driver/library version mismatch`。
+
+先确认，再关：
+
+```bash
+# 目的：看是谁在跑、下次什么时候跑
+systemctl list-timers --all | grep -E 'apt|unattended'
+cat /etc/apt/apt.conf.d/20auto-upgrades
+
+# 目的：停掉 timer 和 service；只 disable unattended-upgrades.service 不够
+sudo systemctl disable --now unattended-upgrades.service
+sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+sudo systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
+
+# 目的：确认没有下次触发
+systemctl list-timers --all | grep -E 'apt|unattended' || echo "no apt timers"
+```
+
+> `mask` 会阻止 timer/service 再被拉起；实验结束后如需恢复，用 `sudo systemctl unmask ...`。如果已经升级过，先等 `/var/lib/dpkg/lock-frontend` 释放，再重启 VM 让新内核模块加载；不要在 apt 事务中间 reboot。
 
 ### 5.2 安装 NVIDIA runtime（toolkit）
 
@@ -434,7 +474,7 @@ which nvidia-container-runtime
 
 > 如果 `apt-cache policy nvidia-container-toolkit` 已经显示 `Candidate:`，可以跳过加 repo，直接 `sudo apt-get install -y nvidia-container-toolkit`。
 >
-> 装完先跑 `nvidia-smi`。如果报 `Driver/library version mismatch`，说明 apt/unattended-upgrades 把用户态驱动升到了新版本，但内核模块还是旧版；不要继续装 k3s/device plugin，先重启 VM 让新模块加载，确认 `nvidia-smi` 正常后再走 §5.3。
+> 装完先跑 `nvidia-smi`。如果报 `Driver/library version mismatch`，说明 apt 或 `apt-daily-upgrade.timer` 把用户态驱动升到了新版本，但内核模块还是旧版；不要继续装 k3s/device plugin，先重启 VM 让新模块加载，确认 `nvidia-smi` 正常后再走 §5.3。
 >
 > 如果你已经先装了 k3s，装完 toolkit 后执行 `sudo systemctl restart k3s`；还没装就继续 §5.3，k3s 启动时会自己探测。
 >
@@ -1531,7 +1571,7 @@ D2 后账户余额约 `$18.78`；D3 单卡 VM 3h 约 `$1.3`，2 卡 4h 约 `$3.7
 | Pod 被 SIGKILL | `terminationGracePeriodSeconds` < `preStop + shutdown-timeout` | 120 > 15 + 90 + 15 |
 | CPU limit 掐住 tokenizer | cgroup throttling | 提高/去掉 CPU limit，观察 TTFT |
 | `hostPath` 权限不对 | 容器非 root / 目录属主 | 统一 UID，或 initContainer `chown` |
-| 新 Pod 报 `failed to initialize NVML: Driver/library version mismatch` | `unattended-upgrades` / apt 把 NVIDIA 用户态驱动升级了，内核模块还是旧版 | `nvidia-smi` 也会报同样错；先等 apt/dpkg 结束，停掉自动升级，重启 VM 加载新模块，确认 `nvidia-smi` 正常再继续 |
+| 新 Pod 报 `failed to initialize NVML: Driver/library version mismatch` | `apt-daily-upgrade.timer` 补跑 `unattended-upgrade`，升级了 NVIDIA 用户态驱动，内核模块还是旧版 | `nvidia-smi` 也会报同样错；先等 apt/dpkg 结束，`disable --now` + `mask` apt timers，重启 VM 加载新模块，确认 `nvidia-smi` 正常再继续 |
 
 ---
 
