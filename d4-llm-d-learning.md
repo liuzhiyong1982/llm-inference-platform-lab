@@ -1,6 +1,6 @@
 # D4 学习文档：llm-d 前缀感知路由（2×L4）
 
-> 状态：**planned（2026-11-24）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×L4、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP 的 P99、留下命中率数字和 B 线故障表**。文档、manifest、benchmark 脚本已就绪，**尚未租 VM 执行**；所有“实测”表都是待填模板。
+> 状态：**planned（2026-11-24）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×L4、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP 的 P99、留下命中率数字和 B 线故障表**；同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout、API）。文档、manifest、benchmark 脚本已就绪，**尚未租 VM 执行**；所有“实测”表都是待填模板。
 >
 > 计划位置：`ai-cloud-native-week-plan.md` 的 **D4（llm-d 日）** 与 **Q2（Gateway/路由）**；B 线学习表见该文件 §3，llm-d 四问见 §6。
 >
@@ -37,6 +37,9 @@
 | B 线：Gateway/`InferencePool`/EPP 运维图 + 路由故障表 | §7 | 图 + 表 |
 | 方法学必须一起写 | §6.4 | 样本、warmup、重复、开环/闭环、SLO、单价、货币 |
 | llm-d 四问 | §8 | EPP / InferencePool / PD / wide EP |
+| 核心 feature 全景 | §1.4 + 附录 A | 19 项覆盖矩阵；D 档能讲清“何时用/不用” |
+
+> 这只是 D4 主实验的验收；llm-d 的其余核心 feature 用 §1.4 的覆盖矩阵和附录 A 的决策/蓝图覆盖，不额外租卡。
 
 ### 1.2 D4 不做什么
 
@@ -45,7 +48,7 @@
 - **不读 production-stack**：它是给已有集群的人看的；D3/D4 已经够用。
 - **不把 10 条 Well-Lit Path 都看一遍**：只跑 precise；optimized baseline 只作为 fallback。
 - **不在 vLLM quickstart 没跑通时碰 llm-d**：本 lab 的模型服务器就是 vLLM 的最小验证。
-- **不跑 PD 分离、wide EP、多模型**：只看概念，不进验收。
+- **不跑 PD 分离、wide EP、多模型**：只看概念，不进验收；附录 A 给“什么时候值得/不划算”和最小实验蓝图。
 - **不装生产 Gateway**（Istio / Envoy Gateway / agentgateway）：D4 用 standalone + `InferencePool` 足够；Gateway Mode 只给 YAML 和面试讲法。
 - **不在 `uat-mobility-aks-01` 上跑任何东西**。
 
@@ -62,6 +65,47 @@ D4 不是从零开始，它直接用 D3 的集群和结论：
 | 单卡 1→2 Pending | D4 用 2 张卡，两个副本各 1 张；不测 Pending |
 
 > 换句话说：D3 证明“副本能起来、能扩、能优雅退出”；D4 证明“多副本时请求该去哪一个”。两者不是重复实验。
+
+### 1.4 llm-d 核心 feature 覆盖矩阵
+
+D4 的“cover”分四档，避免把“读过”说成“跑过”：
+
+| 标记 | 含义 |
+|---|---|
+| **H** | Hands-on：动手跑过，有配置/数字 |
+| **C** | Config-ready：manifest/values 已就绪，未跑 |
+| **D** | Decision：能讲清是什么、何时用/不用、怎么观测，但 D4 不跑 |
+| **O** | Out of scope：明确不在 D4 范围 |
+
+| # | 核心 feature | D4 档位 | 位置 |
+|---|---|---|---|
+| 1 | `InferencePool` / EPP / Envoy 数据面 | **H** | §5、§7 |
+| 2 | precise prefix-cache routing（KV events + render） | **H** | §5、§6 |
+| 3 | optimized baseline（近似 prefix + token load） | **C** | §5.10 |
+| 4 | KV events / KV index / `active_subscribers` | **H** | §5.4、§5.6 |
+| 5 | load-aware scoring（token-load / active-request） | **H/C** | §5.1、`values-precise.yaml` |
+| 6 | FailOpen / FailClose / 健康检查 | **H** | §7.3 |
+| 7 | Gateway Mode / HTTPRoute | **C** | §7.6 |
+| 8 | 多模型 / 多租户路由 | **D** | §7.2、§7.6、附录 A.4 |
+| 9 | PD 分离（prefill/decode pools + NIXL） | **D** + 可选蓝图 | §8 Q3、附录 A.2 |
+| 10 | wide EP / MoE（DP/EP + DeepEP） | **D** | §8 Q4、附录 A.3 |
+| 11 | flow control / fairness / priority / `InferenceObjective` | **D** + YAML | 附录 A.4 |
+| 12 | tiered prefix cache（HBM→CPU/FS） | **D** | 附录 A.5 |
+| 13 | P2P KV cache sharing（NIXL peer pull） | **D** | 附录 A.5 |
+| 14 | autoscaling（KEDA + EPP metrics） | **D**；Lab 0 的 KEDA 0→1 是 **H** | 附录 A.6、§4 |
+| 15 | batch / async serving | **D** | 附录 A.6 |
+| 16 | rollouts / zero-downtime / 模型生命周期 | **D**；D3 的优雅退出是 **H** | 附录 A.7、D3 §9 |
+| 17 | observability / tracing | **H**（metrics）/ **D**（tracing） | 附录 A.8 |
+| 18 | API surface（chat / messages / responses / multimodal） | **D** | 附录 A.9 |
+| 19 | predicted-latency routing（latency predictor） | **D** | 附录 A.1 |
+
+**怎么读这张表：**
+
+- D4 的**主实验**覆盖 llm-d 的 **routing + KV 核心**（1–6），这是相对普通 Service 的真正差异点；
+- PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout 以 **D 档**覆盖：能讲清、能给决策、能给最小实验蓝图，但不假装跑过；
+- 这样面试时既不会被“你只会 prefix routing”卡住，也不会被“你 PD 的 KV 带宽多少”问穿。
+
+> 附录 A 是这 19 项里 D 档内容的展开；主实验仍按 §5–§6 执行，不额外租卡。
 
 ---
 
@@ -1225,6 +1269,8 @@ scp root@<host>:/results/* results/d4/
 - [ ] P99 表 + 命中率表 + 每 Pod 分布 + `d4-ttft.png`；
 - [ ] 故障表至少跑 EPP FailOpen；时间够再跑 FailClose / render 404；
 - [ ] B 线运维图 + 10 分钟讲法；
+- [ ] §1.4 的 19 项核心 feature 至少到 D 档：每项能说清“是什么/何时不用/关键指标”；
+- [ ] 附录 A 的 PD/wide EP/flow control/tiered/P2P/autoscaling/batch/rollout/API 每项能讲 1 分钟；
 - [ ] `results/d4/` 提交 + push；VM Destroy；成本记录。
 
 ### 10.4 结果目录
@@ -1293,6 +1339,8 @@ results/d4/
 
 **砍单顺序**：Lab 0 → random arm 的第 2/3 轮 → FailClose/render 404 故障 → 校准（改 gate=100000 并注明）。**不要砍**：direct vs precise、cache reset、EPP subscribers、P99 表。
 
+> **核心 feature 阅读**：§1.4 + 附录 A 约 45–60 min，建议在租 VM 前读完，不占 4h 主实验。时间不够时优先 A.2（PD）、A.4（flow control）、A.5（tiered/P2P），其余实验后补。
+
 ### 10.6 B 线简历 bullet（执行后填，选 1–2 条）
 
 - 在 2×L4 上用 llm-d 1.0 / Gateway API Inference Extension 部署 precise prefix-cache routing：对比 Service round-robin，TTFT P99 从 `____ ms` 降到 `____ ms`（`__%`），加权 prefix hit rate 从 `__%` 升到 `__%`；用 EPP random 控制组分离路由算法与代理固定开销。
@@ -1300,11 +1348,208 @@ results/d4/
 
 ---
 
-## 11. Sources
+## 11. 附录：llm-d 核心 feature 全景
+
+> 这一节把 §1.4 的 **D 档**展开：每个 feature 给“是什么、何时用/不用、D4 怎么覆盖、面试一句话”。它不是 4h 主实验，不额外租卡，也不写假数字。
+
+### 11.1 Routing + KV：D4 已经动手的部分
+
+- **`InferencePool`**：声明“哪些 Pod 是同一个模型的副本、目标端口、EPP 是谁、failureMode”。它替代不了 Service，而是给 Gateway/Envoy 一个推理专用的 backend 契约。
+- **EPP**：解析请求、tokenize/render、查 KV 索引、过滤/打分、选 Pod；通过 ext_proc 告诉 Envoy 把请求发到哪。
+- **precise prefix routing**：vLLM 用 ZMQ 上报 KV block 事件，EPP 建精确索引；请求先 `POST /v1/*/render` 拿 token IDs，再查索引。
+- **optimized baseline**：不依赖 KV events，用请求流量/前缀 hash 近似估计；部署简单，但命中率不如 precise。D4 把它作为 fallback。
+- **关键指标**：`vllm:prefix_cache_hits_total/queries_total`、`llm_d_epp_kv_cache_events_active_subscribers`、`llm_d_epp_kv_cache_index_lookup_*`、`llm_d_epp_prefix_predicted_cached_tokens_sum/prefix_prompt_tokens_sum`、`llm_d_epp_plugin_duration_seconds`。
+- **predicted-latency routing（D 档）**：EPP 也可以用 latency predictor 预测 TTFT/TPOT，按 SLO 选副本；它需要训练/预测 server 和历史样本，D4 不跑。2 副本 + 固定 workload 用不上；面试能说清“它和 prefix routing 是两个信号，可以叠加”即可。
+- **面试一句话**：“EPP 不是更快的 round-robin，它把请求送到已经持有这段前缀 KV 的副本；代价是每请求一次 tokenize/render 和索引查询。”
+
+### 11.2 PD 分离（Prefill/Decode Disaggregation）
+
+**是什么：** 把推理拆成两个池：prefill 池只算 prompt 的 KV，decode 池通过 NIXL 把 KV 拉过去、只做自回归生成。两个池属于同一个 `InferencePool`，router 每个请求调度两次（一次 prefill、一次 decode）。它和 prefix routing 不是二选一：prefill 池仍然可以做 prefix-affinity。
+
+**llm-d 1.0 的实际要求：**
+
+| 项 | 官方默认 |
+|---|---|
+| 模型 | `openai/gpt-oss-120b` |
+| 拓扑 | 1 个 prefill pod（TP=1）+ 1 个 decode pod（TP=4） |
+| GPU | **5 张**（最小完整 P/D 路径） |
+| 编排 | LeaderWorkerSet 的 `DisaggregatedSet`（`enableDisaggregatedSet=true`） |
+| KV 传输 | NIXL；TCP 能跑，生产推荐 RDMA/InfiniBand/RoCE |
+| 关键指标 | prefill `request_success_total`（以 `max_tokens=1` 跑）、decode `external_prefix_cache_hits_total`、EPP `llm_d_epp_disagg_decision_total` |
+
+**什么时候值得：**
+
+| 条件 | 说明 |
+|---|---|
+| prompt 很长（通常 4k–8k+） | prefill 占比高，拆池的收益才明显 |
+| 高并发、P:D 比例可独立扩缩 | prefill 和 decode 的最优配比不同，能分别加副本 |
+| KV 传输够快 | NVLink / RDMA / 同机高带宽；TCP 跨节点会吃掉收益 |
+| 有第二个 GPU 池 | 至少能让 prefill/decode 各自有副本 |
+
+**什么时候不划算：**
+
+- 低并发、短 prompt、小模型：decode 占大头，拆池只是多一跳；
+- 只有 2 张卡：1P1D 没有复制、没有池内路由、没有 HA，测出来的是玩具；
+- KV 传输慢：搬 KV 的时间 > 重算 prefill；
+- 没有第二个池：PD 的“独立扩缩”根本用不上。
+
+**D4 怎么覆盖：**
+
+- §8 Q3 给“什么时候不划算”的面试口径；
+- 本节给完整拓扑、指标和决策表；
+- **不跑**：guide 默认 5 GPU，2×L4 只能 1P1D；会破坏 D4 的“多副本 prefix routing”对照，且 gpt-oss-120b 放不下。
+
+**如果要真跑，单独排一个 lab（不是 D4 的 4h）：**
+
+```text
+4×L4（2P + 2D，每池 2 副本、TP=1）
+  + LWS DisaggregatedSet
+  + NIXL over TCP（L4 无 NVLink；这就是要量的问题）
+  + Qwen3-8B-AWQ
+对比：
+  colocated 4 副本 vs PD 2P+2D
+  c=8/16/32，同 SLO
+记录：
+  TTFT、TPOT、goodput、KV transfer bytes/s、每 1M token 成本
+预算：
+  6–8h，约 $5–8
+```
+
+> L4 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×L4 上硬跑 1P1D 更有价值。
+
+**面试一句话：** “PD 的收益来自 prefill 和 decode 的 resource profile 不同；没有长 prompt、高并发、快 KV 传输和第二个池，拆池只会增加复杂度和空闲。”
+
+### 11.3 Wide EP / MoE
+
+**是什么：** 面向 MoE 的专家并行：单机放不下全部专家时，把专家切到多机/多卡，用 DP/EP + DeepEP 做 all-to-all，用 NIXL 搬 KV。llm-d 的默认 wide-EP guide 是 `DeepSeek-R1-0528`、32×H200、prefill DP16 + decode DP16、每角色 2 节点，要求 full-mesh RDMA。
+
+**何时用：** MoE 模型单机放不下、需要跨节点 EP、吞吐优先；**何时不用：** dense 8B、2×L4、没有 RDMA、低并发。
+
+**D4 怎么覆盖：** §8 Q4 + 本节；不跑。2×L4 连 dense 8B 的 EP 都不需要，更不用说 32×H200 的 DeepEP。
+
+**面试一句话：** “TP 切层、PP 切阶段、EP 切专家；wide EP 解决 MoE 单机放不下，不是解决路由。”
+
+### 11.4 Flow control / fairness / 多租户
+
+**是什么：** EPP 在把请求放到后端之前，先在网关层排队/准入：`featureGates: [flowControl]`、priority bands、fairness policy、FCFS ordering、saturation detector。`InferenceObjective`（`llm-d.ai/v1`）给一个模型 workload 定义 priority 和 pool 目标；负 priority 表示可丢弃。
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: InferenceObjective
+metadata:
+  name: premium-traffic
+spec:
+  priority: 100
+  poolRefs:
+    - name: d4-router
+```
+
+> `InferenceObjective` 只是“声明优先级”；要真正排队，还要在 EPP 配置里开 `featureGates: [flowControl]`，并实例化 `fcfs-ordering-policy`、`global-strict-fairness-policy` 等插件。不要只抄这一张 YAML 就以为 flow control 生效。
+
+**何时用：** 多租户、premium vs batch、noisy neighbor、SLO 保护；**何时不用：** 单租户、低负载、请求都能立刻被接住——排队只会增加延迟。
+
+**D4 怎么覆盖：** D 档 + 上面的 YAML；§7.2 讲多租户隔离；D5 用 Kueue 做 GPU 配额。**不跑**：flow control 需要多个优先级客户端和持续过载，和 D4 的“同 workload 只改路由”冲突；EPP 单副本的 queue 状态也不适合做 HA 结论。
+
+**面试一句话：** “flow control 解决的是‘谁先被服务、谁可以被丢’，不是‘副本够不够’；配额在 Kueue，准入在 Kyverno，排队/公平在 EPP。”
+
+### 11.5 Tiered prefix cache / P2P KV sharing
+
+**Tiered prefix cache：** HBM 里的 KV 被驱逐后不丢，落到 CPU RAM，必要时再落到共享文件系统；请求复用时从 CPU/FS 拉回，而不是重算。vLLM 用 `OffloadingConnector`（`--kv-transfer-config`），router 增加 CPU tier 的 prefix index（`cpu-prefix-cache-producer`、`lruCapacityPerServer`）。默认参考是 Qwen3-32B、2 副本 × TP=2（4 GPU）、每副本 300GiB CPU tier。
+
+关键指标：
+
+```text
+vllm:kv_offload_store_bytes_total
+vllm:kv_offload_load_bytes_total
+vllm:external_prefix_cache_hits_total / queries_total
+llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
+```
+
+**P2P KV sharing：** 一个 Pod 直接从另一个 Pod 的 CPU tier 拉前缀 KV（NIXL，端口 7777），不经过共享文件系统。要求所有 peer 的 `--block-size`、`PYTHONHASHSEED`、TP layout 一致；`minCachedTokenDelta` 要校准。默认参考是 2×gpt-oss-120b、TP=1、每 Pod 88GiB CPU tier；guide 标记为 experimental/community。
+
+**何时用：** 长共享前缀、多轮/agentic、HBM 压力大、CPU RAM 富余；**何时不用：** 短 prompt、缓存本来就能全放 HBM、CPU RAM 不够、没有快传输。
+
+**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered/P2P 是 D 档。2×L4 只有 64GB RAM 和 24GB HBM，P2P 的默认模型也放不下；不跑。
+
+**面试一句话：** “tiered 是单 Pod 的 HBM→CPU/FS 扩展，P2P 是跨 Pod 从 peer 的 CPU tier 拉；两者都只在‘前缀复用 + HBM 不够’时才划算。”
+
+### 11.6 Autoscaling / batch / async
+
+**Autoscaling：** llm-d 1.0 推荐 **KEDA + EPP metrics**：按 queue depth、pool saturation、token backlog、estimated latency vs SLO 扩模型服务器；KEDA 直接创建/拥有 HPA，不需要 Prometheus Adapter。scale-to-zero 支持，但 LLM 冷启动让同步 chat 基本不可用。WVA（Workload Variant Autoscaler）已 deprecated。
+
+**D4 怎么覆盖：** D3 + Lab 0 已经动手验证 KEDA 0→1 和队列信号；D4 主实验固定 c=16、最多 2 张卡，没有 scale-out 空间，所以不跑 llm-d autoscaling。
+
+**Batch/async：** llm-d 的 async processor 面向离线/批处理，用队列 + priority，不保 TTFT SLO；D4 不跑。
+
+**面试一句话：** “GPU 推理的扩缩信号不是 CPU，是队列/饱和/token backlog/SLO；冷启动让 scale-to-zero 只适合异步或可接受等待的场景。”
+
+### 11.7 Rollouts / zero-downtime / 模型生命周期
+
+**是什么：** `DisaggregatedSet` 把 prefill/decode 两个角色作为一个版本滚动；LWS 管多 Pod 组；配合 `preStop`、drain、`maxUnavailable/maxSurge`、PDB 做零停机。模型版本用独立权重目录 + Deployment revision 回滚。
+
+**D4 怎么覆盖：** D3 Lab 4 已经动手量了 `preStop`/`--shutdown-timeout`/grace 的驱逐行为（H 档）；D4 只讲 llm-d 的 `DisaggregatedSet` 和 rollout 语义（D 档）。2×L4 没有空闲 GPU 做 surge，所以不跑 llm-d 零停机。
+
+**面试一句话：** “零停机的必要条件是‘有地方起新副本’；2 张卡跑 2 副本时，滚动更新只能接受一个副本短暂不可用，或者加第 3 张卡。”
+
+### 11.8 Observability / tracing
+
+- **EPP `/metrics`（9090）**：`llm_d_epp_request_total`、`llm_d_epp_plugin_duration_seconds`、`llm_d_epp_kv_cache_events_*`、`llm_d_epp_kv_cache_index_lookup_*`、`llm_d_epp_disagg_decision_total`、`llm_d_epp_prefix_indexer_*`；flow control 的 queue/fairness 指标以实际 `/metrics` 为准。
+- **vLLM `/metrics`**：`prefix_cache_hits/queries`、`num_requests_waiting`、`kv_cache_usage_perc`、TTFT/ITL、`external_prefix_cache_hits`（tiered/P2P/PD）。
+- **Tracing**：OTel collector + router `tracing.values.yaml`；span 覆盖 tokenize、index lookup；KV event tracing 默认关，避免事件量淹没请求 trace。
+- **D4**：metrics 是 H 档；tracing 是 D 档（不装 collector）。
+
+**面试一句话：** “先看 EPP 的 routing 指标，再看 vLLM 的 queue/cache 指标；两边趋势不一致，通常是索引不完整或 render 失败。”
+
+### 11.9 API surface / multimodal
+
+- llm-d router 支持 OpenAI 兼容的 `/v1/completions`、`/v1/chat/completions`、Anthropic `/v1/messages`、`/v1/responses`；precise routing 的 `token-producer` 会按 API 调对应的 `/v1/*/render`。
+- `InferenceModelRewrite`（`llm-d.ai/v1alpha2`）：按请求里的 `model` 做加权 rewrite，用于 A/B、canary、流量切分；`poolRef` + `rules[].matches.model` + `targets[].modelRewrite/weight`。D4 不跑，但面试要能说清“它是改请求里的 model 名，不是改路由算法”。
+- 多模态/Omni 有独立 Well-Lit Path；D4 只用 `/v1/completions`，不测 chat/messages/responses/multimodal。
+- **面试一句话：** “API 兼容不是路由的全部；不同 API 的 render/tokenizer 路径不同，precise routing 要保证 token IDs 和 engine 一致。”
+
+### 11.10 核心 feature 验收清单
+
+- [ ] 能画出 `client → Envoy → EPP → InferencePool → vLLM` 的请求路径；
+- [ ] 能解释 precise vs optimized，以及 KV events/render/block size 的对齐；
+- [ ] 能解释 PD 的 5-GPU 默认拓扑、NIXL、何时不划算；
+- [ ] 能解释 wide EP 的 DP/EP/DeepEP，以及为什么 2×L4 不跑；
+- [ ] 能解释 flow control 的 priority band/fairness/saturation，以及 `InferenceObjective`；
+- [ ] 能解释 tiered vs P2P，以及各自的关键指标；
+- [ ] 能解释 KEDA + EPP 的四种扩缩信号，以及为什么 CPU HPA 是错的；
+- [ ] 能解释 `DisaggregatedSet`/rollout/零停机的容量前提；
+- [ ] 每个 feature 能接住“什么时候不划算”的追问。
+
+### 11.11 如果要把 D 档变成 hands-on：最小机器与预算
+
+| feature | 最小可行拓扑 | 时间 | 预算 | 建议 |
+|---|---|---|---|---|
+| PD | 4×L4，2P + 2D，TP=1 | 6–8h | $5–8 | 单独 D4.5/Q2；不要在 2×L4 上做 1P1D |
+| wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
+| flow control | 2×L4 + 两类客户端（premium/batch） | 3–4h | ~$3 | D5/Q2 扩展 |
+| tiered prefix cache | 2×L4，64GB RAM，CPU tier | 3–4h | ~$3 | 可选；先量 HBM 命中率 |
+| P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；L4 上默认模型放不下 |
+| autoscaling | 4×L4（2→4 副本） | 3h | ~$4 | Q2；D3 已有 0→1/1→2 基础 |
+| rollout / 零停机 | 3–4×L4（留 surge） | 2h | ~$2 | D3 §9 的扩展 |
+| multi-model Gateway | 4×L4（2 模型 × 2 副本） | 3–4h | ~$4 | Q2；需要 Gateway controller |
+
+> 这张表是“如果要动手”的成本，不是 D4 的 4h 计划。D4 的 4h 只做 routing/KV 主实验；其余先做到 D 档，面试够用，预算留给 Q2 的 PD/chargeback。
+
+---
+
+## 12. Sources
 
 - llm-d Quickstart：<https://llm-d.ai/docs/getting-started/quickstart>
 - llm-d Optimized Baseline：<https://llm-d.ai/docs/well-lit-paths/foundations/optimized-baseline>
 - llm-d Precise Prefix-Cache Aware Routing：<https://llm-d.ai/docs/well-lit-paths/foundations/precise-prefix-cache-routing>
+- llm-d PD Disaggregation：<https://llm-d.ai/docs/well-lit-paths/foundations/pd-disaggregation>
+- llm-d Tiered Prefix Cache：<https://llm-d.ai/docs/well-lit-paths/foundations/tiered-prefix-cache>
+- llm-d P2P KV Cache Sharing：<https://llm-d.ai/docs/well-lit-paths/foundations/enable-p2p-prefix-cache-sharing>
+- llm-d Wide Expert Parallelism：<https://llm-d.ai/docs/well-lit-paths/foundations/wide-expert-parallelism>
+- llm-d Predicted Latency Routing：<https://llm-d.ai/docs/well-lit-paths/foundations/predicted-latency>
+- llm-d Flow Control：<https://llm-d.ai/docs/architecture/router/flow-control>
+- llm-d Autoscaling：<https://llm-d.ai/docs/architecture/autoscaling>
+- llm-d InferenceObjective API：<https://llm-d.ai/docs/api-reference/inferenceobjective>
+- llm-d InferenceModelRewrite API：<https://llm-d.ai/docs/api-reference/inferencemodelrewrite>
 - llm-d InferencePool API：<https://llm-d.ai/docs/api-reference/inferencepool>
 - llm-d EPP Configuration：<https://llm-d.ai/docs/architecture/router/configuration>
 - llm-d Router Proxy（standalone / gateway）：<https://llm-d.ai/docs/architecture/router/proxy>

@@ -349,7 +349,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 
 > D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行：§7 冷启动、§8 KEDA/1→2、§9 驱逐；实付约 `$4.00`）；D3 直接用 Vast RTX VM（你已在上面跑过 k8s），租借命令见该文档 §5.0。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
 >
-> D4 的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按本行准备，**未执行**）：4h、2×L4、llm-d `v1.0.0` precise prefix-cache routing；主对比是 Service round-robin vs EPP，EPP random 作为控制组；2×L4 上模型改为 Qwen3-8B-AWQ、TP=1、2 副本，`peakPrefillThroughput` 需重测。可执行 manifest/脚本在 `scripts/d4/`。
+> D4 的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按本行准备，**未执行**）：4h、2×L4、llm-d `v1.0.0` precise prefix-cache routing；主对比是 Service round-robin vs EPP，EPP random 作为控制组；2×L4 上模型改为 Qwen3-8B-AWQ、TP=1、2 副本，`peakPrefillThroughput` 需重测。文档 §1.4 + 附录 A 另给 llm-d 核心 feature 覆盖矩阵（PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout、API），D 档为概念/决策，不额外租卡。可执行 manifest/脚本在 `scripts/d4/`。
 
 ### D3 / D5 的 B 线讲法
 
