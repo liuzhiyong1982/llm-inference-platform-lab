@@ -1352,15 +1352,71 @@ kubectl run bench --rm -it --restart=Never \
     --dataset-name random \
     --random-input-len 1024 \
     --random-output-len 256 \
-    --num-prompts 300 \
-    --max-concurrency 64 \
+    --num-prompts 600 \
+    --max-concurrency 128 \
     --ignore-eos \
     --temperature 0 \
     --percentile-metrics ttft,tpot,itl,e2el \
     --metric-percentiles 50,95,99
 ```
 
-> bench Pod 没有挂 hostPath，`--tokenizer Qwen/Qwen3-8B` 会从 HF 拉 tokenizer（几十 MB）。离线集群要改成挂 `/var/lib/models` 并用 `--tokenizer /models/Qwen3-8B-AWQ-v1`（与 Deployment 的 `MODEL_PATH` 一致）；`-it` 只适合交互终端，脚本里去掉。
+> bench Pod 没有挂 hostPath，`--tokenizer Qwen/Qwen3-8B` 会从 HF 拉 tokenizer（几十 MB）。离线集群要改成挂 `/var/lib/models` 并用 `--tokenizer /models/Qwen3-8B-AWQ`（与当前 Deployment 的 `MODEL_PATH` 一致）；`-it` 只适合交互终端，脚本里去掉。
+
+#### 8.4.1 为什么这条压测会触发 KEDA
+
+不是 `vllm bench` 直接调用 KEDA，也不是 KEDA 在监听某个 bench flag。触发链是：
+
+```text
+vllm bench --max-concurrency 128
+  → 同一时刻最多 128 个 HTTP 请求打到 Service
+  → 1 个 vLLM 副本，--max-num-seqs 64
+  → 64 条进入 running batch，其余在 engine 队列里等
+  → vLLM 暴露 vllm:num_requests_waiting（gauge，>0）
+  → Prometheus 每 5s scrape 一次（ServiceMonitor interval: 5s）
+  → KEDA operator 每 15s 查一次 sum(vllm:num_requests_waiting)
+  → 结果 > threshold 8
+  → KEDA 更新 external metric s0-prometheus
+  → HPA 下一次 sync（默认 15s）算出 desiredReplicas > 1
+  → Deployment 创建第二个 Pod
+  → 新 Pod Ready 前队列继续堆积；Ready 后 Service 把请求分到两个 Pod
+```
+
+关键点：
+
+- **`--max-concurrency` 是压测客户端侧的并发数**，KEDA 完全看不到它；它只是用来制造“等待请求”。
+- **真正触发 KEDA 的是 `vllm:num_requests_waiting`**：vLLM 的 engine 队列里等待调度的请求数，是一个 gauge。
+- vLLM 的 `--max-num-seqs 64` 是每个副本的 running batch 上限。128 个并发请求进来，64 条在跑，其余在等，所以队列很容易超过 `threshold: 8`。
+- `--num-prompts` 决定总共发多少请求。如果请求数不够（例如只发 300 个），会在新 Pod Ready 前就跑完，队列掉下去，HPA 可能还没完成扩容；所以命令里用 `600`，必要时加到 `1000`。
+- `--random-output-len 256` + `--ignore-eos` 让每个请求有足够的 decode 工作，队列不会瞬间排空；`--random-input-len 1024` 影响 prefill 工作量，但不是触发器。
+- `--temperature 0` 只为可复现，`--percentile-metrics` 只影响 bench 输出，都和 KEDA 无关。
+
+各 flag 在触发链里的角色：
+
+| flag | 在触发链里的作用 |
+|---|---|
+| `--max-concurrency 128` | **关键**：并发请求数 > `max-num-seqs 64`，制造 waiting 队列 |
+| `--num-prompts 600` | 压测持续时间；太小会在第二个 Pod Ready 前结束 |
+| `--random-input-len 1024` | 每个请求的 prefill 工作量；影响 running batch 占用 |
+| `--random-output-len 256` + `--ignore-eos` | 每个请求的 decode 工作量；让队列维持到扩容完成 |
+| `--temperature 0` | 不影响触发，只保证可复现 |
+| `--percentile-metrics` / `--metric-percentiles` | 只影响 bench 统计输出，不参与 KEDA |
+
+**为什么 `--max-concurrency 64` 不够：** 它和 `--max-num-seqs 64` 相等，64 个请求可能全部被 engine 接走，`num_requests_waiting` 接近 0，KEDA 不会触发。要用 128 或更高，让 running batch 满、其余排队。如果你把 vLLM 的 `--max-num-seqs` 调大，压测并发也要相应调大。
+
+压测期间确认队列：
+
+```bash
+kubectl -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090:9090 \
+  >/tmp/pf.log 2>&1 &
+sleep 3
+curl -sG http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=sum(vllm:num_requests_waiting)' | jq .
+kill %1
+```
+
+`value` 超过 `8`，再看 `kubectl get hpa -w` 的 `REPLICAS` 是否从 1 变 2。如果队列一直 0，说明并发不够或压测已经结束；如果队列 >8 但 HPA 不动，去查 KEDA/ScaledObject（§8.3.4）。
+
+> 这是扩容实验，不是吞吐基线；TTFT/P99 变差不代表模型有问题。目标是让 `sum(vllm:num_requests_waiting) > 8` 并维持到第二个 Pod Ready。
 
 同时观察：
 
