@@ -1540,19 +1540,45 @@ kubectl get pods -w
 kubectl get pods -l app=vllm
 ```
 
-Pod 缩到 0 后，直接请求 Service：
+Pod 缩到 0 后，先确认 Service 没有 endpoint：
 
 ```bash
-kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl --command -- \
-  curl -sS -m 10 http://vllm-qwen3-8b:8000/v1/models
-# 预期：connection refused / 无 endpoint / 超时
+kubectl get endpoints vllm-qwen3-8b
+# ENDPOINTS 应该是 <none>
 ```
 
-然后发一个请求触发扩容，测“从请求到第一个 token”：
+再发请求（这就是“发一个请求”的命令）：
 
-- KEDA 只负责把副本从 0 拉到 1，**不负责排队**；请求在 Pod 起来之前就失败了。
-- 如果要“请求不丢”，需要 KEDA HTTP add-on 之类的 interceptor 先接住请求，或者网关排队；对 LLM 还要再加几十秒冷启动。
-- 结论：chat 场景用 `minReplicaCount: 1` + 预热池；scale-to-zero 只给异步/批处理。
+```bash
+kubectl run curl-trigger --rm -it --restart=Never \
+  --image=curlimages/curl --command -- \
+  curl -v -m 30 -X POST http://vllm-qwen3-8b:8000/v1/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"qwen3-8b","prompt":"hello","max_tokens":16,"temperature":0}'
+```
+
+预期：`connection refused` / `no route to host` / 超时。请求到不了 vLLM，也到不了 KEDA。
+
+**关键：这条请求不会触发扩容。** 当前 ScaledObject 用的是 `sum(vllm:num_requests_waiting)`，这个指标由 vLLM Pod 暴露；副本为 0 时没有 Pod、没有 `/metrics`、没有这条序列，KEDA 没有信号。Service 也没有 endpoint 可以排队，请求直接失败。
+
+所以“发一个请求触发扩容”只在有 **interceptor / 队列** 时成立：
+
+- KEDA HTTP add-on 的 interceptor 先接住请求、计数并等待，再触发 0→1；
+- 或者外部队列（Redis/Kafka）先存消息，KEDA 用队列深度触发。
+
+D3 没有装这些组件，直接 curl 只能得到“0 副本时请求失败”的负结果；这本身就是要写进结论的：**chat 场景不要 scale-to-zero，除非前面有能缓冲请求的网关。**
+
+如果只是想测 0→1 的冷启动，可以手工把 `minReplicaCount` 改回 1（这不是 request-driven，报告里要注明）：
+
+```bash
+kubectl patch scaledobject vllm-scaler --type merge -p '{"spec":{"minReplicaCount":1}}'
+kubectl get pods -w
+# 记录 created → Ready；测完再改回 0
+```
+
+请求失败和手工 0→1 的冷启动要分开写，不要混成“KEDA 被请求触发”。
+
+结论：chat 场景用 `minReplicaCount: 1` + 预热池；scale-to-zero 只给异步/批处理，而且前面要有 HTTP add-on 或队列接住请求。
 
 ---
 
