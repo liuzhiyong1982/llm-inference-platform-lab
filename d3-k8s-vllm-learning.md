@@ -1605,6 +1605,8 @@ kubectl get pods -w
 
 结论：chat 场景用 `minReplicaCount: 1` + 预热池；scale-to-zero 只给异步/批处理，而且前面要有 HTTP add-on 或队列接住请求。
 
+> D4 的完整 request-driven 0→1 见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md) Lab 0：KEDA HTTP Add-on 的 `InterceptorRoute` + `external-push` ScaledObject。
+
 ---
 
 ## 9. Lab 4：驱逐与优雅退出

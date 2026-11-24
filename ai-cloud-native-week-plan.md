@@ -527,6 +527,8 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | 5 | [PD Disaggregation](https://llm-d.ai/docs/well-lit-paths/foundations/pd-disaggregation) | 30 min，**只看不跑** | 需要两个池才跑得动；你只要读懂"什么时候不划算" |
 | 6 | [KAITO docs](https://kaito-project.github.io/kaito/docs/)[30] | 20 min | 你集群里已经装了 KAITO——知道它和 llm-d 的关系，面试能接住追问 |
 
+> **D4 Lab 0（前置）：** request-driven 0→1 用 KEDA HTTP Add-on，见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)。它解决“0 副本时请求怎么进来”，llm-d 解决“多副本时按 prefix cache 怎么路由”；两者不是同一个问题。
+
 > **B 线视角：** llm-d 不只是路由算法，也是一个平台组件。D4 除了 P99，还要带走：Gateway API/`InferencePool`/EPP 的部署与健康检查、路由指标（命中率/5xx）、故障模式（EPP 挂了、后端不健康）。产出见 §3 的 B 线学习表。
 
 **不要做的三件事：** 不要一上来读 production-stack（给已有集群的人看的）；不要把 10 条 path 都看一遍（一条就够）；不要在 vLLM quickstart 没跑通时去碰 llm-d。

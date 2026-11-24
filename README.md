@@ -153,4 +153,6 @@ c=8 是纯量化对比：FP16 比 AWQ 慢 **36.8%**，TPOT P95 高 **60.6%**，g
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
 
-D3（k3s + vLLM Deployment、冷启动、KEDA）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（draft，未执行）。
+D3（k3s + vLLM Deployment、冷启动、KEDA）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（执行中：§7 冷启动与 §8 KEDA/1→2 已跑，§9 待执行）。
+
+D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（draft；Lab 0 用 KEDA HTTP Add-on 演示 0→1，llm-d 主实验待补）。
