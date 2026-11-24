@@ -96,13 +96,21 @@ A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/�
 - **A 线：** SGLang/RadixAttention、TP/多卡、DCGM + Grafana + OTel、TensorRT-LLM/Triton 选型；
 - **B 线：** KServe/OpenShift AI、Kubeflow/Ray/MLflow、Argo CD、GPU Operator/MIG/DRA、Vault/OPA/NetworkPolicy、OpenCost、RAG/MCP。
 
-完整证据、覆盖矩阵和最小补法见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)。原则：**不把 D1–D5 撑爆**，用加挂 lab 补；每季度只加 1–2 个。
+完整证据、覆盖矩阵和最小补法见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)。原则：**不把 D1–D5 撑爆**，用加挂 lab 补；每个季度按依赖放 1–3 个 P0，P1 按余力再加。
 
-| 季度 | 建议加挂（按优先级） | 验收 |
-|---|---|---|
-| Q1 | SGLang（D2.5）+ DCGM/Grafana/OTel（D4.7）+ KServe（D3.5） | 1 张 vLLM/SGLang 对比表 + 1 张 Grafana 图 + 1 个 `InferenceService` |
-| Q2 | TP=2（D2.6）+ flow control（D4.8）+ Argo CD/OpenCost（D3.6） | TP=1 vs TP=2 表 + 优先级表 + GitOps 回滚 + 成本表 |
-| Q3 | 安全（D5.5）+ MLflow/Kubeflow slice（D3.7）+ RAG/MCP | 2 条拒绝日志 + secret 注入 + 1 个受控 RAG 服务 |
+**P0 按依赖关系分配（不是按“哪个季度看起来空”分配）：**
+
+| 季度 | P0 | 关联的现有 artifact | 为什么放这里 | 验收 |
+|---|---|---|---|---|
+| Q1 | **P0-1 SGLang**（D2.5） | D2 | 引擎对照必须复用 D2 的同一模型、同一 workload、同一指标；隔一个季度再跑，控制变量会丢 | 1 张 vLLM vs SGLang 表 + 1 句选型结论 |
+| Q1 | **P0-3a DCGM + Grafana** | D1/D3 | D3 已经装了 Prometheus，补 exporter/dashboard 成本最低；这一半不需要 D4 | 1 张 GPU + vLLM dashboard |
+| Q1 | **P0-4 KServe**（D3.5） | D3 | 用 D3 的 raw Deployment 做 control，正好形成“裸 Deployment vs KServe”的 B 线基线 | 1 个 `InferenceService` + 冷启动/P99 对比 |
+| Q2 | **P0-2 TP=2**（D2.6） | D4.5 | 先有 TP 的通信/显存概念，再跑 2P+2D；否则 PD 的变量和 TP 混在一起，结论不干净 | TP=1 vs TP=2 表 |
+| Q2 | **P0-3b OTel + EPP trace**（D4.7） | D4 | 只有 D4 有 EPP/Envoy；trace 要覆盖“网关→EPP→vLLM”，放在 D4 之后才有对象 | 1 条 EPP→vLLM trace |
+| Q2 | **P0-5 Argo CD + OpenCost**（D3.6） | D3/D4 + chargeback | GitOps 要部署 D4 的 manifest；OpenCost 直接服务 Q2 的 chargeback，不另开一条线 | 1 次 GitOps 回滚 + namespace 成本表 |
+| Q3 | **P0-6 Vault/OPA/NetworkPolicy**（D5.5） | D5 | 安全策略要建在 Kueue/Kyverno 的 namespace/配额之上；先有配额，再谈准入和隔离 | 2 条拒绝日志 + 1 个 secret 注入 + 1 条 NetworkPolicy |
+
+> **P1/P2 不排进 gate。** flow control、TensorRT-LLM/Triton、MLflow/Kubeflow slice、RAG/MCP 都是“有余力再加”的加分项；它们不改变上面 6 个 P0 的验收。不要为了 P1 把 P0 的季度挤掉。
 
 **季度 gate（不再按 12/14 周倒排）：**
 
