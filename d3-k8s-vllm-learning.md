@@ -252,6 +252,15 @@ vastai search offers -n \
 >
 > 2 卡路径：把 `num_gpus=1` 改成 `num_gpus=2`，`--disk` 加到 160；单卡是主路径，2 卡只用来测真实扩容曲线。
 
+```bash
+# 2 卡 VM（单价含 160GB 盘）
+vastai search offers -n \
+  'num_gpus=2 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=160 inet_down>=500 reliability>=0.99 cpu_ram>=64' \
+  -o 'dph' --storage 160 --limit 15
+```
+
+> **选 host 时避开 `country=CN` 和 `status=deverified`。** VM 模板镜像在 Docker Hub（`docker.io/vastai/kvm`），CN host 拉镜像可能十几分钟都起不来；优先 `verified`、`R >= 0.99`、`Net_down >= 500`。2026-11-24 实测 2×5090 的 machine `69146`（CN、deverified）13 分钟仍 `actual_status=null`、SSH 拒绝，只能 destroy。
+
 **2）创建 VM：**
 
 ```bash
