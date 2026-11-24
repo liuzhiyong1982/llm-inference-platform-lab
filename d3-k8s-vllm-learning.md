@@ -1580,12 +1580,18 @@ kubectl run curl-trigger --rm -it --restart=Never \
 
 **关键：这条请求不会触发扩容。** 当前 ScaledObject 用的是 `sum(vllm:num_requests_waiting)`，这个指标由 vLLM Pod 暴露；副本为 0 时没有 Pod、没有 `/metrics`、没有这条序列，KEDA 没有信号。Service 也没有 endpoint 可以排队，请求直接失败。
 
-所以“发一个请求触发扩容”只在有 **interceptor / 队列** 时成立：
+所以“发一个请求触发扩容”只在有 **interceptor / 队列** 时成立。
 
-- KEDA HTTP add-on 的 interceptor 先接住请求、计数并等待，再触发 0→1；
-- 或者外部队列（Redis/Kafka）先存消息，KEDA 用队列深度触发。
+**需要 Knative 吗？不需要。** Knative 是另一条完整的 serverless 路线，不是 KEDA HTTP add-on 的前置条件。可选路线：
 
-D3 没有装这些组件，直接 curl 只能得到“0 副本时请求失败”的负结果；这本身就是要写进结论的：**chat 场景不要 scale-to-zero，除非前面有能缓冲请求的网关。**
+| 方案 | 0 副本时谁接住请求 | 触发信号 | 适合 | 代价 |
+|---|---|---|---|---|
+| KEDA HTTP add-on | interceptor | HTTP 请求数/并发 | 同步 HTTP，想继续用 KEDA | 多一套 interceptor/operator；客户端要等冷启动 |
+| Knative Serving | activator | 请求并发 | 完整 serverless | 更重：Serving/Kourier/autoscaler 等；它自己就能 0→1，通常不再让 KEDA 管这个 HTTP 服务 |
+| 外部队列（Redis/Kafka/SQS） | broker | 队列深度 | 异步/批处理 | 请求必须异步，不能同步返回 |
+| `minReplicaCount: 1` | 不需要 | 无 | chat/低延迟 | 一直占一张 GPU |
+
+D3 不装任何一套：直接 curl 只能得到“0 副本时请求失败”的负结果；这本身就是要写进结论的：**chat 场景不要 scale-to-zero，除非前面有能缓冲请求的网关。**
 
 如果只是想测 0→1 的冷启动，可以手工把 `minReplicaCount` 改回 1（这不是 request-driven，报告里要注明）：
 
