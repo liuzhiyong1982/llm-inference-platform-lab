@@ -1,6 +1,6 @@
 # D3 学习文档：k3s + vLLM 的冷启动、扩缩容与驱逐
 
-> 状态：**draft（2026-11-23），尚未执行**。执行后把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
+> 状态：**执行中（2026-11-24）**。§5–§6 已完成；§7 warm 已测，cold 与 §8–§9 待执行。后续把实测数字补进 §7–§9、§16，并在 README 增加 D3 结果小节。
 >
 > 计划中的位置：`ai-cloud-native-week-plan.md` §4 Q1 的 **B 线 artifact**；B 线讲法见该文件 §3「D3 / D5 的 B 线讲法」。执行后同时回填该文件 §5 的“三个 B 线数”。
 >
@@ -795,12 +795,29 @@ B 线 JD 里的“模型交付”不只有冷启动，还有回滚。最小做�
   Qwen3-8B-AWQ-v2/   # 新版本
 ```
 
-把 §6.2 的 `args` 第一项改成 `$(MODEL_PATH)`，并加环境变量：
+把 §6.2 的 `args` 第一项和 initContainer 的缓存检查都改成 `$(MODEL_PATH)` / `$MODEL_PATH`：
 
 ```yaml
 spec:
   template:
     spec:
+      initContainers:
+      - name: fetch-weights
+        env:
+        - name: HF_XET_HIGH_PERFORMANCE
+          value: "1"
+        - name: MODEL_PATH
+          value: /models/Qwen3-8B-AWQ-v1
+        args:
+        - |
+          set -eu
+          if [ -f "$MODEL_PATH/config.json" ] && \
+             find "$MODEL_PATH" -maxdepth 1 -name '*.safetensors' | grep -q .; then
+            echo "weights cached"
+            exit 0
+          fi
+          python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-8B-AWQ', local_dir='$MODEL_PATH')"
+        # 其余 image / command / volumeMounts 省略
       containers:
       - name: vllm
         env:
@@ -811,7 +828,9 @@ spec:
         # 其余 args / image / resources 省略
 ```
 
-> 主实验 §6.2 用的是字面路径 `/models/Qwen3-8B-AWQ`；做本节前先把 `args` 第一项改成 `$(MODEL_PATH)` 并加上面的 `env`，重新 `kubectl apply`。否则 `kubectl set env` 只改环境变量，模型路径不会变。
+> **initContainer 必须和主容器共用 `MODEL_PATH`。** 只改主容器 `args` 的话，initContainer 仍检查 `/models/Qwen3-8B-AWQ`，会打印 `weights cached` 但完全没校验实际服务的 `-v1` 目录；§7 的 cold 删除 `-v1` 后也不会触发重新下载，vLLM 直接启动失败。`snapshot_download` 那段用双引号包 Python 代码、里面用单引号，`$MODEL_PATH` 才会被 shell 展开。
+>
+> 主实验 §6.2 用的是字面路径 `/models/Qwen3-8B-AWQ`；做本节前先把上面的改动 `kubectl apply`，否则 `kubectl set env` 只改环境变量，模型路径不会变。
 
 发布/回滚：
 
@@ -840,7 +859,7 @@ kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 
 | 场景 | 镜像 | 权重 | 目的 |
 |---|---|---|---|
-| **cold** | 已缓存 | 删除 `/var/lib/models/Qwen3-8B-AWQ` | 权重下载 + 模型加载 + 引擎初始化，最接近“新节点” |
+| **cold** | 已缓存 | 删除当前 `MODEL_PATH` 对应的宿主机目录 | 权重下载 + 模型加载 + 引擎初始化，最接近“新节点” |
 | **warm** | 已缓存 | 保留 | 只测模型加载 + 引擎初始化 |
 | **image-cold**（可选） | `sudo k3s crictl rmi docker.io/vllm/vllm-openai:v0.34.0` 删除镜像 | 保留 | 单独测镜像拉取 |
 
@@ -857,13 +876,25 @@ kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 kubectl rollout restart deploy/vllm-qwen3-8b
 kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 
-# cold：先缩到 0，等 Pod 真正退出，再删缓存
+# cold：先缩到 0，等 Pod 真正退出，再删当前 MODEL_PATH 指向的宿主机目录
 kubectl scale deploy/vllm-qwen3-8b --replicas=0
 kubectl wait --for=delete pod -l app=vllm --timeout=180s
-sudo rm -rf /var/lib/models/Qwen3-8B-AWQ
+
+MODEL_DIR=$(kubectl get deploy vllm-qwen3-8b \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MODEL_PATH")].value}')
+MODEL_DIR=${MODEL_DIR:-/models/Qwen3-8B-AWQ}
+case "$MODEL_DIR" in
+  /models/*) HOST_DIR="/var/lib/models/${MODEL_DIR#/models/}" ;;
+  *) echo "unexpected MODEL_PATH: $MODEL_DIR" >&2; exit 1 ;;
+esac
+echo "deleting $HOST_DIR"
+sudo rm -rf "$HOST_DIR"
+
 kubectl scale deploy/vllm-qwen3-8b --replicas=1
 kubectl rollout status deploy/vllm-qwen3-8b --timeout=30m
 ```
+
+> 删之前先看 `echo "deleting $HOST_DIR"` 打的是不是当前服务的版本目录。initContainer 没和主容器共用 `MODEL_PATH` 时，`weights cached` 会骗你：删了正在服务的目录也不会重新下载。
 
 ### 7.3 分阶段拆解
 
@@ -881,19 +912,25 @@ kubectl get pod "$pod" -o json | jq -r '
 '
 ```
 
-如果 initContainer 使用了和主容器相同的 vLLM 镜像，`init_start - scheduled` 主要就是镜像拉取；`init_end - init_start` 是权重下载；`ready - main_start` 是模型加载 + 引擎初始化。
+如果 initContainer 使用了和主容器相同的 vLLM 镜像，`init_start - scheduled` 主要是镜像拉取和容器创建；镜像已缓存时（event 里是 `already present`）只剩 pause/容器创建开销。`init_end - init_start` 是权重下载；`ready - main_start` 是模型加载 + 引擎初始化。
 
 > 你的 manifest 里 initContainer 是“检查缓存，不存在才下载”。为了测 cold，必须确保 `rm -rf` 之后 initContainer 真的走了下载分支；看 `kubectl logs "$pod" -c fetch-weights`。
 
-### 7.4 记录模板
+### 7.4 记录与实测
+
+机器：`2×RTX 4090 24GB / driver 580.95.05 / power limit 450W / k3s v1.37.2+k3s1 / $0.8524/h`（2026-11-24，machine `20876`）。
 
 | 场景 | 调度 (s) | 镜像 (s) | 权重下载 (s) | 模型加载+引擎 (s) | 总到 Ready (s) |
 |---|---|---|---|---|---|
 | cold | | | | | |
-| warm | | | | | |
+| warm（2026-11-24） | 0 | 2 | 0 | 83 | 86 |
 | image-cold（可选） | | | | | |
 
-> 表头下面先记一行机器信息：`GPU 型号 / driver / power limit / k3s 版本 / VM 单价`。RTX 3090/4090 的加载速度、功耗和 L4 不同，没有这行，数字不可复核。
+> warm 原始时间点：`created=16:45:59Z` → `scheduled=16:45:59Z` → `init_start=16:46:01Z` → `init_end=16:46:01Z`（`weights cached`）→ `main_start=16:46:02Z` → `ready=16:47:25Z`。镜像已在节点上（event `Container image ... already present`），所以“镜像 2s”是 pause/容器创建开销，不是拉取；init 结束到主容器启动还有 1s 未单列，故 0+2+0+83=85，总时间 86s。
+>
+> warm 的 83s 内部：vLLM banner `16:46:12Z`；`Loading model from scratch` `16:46:36Z`；torch.compile `16:46:43Z`→`16:47:10Z`（27.23s）；engine init 共 41.01s；`GPU KV cache size: 101,376 tokens`（8192 上下文最大并发 12.38x）；`Application startup complete` `16:47:24Z`；Ready `16:47:25Z`。
+>
+> 这次实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`，`weights cached` 并没有校验 `-v1`。§6.5 已改成两者共用 `MODEL_PATH`；跑 cold 前先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
 
 归因规则：
 
@@ -1024,7 +1061,7 @@ kubectl run bench --rm -it --restart=Never \
     --metric-percentiles 50,95,99
 ```
 
-> bench Pod 没有挂 hostPath，`--tokenizer Qwen/Qwen3-8B` 会从 HF 拉 tokenizer（几十 MB）。离线集群要改成挂 `/var/lib/models` 并用 `--tokenizer /models/Qwen3-8B-AWQ`；`-it` 只适合交互终端，脚本里去掉。
+> bench Pod 没有挂 hostPath，`--tokenizer Qwen/Qwen3-8B` 会从 HF 拉 tokenizer（几十 MB）。离线集群要改成挂 `/var/lib/models` 并用 `--tokenizer /models/Qwen3-8B-AWQ-v1`（与 Deployment 的 `MODEL_PATH` 一致）；`-it` 只适合交互终端，脚本里去掉。
 
 同时观察：
 
@@ -1368,7 +1405,8 @@ kubectl delete namespace keda monitoring --ignore-not-found
 sudo /usr/local/bin/k3s-uninstall.sh
 
 # 目的：权重缓存按需删除；下次重下约 5.7GB
-sudo rm -rf /var/lib/models/Qwen3-8B-AWQ
+# 目录名以模型版本为准（如 Qwen3-8B-AWQ-v1/-v2）
+sudo rm -rf /var/lib/models/Qwen3-8B-AWQ /var/lib/models/Qwen3-8B-AWQ-v1 /var/lib/models/Qwen3-8B-AWQ-v2
 
 # 目的：确认没有残留 GPU 进程/实例
 nvidia-smi
