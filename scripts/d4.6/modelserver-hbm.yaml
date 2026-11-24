@@ -1,0 +1,129 @@
+# D4.6 HBM-only 控制组：和 tiered 同样的 2×L4 / 模型 / gpu-memory-utilization，
+# 只是不挂 OffloadingConnector，不启用 CPU tier。
+#
+# 用法：
+#   kubectl apply -n d46 -f scripts/d4.6/modelserver-hbm.yaml
+#
+# 两个 arm 不能同时跑：2 张卡只能放一个 arm 的 2 个副本。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-hbm
+  labels:
+    app: vllm-hbm
+    llm-d.ai/guide: tiered-prefix-cache
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: vllm-hbm
+  template:
+    metadata:
+      labels:
+        app: vllm-hbm
+        llm-d.ai/guide: tiered-prefix-cache
+        llm-d.ai/model: qwen3-8b
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.34.0
+          imagePullPolicy: IfNotPresent
+          command: ["vllm", "serve"]
+          args:
+            - "/models/Qwen3-8B-AWQ"
+            - "--served-model-name=qwen3-8b"
+            - "--max-model-len=8192"
+            - "--gpu-memory-utilization=0.60"
+            - "--max-num-seqs=64"
+            - "--max-num-batched-tokens=4096"
+            - "--block-size=64"
+            - "--enable-prefix-caching"
+            - "--shutdown-timeout=45"
+            - "--disable-log-requests"
+          env:
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DO_NOT_TRACK
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
+          resources:
+            requests:
+              cpu: "2"
+              memory: 10Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /.cache
+            - name: triton
+              mountPath: /.triton
+      volumes:
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: cache
+          emptyDir: {}
+        - name: triton
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-hbm
+  labels:
+    app: vllm-hbm
+spec:
+  selector:
+    app: vllm-hbm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

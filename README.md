@@ -159,3 +159,5 @@ D3（k3s + vLLM Deployment、冷启动、KEDA、驱逐）的学习文档见 [`d3
 D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按计划准备，**未执行**；4h、2×L4、llm-d 1.0 precise prefix routing vs Service round-robin；§1.4 + 附录 A 覆盖 llm-d 核心 feature，脚本见 `scripts/d4/`）。
 
 D4.5（可选，Q2）：PD 分离 2P+2D，4×L4，6–8h，目标 ≤$8；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（未执行；先完成 D4 且余额 ≥ $8）。
+
+D4.6（可选，T1-C）：tiered KV cache，2×L4，3–4h，约 $3–4；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；和 D4.5 二选一先做）。

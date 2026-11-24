@@ -32,7 +32,7 @@
 |---|---|---|
 | 4h、2×L4 | §3、§10.5 | 时间盒 + 资源规划 |
 | 按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline） | §5 | 可执行步骤 + fallback |
-| 同一批“共享长前缀”的请求，对比普通 round-robin vs EPP 的 P99 | §6 | 3 个 arm、固定 workload、JSON |
+| 同一批“共享长前缀”的请求，对比普通 round-robin vs EPP 的 P99 | §6 | 4 个 arm（T0 optimized + T1 precise）、固定 workload、JSON |
 | 一张 P99 对比图 + 命中率数字 | §6.6、§6.8 | `d4-ttft.png` + hit rate 表 |
 | B 线：Gateway/`InferencePool`/EPP 运维图 + 路由故障表 | §7 | 图 + 表 |
 | 方法学必须一起写 | §6.4 | 样本、warmup、重复、开环/闭环、SLO、单价、货币 |
@@ -81,16 +81,16 @@ D4 的“cover”分四档，避免把“读过”说成“跑过”：
 |---|---|---|---|
 | 1 | `InferencePool` / EPP / Envoy 数据面 | **H** | §5、§7 |
 | 2 | precise prefix-cache routing（KV events + render） | **H** | §5、§6 |
-| 3 | optimized baseline（近似 prefix + token load） | **C** | §5.10 |
+| 3 | optimized baseline（近似 prefix + token load） | **H** | §5.10、§6 |
 | 4 | KV events / KV index / `active_subscribers` | **H** | §5.4、§5.6 |
 | 5 | load-aware scoring（token-load / active-request） | **H/C** | §5.1、`values-precise.yaml` |
 | 6 | FailOpen / FailClose / 健康检查 | **H** | §7.3 |
 | 7 | Gateway Mode / HTTPRoute | **C** | §7.6 |
 | 8 | 多模型 / 多租户路由 | **D** | §7.2、§7.6、附录 A.4 |
-| 9 | PD 分离（prefill/decode pools + NIXL） | **D** + 可选蓝图 | §8 Q3、附录 A.2 |
+| 9 | PD 分离（prefill/decode pools + NIXL） | **D + D4.5** | §8 Q3、[`d4.5-pd-lab.md`](./d4.5-pd-lab.md) |
 | 10 | wide EP / MoE（DP/EP + DeepEP） | **D** | §8 Q4、附录 A.3 |
 | 11 | flow control / fairness / priority / `InferenceObjective` | **D** + YAML | 附录 A.4 |
-| 12 | tiered prefix cache（HBM→CPU/FS） | **D** | 附录 A.5 |
+| 12 | tiered prefix cache（HBM→CPU/FS） | **D + D4.6** | 附录 A.5、[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md) |
 | 13 | P2P KV cache sharing（NIXL peer pull） | **D** | 附录 A.5 |
 | 14 | autoscaling（KEDA + EPP metrics） | **D**；Lab 0 的 KEDA 0→1 是 **H** | 附录 A.6、§4 |
 | 15 | batch / async serving | **D** | 附录 A.6 |
@@ -101,11 +101,26 @@ D4 的“cover”分四档，避免把“读过”说成“跑过”：
 
 **怎么读这张表：**
 
-- D4 的**主实验**覆盖 llm-d 的 **routing + KV 核心**（1–6），这是相对普通 Service 的真正差异点；
-- PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout 以 **D 档**覆盖：能讲清、能给决策、能给最小实验蓝图，但不假装跑过；
+- D4 的**主实验**覆盖 **T0（optimized baseline + EPP/InferencePool）** 和 **T1-A（precise prefix routing）**，这是市场采用信号最强的一层；
+- **T1-B（PD）** 在 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)，**T1-C（tiered KV）** 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；两个都是独立 lab，不塞进 4h；
+- wide EP、flow control、P2P、autoscaling、batch、rollout 以 **D 档**覆盖：能讲清、能给决策、能给最小实验蓝图，但不假装跑过；
 - 这样面试时既不会被“你只会 prefix routing”卡住，也不会被“你 PD 的 KV 带宽多少”问穿。
 
 > 附录 A 是这 19 项里 D 档内容的展开；主实验仍按 §5–§6 执行，不额外租卡。
+
+### 1.5 T0 / T1 覆盖计划（按市场调研）
+
+市场调研里 T0 = 入口级、T1 = 大规模生产主力。D4 用“一个 4h 主实验 + 两个独立 lab”覆盖：
+
+| 层级 | Feature | 在哪做 | 时间/预算 | 产出 |
+|---|---|---|---|---|
+| **T0** | optimized baseline（approx prefix + token load） | **D4 第 4 个 arm** | 4h 内 | 1–3 轮 JSON；和 precise 对比 |
+| **T0** | EPP / `InferencePool` / Gateway API Inference Extension | **D4 主实验 + §7** | 4h 内 | 运维图 + 故障表 |
+| **T1** | precise prefix-cache routing | **D4 主实验** | 4h 内 | P99 + hit rate |
+| **T1** | PD 分离 | **D4.5** | 6–8h / ≤$8 | PD 2P+2D vs colocated 4 副本 |
+| **T1** | tiered KV cache / offload | **D4.6** | 3–4h / ~$3 | tiered vs HBM-only；`kv_offload_*` 证据 |
+
+> **为什么 T1 不都塞进 D4 的 4h：** T0 是“装一个 router 就能量”的入口；T1 的 PD 要第二个池 + NIXL，tiered 要 CPU tier + 额外内存。它们各自是独立拓扑/资源实验，塞进 4h 会把 D4 的“只改路由”变量弄脏。D4 的 4h 只做 T0 + T1-A；T1-B/C 单独排，但属于同一个学习计划。
 
 ---
 
@@ -741,9 +756,14 @@ kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
 
 `random-picker` 和 precise 走同一条 Envoy + EPP 路径，只是忽略 cache/score；它用来回答：“P99 的改善是路由算法带来的，还是因为多了一跳 EPP？” 如果时间只够两组，跑 direct vs precise，random 作为加分项。
 
-### 5.10 Fallback：optimized baseline
+### 5.10 optimized baseline：T0 arm + fallback
 
-如果 precise 的 render/KV events 在当前 vLLM 版本跑不通，用 `values-optimized.yaml`：
+`values-optimized.yaml` 有两个用途：
+
+1. **T0 市场默认 arm**：在 §6 里作为第 4 个 arm 跑 1–3 轮，回答“大多数团队用的 optimized baseline，和 precise 差多少”；
+2. **fallback**：precise 的 render/KV events 跑不通时，用它完成 round-robin vs EPP 的对比。
+
+切换命令：
 
 ```bash
 helm upgrade d4-router \
@@ -755,21 +775,26 @@ helm upgrade d4-router \
 
 它用 `approx-prefix-cache-producer`，不需要 `--enable-scale-out` 和 KV events；仍然能对比 round-robin vs EPP 的 P99 和命中率，只是“前缀位置”是估计的。结果里必须写清楚是 **optimized baseline，不是 precise**。
 
+> **公平性：** `optimized` 和 `precise` 要用同一个 `peakPrefillThroughput`。如果你在 §5.8 校准了 precise，把 `${LAB}/scripts/d4/values-optimized.yaml` 也改成同一个值；否则 T0 vs T1 的差异会混入 saturation gate 的差异。
+
 如果模型服务器本身就是因为 `--enable-scale-out` / `--kv-events-config` 起不来，先把 `scripts/d4/modelserver.yaml` 里的这两段删掉，再 `kubectl apply`；optimized baseline 不需要它们。
 
 ---
 
 ## 6. 压测设计
 
-### 6.1 三个 arm
+### 6.1 四个 arm
 
 | arm | URL | 说明 | 优先级 |
 |---|---|---|---|
 | `direct` | `http://vllm-direct:8000/v1/completions` | 普通 Service；K8s per-connection 选择，不是严格轮询；用 `FORCE_CLOSE=1` 让每个请求新建连接 | **P0** |
-| `precise` | `http://d4-router-epp/v1/completions` | llm-d precise prefix routing | **P0** |
-| `random` | `http://d4-router-epp/v1/completions` | 同一 EPP/Envoy 路径，`random-picker`；隔离固定开销 | P1 |
+| `precise` | `http://d4-router-epp/v1/completions` | llm-d precise prefix routing（T1-A） | **P0** |
+| `optimized` | `http://d4-router-epp/v1/completions` | llm-d optimized baseline（approx prefix + token load，T0）；市场默认入口 | P1 |
+| `random` | `http://d4-router-epp/v1/completions` | 同一 EPP/Envoy 路径，`random-picker`；隔离固定开销 | P2 |
 
-主对比是 `direct` vs `precise`（计划要求）；`random` 是控制组，用来说明“不是 EPP 本身变快/变慢”。
+- **主对比**：`direct` vs `precise`（计划要求，各 3 轮）。
+- **T0 参考**：`optimized` 至少 1 轮，时间够 3 轮；回答“市场默认的 approx baseline 和 precise 差多少”。
+- **控制组**：`random` 至少 1 轮，时间不够可砍；它只用来判断“P99 改善是不是 EPP/Envoy 的固定开销”。
 
 ### 6.2 Workload
 
@@ -783,11 +808,11 @@ helm upgrade d4-router \
 | suffix words | 80 | 每轮新增约 100 tokens，模拟多轮对话 |
 | max tokens | 128 | 固定输出长度；`ignore_eos=true` |
 | concurrency | 16 | 闭环；足以制造排队，又不会把 L4 打到完全过载 |
-| seed | 42 | 请求顺序固定，三个 arm 相同 |
+| seed | 42 | 请求顺序固定，四个 arm 相同 |
 
 请求顺序：每个 turn 内把 32 个 session 打乱；同一 session 的连续 turn 被其他 session 隔开。这样 random 路由会在 turn 之间丢失 session 的 prefix，而 precise 可以保持。
 
-> 对话历史里的 assistant 回复是**固定文本**，不是模型真实输出。这样三个 arm 的 prompt 完全一致，避免自回归内容把变量引进来；代价是它不完全等同真实多轮 chat，但足以测路由对 prefix cache 的影响。
+> 对话历史里的 assistant 回复是**固定文本**，不是模型真实输出。这样四个 arm 的 prompt 完全一致，避免自回归内容把变量引进来；代价是它不完全等同真实多轮 chat，但足以测路由对 prefix cache 的影响。
 
 **为什么不用 `vllm bench serve --dataset-name prefix_repetition`？** 它也能测 prefix caching，但请求顺序是“一个前缀的请求连在一起”，random 路由只要前两条把两个 Pod 都预热，后面就都命中；对“多轮 session 被交错”的场景不够敏感。本 lab 用 `scripts/d4/bench_prefix.py` 控制交错顺序。
 
@@ -818,16 +843,16 @@ hit_rate = Δvllm:prefix_cache_hits_total / Δvllm:prefix_cache_queries_total
 ### 6.4 方法学（必须一起写）
 
 - **闭环**：16 并发，固定 128 条请求；不是开环固定 QPS。
-- **样本数**：128 请求/轮；3 轮/arm；报中位数和范围。
+- **样本数**：128 请求/轮；`direct` / `precise` 各 3 轮；`optimized` 至少 1 轮（时间够 3 轮）；`random` 至少 1 轮（可砍）。
 - **warmup**：每轮前 4 条 `max_tokens=1` 的 warmup；脚本 warmup 后 reset prefix cache；precise arm 在启动脚本前重启 EPP，让索引从空开始。
-- **重复**：3 轮，顺序 `direct → random → precise` 或反过来；如果 GPU 热节流明显，记录 `nvidia-smi` 的 clock/power。
-- **同机同模型**：三个 arm 用同一对 vLLM Pod、同一 `max-model-len`、同一 `max-num-seqs`、同一输出长度。
+- **重复**：主对比 3 轮，顺序 `direct → optimized → precise`（或反过来）；如果 GPU 热节流明显，记录 `nvidia-smi` 的 clock/power。
+- **同机同模型**：四个 arm 用同一对 vLLM Pod、同一 `max-model-len`、同一 `max-num-seqs`、同一输出长度。
 - **cache 状态**：每轮开始前 `POST /reset_prefix_cache` 到两个 Pod；precise arm 重启 EPP。否则上一轮的热缓存会让结果不可比。
 - **货币/单价**：USD；Vast 实时 `$/h`；记录 GPU 型号、power limit、driver。
 - **GPU 采样**：`nvidia-smi --query-gpu=utilization.gpu,power.draw,clocks.sm --format=csv -l 5` 另开一个终端记录；util 只作解释，不作 SLO。
 - **不要**：把 direct 的 per-connection 随机说成“严格 round-robin”；把 EPP 的固定开销算成 prefix routing 的收益；把不同模型/不同卡的数字混在一起。
 
-### 6.5 跑三组
+### 6.5 跑四组
 
 先把脚本打进 ConfigMap（回到 lab 仓库根目录）：
 
@@ -867,17 +892,33 @@ kubectl wait --for=condition=Ready pod/d4-bench -n d4 --timeout=120s
 kubectl logs -f d4-bench -n d4
 ```
 
-`direct` arm 把 `URL` 换成 `http://vllm-direct:8000/v1/completions`，`FORCE_CLOSE=1`。`random` arm 先把 router 切到 `values-random.yaml`，`URL` 保持 `http://d4-router-epp/v1/completions`。
+`direct` arm 把 `URL` 换成 `http://vllm-direct:8000/v1/completions`，`FORCE_CLOSE=1`。
+
+`optimized` arm 先把 router 切到 `values-optimized.yaml`，再按上面的命令跑，`ARM="optimized"`：
+
+```bash
+cd "${LAB}/llm-d"
+helm upgrade d4-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+  -n d4 --version v1.0.0 \
+  -f guides/recipes/router/base.values.yaml \
+  -f "${LAB}/scripts/d4/values-optimized.yaml"
+kubectl rollout restart deploy/d4-router-epp -n d4
+kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+```
+
+`random` arm 先把 router 切到 `values-random.yaml`，`URL` 保持 `http://d4-router-epp/v1/completions`，`ARM="random"`。
 
 每轮开始前，脚本会自动对 `POD_URLS` 发 `POST /reset_prefix_cache`；如果返回 404/405，手动重启两个 Pod，或在结果里注明“cache reset 不可用，轮次之间可能有残留”。
 
 ### 6.6 结果模板
 
-**客户端汇总**（每 arm 3 轮，表中填中位数，括号内范围）：
+**客户端汇总**（`direct` / `precise` 3 轮；`optimized` 1–3 轮；`random` 1–3 轮，填中位数/范围）：
 
 | arm | 轮次 | ok | TTFT P50 (ms) | TTFT P95 | TTFT P99 | TPOT P95 | E2E P99 | output tok/s | goodput (req/s) |
 |---|---|---|---|---|---|---|---|---|---|
 | direct | 3 | | | | | | | | |
+| optimized | 1–3 | | | | | | | | |
 | random | 1–3 | | | | | | | | |
 | precise | 3 | | | | | | | | |
 
@@ -886,21 +927,23 @@ kubectl logs -f d4-bench -n d4
 | arm | Pod A requests | Pod B requests | Pod A hit rate | Pod B hit rate | 加权 hit rate | EPP predicted cached share |
 |---|---|---|---|---|---|---|
 | direct | | | | | | n/a |
+| optimized | | | | | | n/a（approx） |
 | random | | | | | | n/a |
 | precise | | | | | | |
 
-**P99 对比图**：把三份 JSON 交给 `plot_d4.py`（没有跑 random 就删掉那一个文件）：
+**P99 对比图**：把四份 JSON 交给 `plot_d4.py`（没跑 random 就删掉那一个文件）：
 
 ```bash
 cd "${LAB}"
 python3 scripts/d4/plot_d4.py \
-  /results/direct-run1.json /results/random-run1.json /results/precise-run1.json \
+  /results/direct-run1.json /results/optimized-run1.json \
+  /results/random-run1.json /results/precise-run1.json \
   --out /results/d4-ttft.png
 ```
 
 **一句话归因模板**：
 
-> 在同一对 L4、同一模型、同一 128 条共享前缀请求下，EPP precise 把 TTFT P99 从 `____ ms` 降到 `____ ms`（`__%`），加权 prefix hit rate 从 `__%` 升到 `__%`；代价是 EPP `____ ms` 的固定开销（用 random arm 对比），以及 single-EPP 的可用性风险。
+> 在同一对 L4、同一模型、同一 128 条共享前缀请求下，市场默认的 optimized baseline（approx prefix + token load）TTFT P99 是 `____ ms`，precise 是 `____ ms`（`__%`），direct 是 `____ ms`；precise 的加权 prefix hit rate 从 optimized 的 `__%` 升到 `__%`。代价是 EPP `____ ms` 的固定开销（用 random arm 对比），以及 single-EPP 的可用性风险。
 
 ### 6.7 怎么判读
 
@@ -908,7 +951,8 @@ python3 scripts/d4/plot_d4.py \
 
 - 同一 session 的 4 轮请求集中到一个 Pod；另一个 Pod 只分到少量 session；
 - 该 Pod 的 prefix hit rate 高（每轮第 2–4 条请求复用第 1 条的前缀）；
-- TTFT P99 比 direct/random 低；output tok/s 可能略高（少做重复 prefill），也可能持平；
+- TTFT P99 比 direct 低；**也应该比 optimized 低或至少不差**——optimized 是市场默认，如果 precise 连 optimized 都赢不了，说明 KV events/render 的额外成本没有换来命中率；
+- output tok/s 可能略高（少做重复 prefill），也可能持平；
 - EPP 的 predicted cached share 与 vLLM 的实际 hit rate 趋势一致。
 
 **如果没有差异**：
@@ -1264,7 +1308,7 @@ scp root@<host>:/results/* results/d4/
 - [ ] `InferencePool` + EPP + Envoy Ready；`d4-router-epp:80` 可访问；
 - [ ] smoke test：同一前缀集中到一个 Pod，hit rate 明显高于另一个；
 - [ ] `peakPrefillThroughput` 已校准（或明确写“gate 关闭”）；
-- [ ] `direct` / `precise` 各 3 轮；`random` 至少 1 轮（时间够就 3 轮）；
+- [ ] `direct` / `precise` 各 3 轮；`optimized` 至少 1 轮（时间够 3 轮）；`random` 至少 1 轮（可砍）；
 - [ ] 每轮前 reset cache；precise 每轮前重启 EPP；
 - [ ] P99 表 + 命中率表 + 每 Pod 分布 + `d4-ttft.png`；
 - [ ] 故障表至少跑 EPP FailOpen；时间够再跑 FailClose / render 404；
@@ -1333,11 +1377,12 @@ results/d4/
 | 0:30–1:15 | 部署 2×vLLM；验证 `/v1/models`、render、KV events | 2 Pod Running |
 | 1:15–1:45 | 装 GAIE CRD + router；验证 InferencePool/EPP | EPP Ready，subscribers=2 |
 | 1:45–2:15 | smoke test；校准 `peakPrefillThroughput` | 集中路由 + 校准值 |
-| 2:15–3:15 | 跑 direct/precise（random 可选），每轮 reset | 6–9 份 JSON |
-| 3:15–3:45 | 采样 metrics、画图、写表 | P99 图 + 命中率 |
-| 3:45–4:00 | 故障测试（至少 FailOpen）、清理、scp | 故障表 + 成本 |
+| 2:15–3:10 | 跑 direct/precise 各 3 轮，每轮 reset | 6 份 JSON |
+| 3:10–3:30 | 切 optimized，跑 1–2 轮 | 1–2 份 JSON（T0 参考） |
+| 3:30–3:50 | 采样 metrics、画图、写表 | P99 图 + 命中率 |
+| 3:50–4:05 | 故障测试（至少 FailOpen）、清理、scp | 故障表 + 成本 |
 
-**砍单顺序**：Lab 0 → random arm 的第 2/3 轮 → FailClose/render 404 故障 → 校准（改 gate=100000 并注明）。**不要砍**：direct vs precise、cache reset、EPP subscribers、P99 表。
+**砍单顺序**：Lab 0 → random arm（整组）→ optimized 的第 2/3 轮 → FailClose/render 404 故障 → 校准（改 gate=100000 并注明）。**不要砍**：direct vs precise、optimized 至少 1 轮、cache reset、EPP subscribers、P99 表。
 
 > **核心 feature 阅读**：§1.4 + 附录 A 约 45–60 min，建议在租 VM 前读完，不占 4h 主实验。时间不够时优先 A.2（PD）、A.4（flow control）、A.5（tiered/P2P），其余实验后补。
 
@@ -1469,7 +1514,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 **何时用：** 长共享前缀、多轮/agentic、HBM 压力大、CPU RAM 富余；**何时不用：** 短 prompt、缓存本来就能全放 HBM、CPU RAM 不够、没有快传输。
 
-**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered/P2P 是 D 档。2×L4 只有 64GB RAM 和 24GB HBM，P2P 的默认模型也放不下；不跑。
+**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×L4，96GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×L4 的 HBM 24GB + host RAM 有限，P2P 的默认模型也放不下。
 
 **面试一句话：** “tiered 是单 Pod 的 HBM→CPU/FS 扩展，P2P 是跨 Pod 从 peer 的 CPU tier 拉；两者都只在‘前缀复用 + HBM 不够’时才划算。”
 
@@ -1526,7 +1571,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 | PD | 4×L4，2P + 2D，TP=1 | 6–8h | $5–8 | 已排：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；不要在 2×L4 上做 1P1D |
 | wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
 | flow control | 2×L4 + 两类客户端（premium/batch） | 3–4h | ~$3 | D5/Q2 扩展 |
-| tiered prefix cache | 2×L4，64GB RAM，CPU tier | 3–4h | ~$3 | 可选；先量 HBM 命中率 |
+| tiered prefix cache | 2×L4，96GB RAM，CPU tier | 3–4h | ~$3 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
 | P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；L4 上默认模型放不下 |
 | autoscaling | 4×L4（2→4 副本） | 3h | ~$4 | Q2；D3 已有 0→1/1→2 基础 |
 | rollout / 零停机 | 3–4×L4（留 surge） | 2h | ~$2 | D3 §9 的扩展 |

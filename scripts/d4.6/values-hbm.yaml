@@ -1,0 +1,66 @@
+# D4.6 HBM-only 控制组 router：和 tiered 完全相同的 plugin 图，
+# 只是去掉 CPU tier 的 producer/scorer。
+#
+# 这样两个 arm 的差异只剩“有没有 CPU tier”，不会把路由策略混进来。
+router:
+  inferencePool:
+    failureMode: FailOpen
+  modelServers:
+    type: vllm
+    protocol: http
+    targetPorts:
+      - number: 8000
+    matchLabels:
+      llm-d.ai/guide: "tiered-prefix-cache"
+
+  proxy:
+    enabled: true
+    proxyType: envoy
+    failOpen: true
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+  epp:
+    replicas: 1
+    flags:
+      v: 2
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    pluginsConfigFile: "hbm-plugins.yaml"
+    pluginsCustomConfig:
+      hbm-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: no-hit-lru-scorer
+            parameters:
+              prefixMatchInfoProducerName: gpu-prefix-cache-producer
+          - type: approx-prefix-cache-producer
+            name: gpu-prefix-cache-producer
+          - type: queue-scorer
+          - type: kv-cache-utilization-scorer
+          - type: prefix-cache-scorer
+            name: gpu-prefix-cache-scorer
+            parameters:
+              prefixMatchInfoProducerName: gpu-prefix-cache-producer
+        schedulingProfiles:
+          - name: default
+            plugins:
+              - pluginRef: queue-scorer
+              - pluginRef: kv-cache-utilization-scorer
+              - pluginRef: gpu-prefix-cache-scorer
+              - pluginRef: no-hit-lru-scorer
+
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081

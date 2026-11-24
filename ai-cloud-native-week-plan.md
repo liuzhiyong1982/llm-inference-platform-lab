@@ -352,6 +352,8 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 > D4 的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按本行准备，**未执行**）：4h、2×L4、llm-d `v1.0.0` precise prefix-cache routing；主对比是 Service round-robin vs EPP，EPP random 作为控制组；2×L4 上模型改为 Qwen3-8B-AWQ、TP=1、2 副本，`peakPrefillThroughput` 需重测。文档 §1.4 + 附录 A 另给 llm-d 核心 feature 覆盖矩阵（PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout、API），D 档为概念/决策，不额外租卡。可执行 manifest/脚本在 `scripts/d4/`。
 >
 > **可选 D4.5（Q2，不是 D4 的 4h 内）：** PD 分离 2P+2D，4×L4，6–8h，目标 ≤$8（硬上限 $10）；先完成 D4 且 Vast 余额 ≥ $8 再开。文档见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（**未执行**），manifest/脚本在 `scripts/d4.5/`。它回答“4 个完整副本 vs 2 prefill+2 decode，在 L4/TCP 上 PD 是否值得”，不保证 PD 赢。
+>
+> **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**未执行**，2×L4，3–4h，约 $3–4）。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
 
 ### D3 / D5 的 B 线讲法
 

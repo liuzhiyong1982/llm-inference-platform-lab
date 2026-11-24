@@ -1,0 +1,140 @@
+# D4.6 tiered-KV 实验组：2 个 vLLM 副本，每个 1×L4，HBM + 16GiB CPU tier。
+#
+# 基于 llm-d v1.0.0 的 tiered-prefix-cache guide：
+#   guides/tiered-prefix-cache/modelserver/gpu/vllm/native/cpu/base/patch-vllm.yaml
+# 改动：
+#   - Qwen3-32B / TP=2 / 300GiB -> Qwen3-8B-AWQ / TP=1 / 16GiB
+#   - gpu-memory-utilization=0.60，故意把 HBM KV 压小，让 16GiB CPU tier
+#     大于 HBM KV，才有机会观察“驱逐后从 CPU 拉回”
+#   - 本地权重 /models/Qwen3-8B-AWQ
+#
+# 用法：
+#   kubectl create namespace d46 --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -n d46 -f scripts/d4.6/modelserver-tiered.yaml
+#
+# 注意：CPU tier 放在 /dev/shm，计入 Pod memory limit；2×16GiB + vLLM RSS
+# 需要 ≥96GB host RAM，64GB 会很紧。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-tiered
+  labels:
+    app: vllm-tiered
+    llm-d.ai/guide: tiered-prefix-cache
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: vllm-tiered
+  template:
+    metadata:
+      labels:
+        app: vllm-tiered
+        llm-d.ai/guide: tiered-prefix-cache
+        llm-d.ai/model: qwen3-8b
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.34.0
+          imagePullPolicy: IfNotPresent
+          command: ["vllm", "serve"]
+          args:
+            - "/models/Qwen3-8B-AWQ"
+            - "--served-model-name=qwen3-8b"
+            - "--max-model-len=8192"
+            - "--gpu-memory-utilization=0.60"
+            - "--max-num-seqs=64"
+            - "--max-num-batched-tokens=4096"
+            - "--block-size=64"
+            - "--enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":17179869184}}'
+            - "--shutdown-timeout=45"
+            - "--disable-log-requests"
+          env:
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DO_NOT_TRACK
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
+          resources:
+            requests:
+              cpu: "3"
+              memory: 22Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "5"
+              memory: 28Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /.cache
+            - name: triton
+              mountPath: /.triton
+      volumes:
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 18Gi
+        - name: cache
+          emptyDir: {}
+        - name: triton
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-tiered
+  labels:
+    app: vllm-tiered
+spec:
+  selector:
+    app: vllm-tiered
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

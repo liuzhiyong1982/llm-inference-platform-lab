@@ -1,0 +1,81 @@
+# D4.6 tiered-KV 实验组 router：GPU 索引 + CPU tier 索引。
+#
+# 基于 llm-d v1.0.0：
+#   guides/tiered-prefix-cache/router/single-host/tiered-prefix-cache-cpu.values.yaml
+# 改动：
+#   - lruCapacityPerServer 19200 -> 1800（16GiB CPU tier / 9MiB per block）
+#   - matchLabels 指向 d4.6 的 2 个 vLLM Pod
+router:
+  inferencePool:
+    failureMode: FailOpen
+  modelServers:
+    type: vllm
+    protocol: http
+    targetPorts:
+      - number: 8000
+    matchLabels:
+      llm-d.ai/guide: "tiered-prefix-cache"
+
+  proxy:
+    enabled: true
+    proxyType: envoy
+    failOpen: true
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+  epp:
+    replicas: 1
+    flags:
+      v: 2
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    pluginsConfigFile: "tiered-plugins.yaml"
+    pluginsCustomConfig:
+      tiered-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: no-hit-lru-scorer
+            parameters:
+              prefixMatchInfoProducerName: gpu-prefix-cache-producer
+          - type: approx-prefix-cache-producer
+            name: gpu-prefix-cache-producer
+          - type: approx-prefix-cache-producer
+            name: cpu-prefix-cache-producer
+            parameters:
+              autoTune: false
+              # 16GiB / (64 * 144KiB) ≈ 1820；取 1800。
+              # Qwen3-8B KV ≈ 144KiB/token，64-token block ≈ 9MiB。
+              lruCapacityPerServer: 1800
+          - type: queue-scorer
+          - type: kv-cache-utilization-scorer
+          - type: prefix-cache-scorer
+            name: gpu-prefix-cache-scorer
+            parameters:
+              prefixMatchInfoProducerName: gpu-prefix-cache-producer
+          - type: prefix-cache-scorer
+            name: cpu-prefix-cache-scorer
+            parameters:
+              prefixMatchInfoProducerName: cpu-prefix-cache-producer
+        schedulingProfiles:
+          - name: default
+            plugins:
+              - pluginRef: queue-scorer
+              - pluginRef: kv-cache-utilization-scorer
+              - pluginRef: gpu-prefix-cache-scorer
+              - pluginRef: cpu-prefix-cache-scorer
+              - pluginRef: no-hit-lru-scorer
+
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
