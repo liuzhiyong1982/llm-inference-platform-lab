@@ -250,7 +250,7 @@ vastai search offers -n \
 
 > 如果以后 Vast 上出现 L4 VM，把 `gpu_ram>=24` 换成 `gpu_name=L4` 即可；当前（2026-11-23）没有，别为它多跑一次查询。
 >
-> 2 卡路径：把 `num_gpus=1` 改成 `num_gpus=2`，`--disk` 加到 160；单卡是主路径，2 卡只用来测真实扩容曲线。
+> 2 卡路径：把 `num_gpus=1` 改成 `num_gpus=2`，`--disk` 加到 160；单卡是主路径，2 卡只用来测真实扩容曲线。**2026-11-24 实测 2 卡 VM 在 machine `69146`（CN）和 `38668`（UK verified）都卡在 `created`，SSH 不开放；同一天同模板的 1 卡 bid VM 正常。先用单卡完成 §7–§9，2 卡等单卡跑通后再试。**
 
 ```bash
 # 2 卡 VM（单价含 160GB 盘）
@@ -259,7 +259,7 @@ vastai search offers -n \
   -o 'dph' --storage 160 --limit 15
 ```
 
-> **选 host 时避开 `country=CN` 和 `status=deverified`。** VM 模板镜像在 Docker Hub（`docker.io/vastai/kvm`），CN host 拉镜像可能十几分钟都起不来；优先 `verified`、`R >= 0.99`、`Net_down >= 500`。2026-11-24 实测 2×5090 的 machine `69146`（CN、deverified）13 分钟仍 `actual_status=null`、SSH 拒绝，只能 destroy。
+> **选 host 时避开 `country=CN` 和 `status=deverified`。** VM 模板镜像在 Docker Hub（`docker.io/vastai/kvm`），CN host 拉镜像可能十几分钟都起不来；优先 `verified`、`R >= 0.99`、`Net_down >= 500`。2026-11-24 实测 2×5090 的 machine `69146`（CN、deverified）13 分钟仍 `actual_status=null`、SSH 拒绝，只能 destroy。UK verified 的 `38668` 同样失败，所以 CN 不是唯一变量；**2 卡 VM 的稳定性是更大的问题**。
 
 **2）创建 VM（走 API，显式 `vm:true`）：**
 
@@ -275,7 +275,7 @@ curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
 
 返回里的 `new_contract` 就是实例 ID；2 卡把 `disk` 改成 160。
 
-> 2026-11-24 实测：`vastai create instance 47476583 --template_hash ... --disk 160` 两次都卡在 `actual_status=created`、`uptime=null`、SSH 拒绝，盘用量几乎为 0；原因是 CLI 没传 `vm:true`。建 VM 只用上面的 API。
+> 2026-11-24 实测：两次 CLI 2 卡创建（`47476583`，machine `38668`）都卡在 `actual_status=created`、`uptime=null`、SSH 拒绝，盘用量几乎为 0；改用 API 显式 `vm:true` 后 4 分钟内仍未起来（你已 destroy）。作为对照，2026-11-23 的 **1 卡 bid VM** 用同一模板、同一 CLI key 正常。结论：VM 创建优先用上面的 API；但当前 2 卡 VM 本身不可靠，**D3 先单卡**。
 
 `--template_hash` 是 Vast **模板**的 `hash_id`（32 位十六进制），不是 offer ID，也不是从镜像名算出来的。它把「镜像 + tag + 启动参数 + `vms_enabled` 过滤」打包在一起；模板本身带 `vm: true`，但 **API 请求仍要显式传 `vm: true`**。
 
