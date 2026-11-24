@@ -482,11 +482,13 @@ kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type merge \
 
 kubectl -n kube-system rollout status ds/nvidia-device-plugin-daemonset --timeout=180s
 
-# 目的：确认 allocatable 里有 1 张卡
+# 目的：确认 allocatable 里有卡（单卡 1，双卡 2）
 kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\n"}'
 ```
 
 > k3s 会为检测到的 NVIDIA runtime 创建 `RuntimeClass/nvidia`；static manifest 本身不带 `runtimeClassName`，所以必须 patch。用 Helm 装 GPU Operator 时这一步由 chart 的 `runtimeClassName` 完成。
+>
+> `rollout status` 只代表 device plugin pod Ready；它还要向 kubelet 注册，`allocatable` 可能晚几秒。第一次查为空时，先确认日志有 `Registered device plugin for 'nvidia.com/gpu' with Kubelet`，再重查。双卡 instance 这里返回 `2`，不是 `1`。
 
 ### 5.5 GPU smoke test
 
