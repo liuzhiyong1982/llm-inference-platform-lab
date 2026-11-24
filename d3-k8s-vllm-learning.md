@@ -1011,14 +1011,35 @@ EOF
 验证：
 
 ```bash
+# 终端 A：前台阻塞命令，必须一直保持运行
 kubectl -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090:9090
 
-# 另一个 shell
+# 终端 B：另开一个 shell
 curl -sG http://localhost:9090/api/v1/query \
   --data-urlencode 'query=vllm:num_requests_waiting' | jq .
 ```
 
-看到 `result` 里有数值，才继续。
+不想开两个终端，也可以在一段命令里后台起 port-forward、查完再杀掉：
+
+```bash
+kubectl -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090:9090 \
+  >/tmp/pf.log 2>&1 &
+sleep 3
+curl -sG http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=vllm:num_requests_waiting' | jq .
+kill %1
+```
+
+正常输出是 `"status": "success"`，`result` 里有 1 条，`value` 的第二项是 `"0"`——**0 是正常值**（当前没有排队请求），不是验证失败。如果 `result` 为空，再看 ServiceMonitor 和 target：
+
+```bash
+curl -sG http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=up{job=~".*vllm.*"}' | jq .
+```
+
+`value` 为 `"1"` 才说明 Prometheus 正在 scrape vLLM 的 `/metrics`。
+
+> `port-forward` 是前台阻塞命令：在同一个 shell 里直接跑 `curl` 会一直等不到提示符；换到另一个 shell 时如果 port-forward 已退出，就会得到 `Connection refused`。SSH 断开或命令超时也会杀掉 port-forward。`ss -ltnp | grep 9090` 没有输出，就说明 9090 根本没在监听。
 
 ### 8.2 装 KEDA
 
