@@ -709,11 +709,11 @@ spec:
           containerPort: 8000
         resources:
           requests:
-            cpu: "8"
+            cpu: "4"
             memory: "20Gi"
             nvidia.com/gpu: 1
           limits:
-            cpu: "8"
+            cpu: "4"
             memory: "20Gi"
             nvidia.com/gpu: 1
         startupProbe:
@@ -772,7 +772,7 @@ spec:
 
 > initContainer 用 `config.json` + 至少一个 `*.safetensors` 判断缓存完整，避免“下载中断但 config.json 已写入”导致 vLLM 启动失败。真要严格，可让 `snapshot_download` 每次都跑（完整缓存时它只做元数据校验）。
 >
-> **2 卡 1→2 测试的资源前提：** 上面的 `cpu: 8` / `memory: 20Gi` 是**每个 pod**。本次 VM 实测只有 **15 vCPU / 48GiB**：2×20Gi=40GiB 能放下，但 2×8=16 vCPU 超过 15，第二个副本仍会因 **CPU** Pending，看起来像 GPU 问题。要在这台机器上测 1→2，把 requests/limits 的 `cpu` 降到 `4`（`memory` 保持 `20Gi`），并单独标注这是 scale-out 专用配置，不与单卡吞吐数字对比；否则换 ≥24 vCPU 的 host。
+> **资源前提：** 上面的 `cpu: 4` / `memory: 20Gi` 是**每个 pod**。本次 VM 只有 **15 vCPU / 48GiB**：2×4=8 vCPU、2×20=40GiB，1→2 能放下。如果改成 `cpu: 8`，2×8=16 vCPU 超过 15，第二个副本会因 **CPU** Pending，看起来像 GPU 问题，§8 就看不到真实 1→2。所以主 manifest 直接用 4 CPU，避免实验中途再改。
 >
 > **不要用带 `kubeadm init` onstart 的模板：** 它会装 `containerd`/`kubeadm` 并在每次开机跑 `kubeadm init`，和 k3s 冲突，也会污染冷启动测量。建 VM 前用 `vastai search templates 'hash_id == <hash>' --raw` 看 `onstart` 是否为空；D3 用 `2c18cabd8f2f0525c2ff8446f5d4e063`（onstart 为空）。
 >
@@ -1002,7 +1002,7 @@ kubectl get pod "$pod" -o json | jq -r '
 >
 > 三次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；若之后要做严格 cold 对照或重跑 image-cold，先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
 >
-> 这三次测量时 Deployment 的 `memory` 是 `32Gi`；§6.2 之后已改为 `20Gi`。内存 request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间。另外 17:44 重启后 kernel 从 `6.8.0-59` 变成 `6.8.0-149`、driver 从 `580.95.05` 变成 `580.178.04`。**决定不重跑 warm**：§7 这组数字只作为旧环境记录，§8 的扩容窗口按新环境单独记录，不直接和 86s / 141s 对比。
+> 这三次测量时 Deployment 的 `cpu` / `memory` 是 `8` / `32Gi`；§6.2 之后已改为 `4` / `20Gi`。CPU/memory request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间。另外 17:44 重启后 kernel 从 `6.8.0-59` 变成 `6.8.0-149`、driver 从 `580.95.05` 变成 `580.178.04`。**决定不重跑 warm**：§7 这组数字只作为旧环境记录，§8 的扩容窗口按新环境单独记录，不直接和 86s / 141s 对比。
 
 归因规则：
 
@@ -1273,9 +1273,9 @@ D3 不测 scale-to-zero，原因是 vLLM 本身不排队：
 
 ### 8.3.3 资源前提：HPA 说 2 不等于第二个 Pod 能跑
 
-本机是 2×4090，GPU 够，但只有 **15 vCPU / 48GiB**。Deployment 默认每 Pod `cpu: 8` / `memory: 20Gi`，两个副本需要 16 CPU / 40GiB；内存够，但 CPU 超过 15，第二个会先因 CPU Pending，不是 KEDA 失败。
+本机是 2×4090，GPU 够，但只有 **15 vCPU / 48GiB**。§6.2 的 Deployment 现在是 `cpu: 4` / `memory: 20Gi`；两个副本需要 **8 CPU / 40GiB**，能放进 15 vCPU / 48GiB，1→2 可以真实调度。如果谁把 CPU 改回 8，2×8=16 > 15，第二个会先因 CPU Pending，不是 KEDA 失败。
 
-做 1→2 前在 §8.4 开始压测时就把 Deployment 的 `cpu` 降到 `4`（`memory` 保持 `20Gi`，2×20=40GiB，留约 8GiB 给系统），不要等 HPA 已经算出 2 再改。§7 的单副本基线实验是 `8 CPU / 20Gi`；§8 的 KEDA 实验从第一轮压测起就用 `4 CPU / 20Gi`，两组数字不要混。`maxReplicaCount: 2` 也不要超过实际 GPU 数，否则第三个副本会 Pending 在 GPU 上。另外 `shm` 是 `medium: Memory` 的 2Gi，会计入 Pod 实际内存；2×20Gi + 2×2Gi + 系统接近 48GiB，跑 1→2 时要盯 `kubectl top pod` 和 OOMKilled。
+§7 的基线数字是在 `8 CPU / 32Gi` 下测的；§8 的扩容实验用 `4 CPU / 20Gi`，两组不要混。`maxReplicaCount: 2` 也不要超过实际 GPU 数，否则第三个副本会 Pending 在 GPU 上。另外 `shm` 是 `medium: Memory` 的 2Gi，会计入 Pod 实际内存；2×20Gi + 2×2Gi + 系统接近 48GiB，跑 1→2 时要盯 `kubectl top pod` 和 OOMKilled。
 
 ### 8.3.4 排障顺序
 
@@ -1340,7 +1340,14 @@ KEDA 不是“队列一超 8 立刻多一个 Pod”。实际链路是：
 
 ### 8.4 压测
 
-**开始前先把 vLLM Deployment 的 CPU 降到 4。** 这台 VM 只有 15 vCPU；`cpu: 8` 时 HPA 扩到 2 需要 16 vCPU，第二个 Pod 会先因 CPU Pending。不要等 HPA 已经算出 2 再改；第一次压测前就改成 `cpu: 4`（memory 保持 `20Gi`）：
+**确认 Deployment 是 `cpu: 4` / `memory: 20Gi`。** §6.2 的 YAML 已经是 4 CPU；如果集群里还是旧 manifest（8 CPU），先改，否则 HPA 扩到 2 时第二个 Pod 会因 CPU Pending。正常情况下先确认：
+
+```bash
+kubectl get deploy vllm-qwen3-8b \
+  -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'
+```
+
+如果输出不是 `cpu: 4` / `memory: 20Gi`，再执行：
 
 ```bash
 kubectl set resources deploy/vllm-qwen3-8b \
@@ -1348,7 +1355,7 @@ kubectl set resources deploy/vllm-qwen3-8b \
 kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 ```
 
-这一步会触发一次 rollout；新 Pod Ready 后再跑 bench。后面 §8.6 的 1→2 曲线都基于这个 4 CPU 配置，不要和 §7 的 8 CPU 数字混。如果 §8 是重新 apply `k8s/vllm.yaml`，直接把 YAML 里两处 `cpu: "8"` 改成 `cpu: "4"`；§6.2 的基线 manifest 仍保持 8 CPU，§7 的数字也是 8 CPU 下测的。
+§6.2 的基线 manifest 已经是 `4 CPU / 20Gi`；§7 的数字是历史上在 `8 CPU / 32Gi` 下测的，§8 用当前配置，两组不要混。
 
 在集群内跑 bench（镜像里自带 `vllm bench`）：
 
