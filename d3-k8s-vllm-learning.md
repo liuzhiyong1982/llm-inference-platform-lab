@@ -1888,11 +1888,11 @@ spec:
     imagePullPolicy: IfNotPresent
     command: ["python3", "-u", "/scripts/client.py"]
     env:
-    - name: URL
+    - name: "URL"
       value: http://vllm-nodrain:8000/v1/completions
-    - name: N
+    - name: "N"
       value: "8"
-    - name: MAX_TOKENS
+    - name: "MAX_TOKENS"
       value: "512"
     volumeMounts:
     - name: scripts
@@ -1905,6 +1905,8 @@ EOF
 
 kubectl get pod drain-client
 ```
+
+> `N` 在 YAML 1.1 里会被解析成布尔值；env 的 `name` 必须写成带引号的 `"N"`（`MAX_TOKENS`/`URL` 也建议一起加引号），否则 `kubectl apply` 会报 `cannot unmarshal bool into Go struct field EnvVar.spec.containers.env.name`。
 
 `N=8`、`MAX_TOKENS=512`，8 条请求大约 45s；90s 的 shutdown 窗口足够跑完。
 
@@ -1990,11 +1992,11 @@ spec:
     imagePullPolicy: IfNotPresent
     command: ["python3", "-u", "/scripts/client.py"]
     env:
-    - name: URL
+    - name: "URL"
       value: http://vllm-qwen3-8b:8000/v1/completions
-    - name: N
+    - name: "N"
       value: "8"
-    - name: MAX_TOKENS
+    - name: "MAX_TOKENS"
       value: "512"
     volumeMounts:
     - name: scripts
