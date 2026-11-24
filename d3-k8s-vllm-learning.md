@@ -250,7 +250,7 @@ vastai search offers -n \
 
 > 如果以后 Vast 上出现 L4 VM，把 `gpu_ram>=24` 换成 `gpu_name=L4` 即可；当前（2026-11-23）没有，别为它多跑一次查询。
 >
-> 2 卡路径：把 `num_gpus=1` 改成 `num_gpus=2`，`--disk` 加到 160；单卡是主路径，2 卡只用来测真实扩容曲线。**2026-11-24 实测 2 卡 VM 在 machine `69146`（CN）和 `38668`（UK verified）都卡在 `created`，SSH 不开放；同一天同模板的 1 卡 bid VM 正常。先用单卡完成 §7–§9，2 卡等单卡跑通后再试。**
+> 2 卡路径：把 `num_gpus=1` 改成 `num_gpus=2`，`--disk` 加到 160；单卡是主路径，2 卡只用来测真实扩容曲线。**2026-11-24 实测 2 卡 VM 在 machine `69146`（CN）和 `38668`（UK verified）都卡在 `created`；machine `20876`（Virginia，2×4090）正常启动。host 很关键，先用单卡完成 §7–§9，2 卡等单卡跑通后再试。**
 
 ```bash
 # 2 卡 VM（单价含 160GB 盘）
@@ -260,6 +260,8 @@ vastai search offers -n \
 ```
 
 > **选 host 时避开 `country=CN` 和 `status=deverified`。** VM 模板镜像在 Docker Hub（`docker.io/vastai/kvm`），CN host 拉镜像可能十几分钟都起不来；优先 `verified`、`R >= 0.99`、`Net_down >= 500`。2026-11-24 实测 2×5090 的 machine `69146`（CN、deverified）13 分钟仍 `actual_status=null`、SSH 拒绝，只能 destroy。UK verified 的 `38668` 同样失败，所以 CN 不是唯一变量；**2 卡 VM 的稳定性是更大的问题**。
+>
+> 2026-11-24 补测：machine `20876`（2×4090，Virginia，verified）用同一个 `2c18...` 模板正常启动，SSH 可达；所以 2 卡 VM 不是全坏，host 很关键。
 
 **2）创建 VM（走 API，显式 `vm:true`）：**
 
@@ -360,14 +362,17 @@ curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
 
 ```bash
 # 目的：这些是后面所有数字的可比性前提
-# 5090 是 sm_120（Blackwell）；driver 的 Max CUDA 必须 >= vLLM 镜像的 CUDA（v0.34 约 13.0）
+# 5090=sm_120、4090=sm_89；driver 的 Max CUDA 必须 >= vLLM 镜像的 CUDA（v0.34 约 13.0）
 nvidia-smi | sed -n '1,4p'
 nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,power.limit --format=csv,noheader
 nvidia-ctk --version 2>/dev/null || echo "no nvidia-ctk"
 uname -r
+nproc
+free -g | head -2
 
 # 目的：k3s/kubelet 要 cgroup v2
 stat -fc %T /sys/fs/cgroup
+cat /sys/fs/cgroup/cgroup.controllers
 
 # 目的：k3s 要写 /var/lib/rancher
 sudo test -w /var/lib && echo "var-lib writable"
@@ -376,6 +381,20 @@ df -h /var/lib
 
 - `nvidia-smi` 右上角的 `CUDA Version` 是 driver 支持的 **Max CUDA**。低于 vLLM 镜像的 `CUDA_VERSION`（v0.34 镜像约 13.0）时会报 `CUDA driver version is insufficient`；换镜像或换 host，不要装 driver。
 - `compute_cap` 直接给出架构：3090=8.6、4090=8.9、5090=12.0。镜像的 `TORCH_CUDA_ARCH_LIST` 不含对应架构时会报 `no kernel image is available`，和 CUDA 版本是两回事。
+
+**2026-11-24 实际 VM 记录（2×4090，machine `20876`）：**
+
+| 项 | 实测值 |
+|---|---|
+| OS / kernel | Ubuntu 22.04.5 LTS / `6.8.0-59-generic` |
+| init / cgroup | `systemd` / `cgroup2fs`，controllers `cpuset cpu io memory hugetlb pids rdma misc` |
+| GPU | 2×RTX 4090 24564MiB，compute_cap 8.9，power limit 450W |
+| driver / Max CUDA | `580.95.05` / `13.0`（**以 VM 内 `nvidia-smi` 为准**；API 的 `driver_version` 可能显示 host 的 580.159.03） |
+| CPU / RAM | 15 vCPU / 48GiB（`MemTotal` 约 50.7GB） |
+| 磁盘 | 126GB，约 120GB 可用 |
+| toolkit | `nvidia-ctk`、`nvidia-container-runtime` 均未安装 |
+| k8s | 无 `k3s`、无 `kubeadm`（干净 VM，模板 `2c18...` 的 `onstart` 为空） |
+| image | `docker.io/vastai/kvm:cuda-12.9.1-auto`，template id `781848` |
 
 > 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
 
@@ -386,6 +405,8 @@ df -h /var/lib
 ### 5.2 安装 NVIDIA runtime（toolkit）
 
 k3s 会自动探测 PATH 里的 `nvidia-container-runtime`，所以**先装 toolkit，再装 k3s**；这样 k3s 首次启动就能识别，不用额外 restart。默认 runtime 仍是 `runc`，Pod 仍要显式写 `runtimeClassName: nvidia`（或者给 k3s 加 `--default-runtime nvidia`）。
+
+> 2026-11-24 实测：这台 Ubuntu 22.04.5 VM 只有 driver `580.95.05`，`nvidia-ctk` 和 `nvidia-container-runtime` 都没有；按下面装。
 
 ```bash
 # 目的：先看发行版，以及 apt 里有没有现成的包
@@ -685,7 +706,7 @@ spec:
 
 > initContainer 用 `config.json` + 至少一个 `*.safetensors` 判断缓存完整，避免“下载中断但 config.json 已写入”导致 vLLM 启动失败。真要严格，可让 `snapshot_download` 每次都跑（完整缓存时它只做元数据校验）。
 >
-> **2 卡 1→2 测试的资源前提：** 上面的 `cpu: 8` / `memory: 32Gi` 是**每个 pod**。要看到第二个副本真正调度到第二张卡，node 至少要有 16 vCPU + 64GiB 可分配；16 vCPU/63GB 的 host 会先因 CPU/内存不足 Pending，看起来像 GPU 问题。要么把 requests/limits 降到 `cpu: 4` / `memory: 24Gi`（单独标注，不与单卡吞吐数字对比），要么换 ≥24 vCPU / ≥128GB 的 host。
+> **2 卡 1→2 测试的资源前提：** 上面的 `cpu: 8` / `memory: 32Gi` 是**每个 pod**。本次 VM 实测只有 **15 vCPU / 48GiB**，2×32Gi=64GiB 直接放不下；第二个副本会先因内存 Pending，看起来像 GPU 问题。要在这台机器上测 1→2，必须把 requests/limits 降到 `cpu: 4` / `memory: 20Gi`（2×20=40GiB，留约 8GiB 给系统），并单独标注这是 scale-out 专用配置，不与单卡吞吐数字对比；否则换 ≥24 vCPU / ≥128GB 的 host。
 >
 > **不要用带 `kubeadm init` onstart 的模板：** 它会装 `containerd`/`kubeadm` 并在每次开机跑 `kubeadm init`，和 k3s 冲突，也会污染冷启动测量。建 VM 前用 `vastai search templates 'hash_id == <hash>' --raw` 看 `onstart` 是否为空；D3 用 `2c18cabd8f2f0525c2ff8446f5d4e063`（onstart 为空）。
 >
