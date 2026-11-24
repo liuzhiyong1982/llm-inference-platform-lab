@@ -262,7 +262,33 @@ vastai create instance <OFFER_ID> \
   --cancel-unavail
 ```
 
-模板是官方 `Ubuntu 22.04 VM`（`vm=True`、SSH、自带 CUDA/Docker），自带 `vms_enabled` 过滤。不要用 `vllm/vllm-openai` 镜像建 VM：那是容器模板，不会给你 systemd。
+`--template_hash` 是 Vast **模板**的 `hash_id`（32 位十六进制），不是 offer ID，也不是从镜像名算出来的。它把「镜像 + tag + 启动参数 + `vm: true` + `vms_enabled` 过滤」打包在一起；建 VM 必须用带 `vm: true` 的模板。
+
+当前 hash 对应 Vast recommended 的 `Ubuntu 22.04 VM` 模板：
+
+| 字段 | 值 |
+|---|---|
+| `name` | `Ubuntu 22.04 VM` |
+| `image` | `docker.io/vastai/kvm` |
+| `tag` | `@vastai-automatic-tag`（跟随最新镜像） |
+| `vm` / `recommended` | `true` / `true` |
+| `recommended_disk_space` | `130` |
+
+自己查/复核（换机器或 hash 失效时用）：
+
+```bash
+# 按名字找 recommended 的 Ubuntu 22.04 VM 模板
+vastai search templates 'name == Ubuntu_22.04_VM recommended == True' --raw | \
+  python3 -c 'import json,sys; [print(t["hash_id"], "|", t["name"], "|", t["image"], "|", t.get("tag"), "| vm", t.get("vm")) for t in json.load(sys.stdin)]'
+
+# 已知 hash 时反查它是不是 VM 模板
+vastai search templates 'hash_id == 2c18cabd8f2f0525c2ff8446f5d4e063' --raw | \
+  python3 -c 'import json,sys; t=json.load(sys.stdin)[0]; print(t["name"], t["image"], t.get("tag"), "vm=", t.get("vm"), "recommended=", t.get("recommended"))'
+```
+
+Web UI 也可以：Templates → 搜 `Ubuntu 22.04 VM` → 打开 recommended 那条，hash 在详情/URL 里。`vastai create instance` 没有 `--vm` 开关，VM 身份就来自模板的 `vm: true`；不要用 `--image` 代替 `--template_hash`。
+
+> `@vastai-automatic-tag` 会跟随 Vast 更新镜像 tag；2026-11-24 实际解析成 `docker.io/vastai/kvm:cuda-12.9.1-auto`。记录 D3 结果时把实例的 `image_uuid` 一起记下来。如果 create 报 unknown template，用上面的命令重新查 hash，不要猜。
 
 如果建出来不是 VM（下一步 `ps -p 1` 不是 `systemd`），destroy 后走 API：
 
