@@ -685,6 +685,10 @@ spec:
 
 > initContainer 用 `config.json` + 至少一个 `*.safetensors` 判断缓存完整，避免“下载中断但 config.json 已写入”导致 vLLM 启动失败。真要严格，可让 `snapshot_download` 每次都跑（完整缓存时它只做元数据校验）。
 >
+> **2 卡 1→2 测试的资源前提：** 上面的 `cpu: 8` / `memory: 32Gi` 是**每个 pod**。要看到第二个副本真正调度到第二张卡，node 至少要有 16 vCPU + 64GiB 可分配；16 vCPU/63GB 的 host 会先因 CPU/内存不足 Pending，看起来像 GPU 问题。要么把 requests/limits 降到 `cpu: 4` / `memory: 24Gi`（单独标注，不与单卡吞吐数字对比），要么换 ≥24 vCPU / ≥128GB 的 host。
+>
+> **不要用带 `kubeadm init` onstart 的模板：** 它会装 `containerd`/`kubeadm` 并在每次开机跑 `kubeadm init`，和 k3s 冲突，也会污染冷启动测量。建 VM 前用 `vastai search templates 'hash_id == <hash>' --raw` 看 `onstart` 是否为空；D3 用 `2c18cabd8f2f0525c2ff8446f5d4e063`（onstart 为空）。
+>
 > B 线埋点：在 `template.metadata.labels` 里加 `team`/`model`，并把 Deployment 放到团队 namespace；D3 可以先单 namespace，但 Q2 的 chargeback 依赖这些 label。
 
 应用并验证：
