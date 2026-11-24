@@ -355,7 +355,9 @@ vastai create instance <OFFER_ID> \
 
 ```bash
 # 目的：这些是后面所有数字的可比性前提
-nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit --format=csv,noheader
+# 5090 是 sm_120（Blackwell）；driver 的 Max CUDA 必须 >= vLLM 镜像的 CUDA（v0.34 约 13.0）
+nvidia-smi | sed -n '1,4p'
+nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,power.limit --format=csv,noheader
 nvidia-ctk --version 2>/dev/null || echo "no nvidia-ctk"
 uname -r
 
@@ -366,6 +368,9 @@ stat -fc %T /sys/fs/cgroup
 sudo test -w /var/lib && echo "var-lib writable"
 df -h /var/lib
 ```
+
+- `nvidia-smi` 右上角的 `CUDA Version` 是 driver 支持的 **Max CUDA**。低于 vLLM 镜像的 `CUDA_VERSION`（v0.34 镜像约 13.0）时会报 `CUDA driver version is insufficient`；换镜像或换 host，不要装 driver。
+- `compute_cap` 直接给出架构：3090=8.6、4090=8.9、5090=12.0。镜像的 `TORCH_CUDA_ARCH_LIST` 不含对应架构时会报 `no kernel image is available`，和 CUDA 版本是两回事。
 
 > 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
 
