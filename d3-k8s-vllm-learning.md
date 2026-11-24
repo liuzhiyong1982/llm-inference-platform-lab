@@ -246,7 +246,7 @@ vastai search offers -n \
   -o 'dph' --storage 130 --limit 10
 ```
 
-挑 `R >= 0.98`、`Net_down >= 500`、`Disk >= 100`、`Max_Days >= 1`、`ports >= 1`、`RAM >= 64GB` 的。**必须用 `vms_enabled=true` 查询返回的 offer ID**；同一个 GPU 的 VM 和容器 offer ID 不同，拿容器 ID 建 VM 会失败。`cpu_ram>=64` 是为了让 §6.2 的 `memory: 32Gi` 能调度；32GB 的机器会 Pending。
+挑 `R >= 0.98`、`Net_down >= 500`、`Disk >= 100`、`Max_Days >= 1`、`ports >= 1`、`RAM >= 64GB` 的。**必须用 `vms_enabled=true` 查询返回的 offer ID**；同一个 GPU 的 VM 和容器 offer ID 不同，拿容器 ID 建 VM 会失败。`cpu_ram>=64` 是为了给 §6.2 的 `memory: 20Gi`、k3s 和页缓存留余量；32GB 的机器单副本余量很小，1→2 的 2×20Gi 直接不够。
 
 > 如果以后 Vast 上出现 L4 VM，把 `gpu_ram>=24` 换成 `gpu_name=L4` 即可；当前（2026-11-23）没有，别为它多跑一次查询。
 >
@@ -396,10 +396,13 @@ df -h /var/lib
 | k8s | 无 `k3s`、无 `kubeadm`（干净 VM，模板 `2c18...` 的 `onstart` 为空） |
 | image | `docker.io/vastai/kvm:cuda-12.9.1-auto`，template id `781848` |
 
+> 2026-11-24 17:01 `unattended-upgrades` 把 NVIDIA 用户态包从 580.95.05 升到 580.178.04，内核模块仍是 580.95.05；新 Pod 因此报 `failed to initialize NVML: Driver/library version mismatch`。同一轮还装上了 6.8.0-149 内核。重启后以实际 `nvidia-smi` / `uname -r` 为准，并确认 `nvidia-smi` 正常后再继续。
+
 > 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
 
 - 如果 `stat -fc %T /sys/fs/cgroup` 不是 `cgroup2fs`（例如 `tmpfs`），说明还是 cgroup v1，k3s/kubelet 可能起不来。Ubuntu 22.04 可在 `/etc/default/grub` 的 `GRUB_CMDLINE_LINUX` 里加 `systemd.unified_cgroup_hierarchy=1`，`sudo update-grub` 后重启；改不了就换支持 cgroup v2 的 VM。
 - `/var/lib` 不可写，通常是权限或磁盘满；先解决再装。
+- **关掉自动升级。** `unattended-upgrades` 会在实验中途升级 NVIDIA 用户态驱动/内核；用户态 580.178 配内核模块 580.95 会 `Driver/library version mismatch`，新 Pod 全部起不来。开工前跑 `sudo systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer`；如果已经升级，先等 apt/dpkg 锁释放，再重启 VM 让新模块加载。
 - 如果检查失败，换 RTX VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
 
 ### 5.2 安装 NVIDIA runtime（toolkit）
@@ -430,6 +433,8 @@ which nvidia-container-runtime
 ```
 
 > 如果 `apt-cache policy nvidia-container-toolkit` 已经显示 `Candidate:`，可以跳过加 repo，直接 `sudo apt-get install -y nvidia-container-toolkit`。
+>
+> 装完先跑 `nvidia-smi`。如果报 `Driver/library version mismatch`，说明 apt/unattended-upgrades 把用户态驱动升到了新版本，但内核模块还是旧版；不要继续装 k3s/device plugin，先重启 VM 让新模块加载，确认 `nvidia-smi` 正常后再走 §5.3。
 >
 > 如果你已经先装了 k3s，装完 toolkit 后执行 `sudo systemctl restart k3s`；还没装就继续 §5.3，k3s 启动时会自己探测。
 >
@@ -665,11 +670,11 @@ spec:
         resources:
           requests:
             cpu: "8"
-            memory: "32Gi"
+            memory: "20Gi"
             nvidia.com/gpu: 1
           limits:
             cpu: "8"
-            memory: "32Gi"
+            memory: "20Gi"
             nvidia.com/gpu: 1
         startupProbe:
           httpGet:
@@ -727,7 +732,7 @@ spec:
 
 > initContainer 用 `config.json` + 至少一个 `*.safetensors` 判断缓存完整，避免“下载中断但 config.json 已写入”导致 vLLM 启动失败。真要严格，可让 `snapshot_download` 每次都跑（完整缓存时它只做元数据校验）。
 >
-> **2 卡 1→2 测试的资源前提：** 上面的 `cpu: 8` / `memory: 32Gi` 是**每个 pod**。本次 VM 实测只有 **15 vCPU / 48GiB**，2×32Gi=64GiB 直接放不下；第二个副本会先因内存 Pending，看起来像 GPU 问题。要在这台机器上测 1→2，必须把 requests/limits 降到 `cpu: 4` / `memory: 20Gi`（2×20=40GiB，留约 8GiB 给系统），并单独标注这是 scale-out 专用配置，不与单卡吞吐数字对比；否则换 ≥24 vCPU / ≥128GB 的 host。
+> **2 卡 1→2 测试的资源前提：** 上面的 `cpu: 8` / `memory: 20Gi` 是**每个 pod**。本次 VM 实测只有 **15 vCPU / 48GiB**：2×20Gi=40GiB 能放下，但 2×8=16 vCPU 超过 15，第二个副本仍会因 **CPU** Pending，看起来像 GPU 问题。要在这台机器上测 1→2，把 requests/limits 的 `cpu` 降到 `4`（`memory` 保持 `20Gi`），并单独标注这是 scale-out 专用配置，不与单卡吞吐数字对比；否则换 ≥24 vCPU 的 host。
 >
 > **不要用带 `kubeadm init` onstart 的模板：** 它会装 `containerd`/`kubeadm` 并在每次开机跑 `kubeadm init`，和 k3s 冲突，也会污染冷启动测量。建 VM 前用 `vastai search templates 'hash_id == <hash>' --raw` 看 `onstart` 是否为空；D3 用 `2c18cabd8f2f0525c2ff8446f5d4e063`（onstart 为空）。
 >
@@ -956,6 +961,8 @@ kubectl get pod "$pod" -o json | jq -r '
 > **image-cold 不是网络冷拉：** 10GB 镜像 942ms 拉完，等效 10GB/s 以上，说明 `crictl rmi` 只删了 image record，containerd 的 content store/snapshot 还在本地复用了层。这个数字只证明“镜像记录删除后能重新注册”，不能回答“新节点从 Docker Hub 拉 10GB 要多久”。真实网络冷拉要用干净 VM/节点，或在另一个从没拉过该镜像的 host 上测；不要手删 content store。90s 对 83s 的差异是单次噪声，不要归因到镜像拉取（镜像只占 0.9s）。
 >
 > 三次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；若之后要做严格 cold 对照或重跑 image-cold，先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
+>
+> 这三次测量时 Deployment 的 `memory` 是 `32Gi`；§6.2 之后已改为 `20Gi`。内存 request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间；如果要严格复现当前 manifest，重跑一次 warm 对照即可。
 
 归因规则：
 
@@ -1052,6 +1059,29 @@ kubectl -n keda get pods
 
 ### 8.3 ScaledObject
 
+`ScaledObject` 是 KEDA 的 CRD，不是 HPA 的替代品。它**不直接改 Deployment 的 `replicas`**，而是做三件事：
+
+1. 按 `pollingInterval` 查询 trigger（这里是 Prometheus）；
+2. 把查询结果通过 KEDA metrics adapter 暴露成 `external.metrics.k8s.io` 指标；
+3. 创建并维护一个 HPA（名字是 `keda-hpa-<ScaledObject 名>`），由 HPA 真正改 Deployment 的 replicas。
+
+链路：
+
+```text
+Prometheus --PromQL--> KEDA operator
+                         |
+                         v
+              external.metrics.k8s.io
+                         |
+                         v
+              HPA keda-hpa-vllm-scaler
+                         |
+                         v
+              Deployment vllm-qwen3-8b
+```
+
+所以排障要分三层：Prometheus 查询有没有值 → KEDA 有没有把指标暴露出来 → HPA 有没有算出新副本数。不要一看到副本没变就只查 Deployment。
+
 ```bash
 cat <<'EOF' | kubectl apply -f -
 apiVersion: keda.sh/v1alpha1
@@ -1060,27 +1090,153 @@ metadata:
   name: vllm-scaler
 spec:
   scaleTargetRef:
-    name: vllm-qwen3-8b
-  minReplicaCount: 1
-  maxReplicaCount: 2
-  pollingInterval: 15
-  cooldownPeriod: 300
+    name: vllm-qwen3-8b       # 同 namespace 的 Deployment
+  minReplicaCount: 1          # 不缩到 0：GPU 冷启动 86–141s，Service 不能没有 endpoint
+  maxReplicaCount: 2          # 本机 2 张 4090；单卡机器这里只能是 1
+  pollingInterval: 15         # KEDA 每 15s 查一次 Prometheus
+  cooldownPeriod: 300         # 只影响 scale-to-zero；min=1 时 2→1 看 HPA behavior
   triggers:
   - type: prometheus
     metadata:
       serverAddress: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
-      metricName: vllm_requests_waiting
-      query: sum(vllm:num_requests_waiting)
-      threshold: "8"
+      metricName: vllm_requests_waiting   # HPA 里的 external metric 名，不能带冒号
+      query: sum(vllm:num_requests_waiting)  # 必须返回单条序列
+      threshold: "8"            # 目标队列深度；字符串
 EOF
 
 kubectl get scaledobject
 kubectl get hpa
 ```
 
-`threshold: "8"` 的语义：HPA 目标值是 8，`desiredReplicas = ceil(queue / 8)`。在 1 副本时，队列 9 → 2 副本；队列 17 → 3 副本（但 `maxReplicaCount: 2` 会截断）。
+| 字段 | 值 | 作用 | 注意 |
+|---|---|---|---|
+| `scaleTargetRef.name` | `vllm-qwen3-8b` | 要伸缩的 Deployment | ScaledObject 必须和 Deployment 同 namespace，KEDA 不支持跨 namespace 直接 scale |
+| `minReplicaCount` | `1` | 最少副本 | 设 `0` 才能 scale-to-zero，但需要能缓冲请求的入口；见下文 |
+| `maxReplicaCount` | `2` | 最多副本 | 不能超过节点空闲 GPU 数；本机 2 张 4090 |
+| `pollingInterval` | `15` | KEDA 查 trigger 的间隔（秒） | 不是 HPA 的 sync period；两者叠加决定反应时间 |
+| `cooldownPeriod` | `300` | 最后一次 trigger 活跃后等多久缩到 0 | 只在 `minReplicaCount: 0` 时生效；`min=1` 时 2→1 由 HPA 的 scaleDown stabilization 控制 |
+| `triggers[].type` | `prometheus` | trigger 类型 | 还支持 cpu/memory/rabbitmq/kafka 等 |
+| `serverAddress` | `http://...monitoring.svc:9090` | Prometheus HTTP API | 从 `keda-operator` Pod 里必须能解析和访问；NetworkPolicy 要放行 |
+| `metricName` | `vllm_requests_waiting` | 暴露给 HPA 的外部指标名 | 用下划线；不要直接把 PromQL 里的 `vllm:num_requests_waiting` 当 metricName |
+| `query` | `sum(vllm:num_requests_waiting)` | 实际 PromQL | 必须返回单条序列；多 Pod/多 engine 要先 `sum`/`avg` 聚合 |
+| `threshold` | `"8"` | 目标值 | 字符串；HPA 用 external metric 的 averageValue 作为目标 |
 
-> 不要再给同一个 Deployment 手建 HPA；KEDA 已经生成了 `keda-hpa-vllm-scaler`，两个 HPA 会互相打架。
+### 8.3.1 HPA 侧看到什么
+
+```bash
+kubectl get scaledobject vllm-scaler
+kubectl describe scaledobject vllm-scaler
+
+kubectl get hpa
+kubectl get hpa keda-hpa-vllm-scaler -o yaml
+```
+
+正常时 `ScaledObject` 的 `READY=True`、`ACTIVE=True`；`kubectl get hpa` 会看到一个 KEDA 生成的 HPA，名字固定是 `keda-hpa-vllm-scaler`，`TARGETS` 形如 `0/8`（当前队列/阈值）。`kubectl get hpa -o yaml` 里的关键字段：
+
+```yaml
+spec:
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: vllm_requests_waiting
+      target:
+        type: AverageValue
+        averageValue: "8"
+```
+
+`threshold: "8"` 的语义：KEDA 把 `sum(vllm:num_requests_waiting)` 作为一个 external metric，HPA 的目标是每个副本平均 8 个排队请求。对 `sum()` 来说，可以近似记成：
+
+```text
+desiredReplicas = ceil(totalQueue / 8)
+```
+
+在 1 副本时：队列 0–8 → 1 副本；9–16 → 2 副本；17 以上会被 `maxReplicaCount: 2` 截断。在 2 副本时队列降到 8 以下，HPA 会想缩回 1，但要等 scaleDown stabilization（默认 300s），不会立刻缩。
+
+> `sum()` 和 `avg()` 的语义不同：`sum(vllm:num_requests_waiting)` 是全局排队总数，threshold 8 表示“总队列 8 就加一个副本”；`avg(...)` 是每副本平均排队，threshold 8 表示“平均每副本 8 个才加”。D3 用 `sum()`，因为队列是全局 backlog。不要返回多条序列；KEDA 的 Prometheus scaler 期望单条结果，多 Pod 时先聚合。
+
+### 8.3.2 为什么 `minReplicaCount` 是 1，不是 0
+
+D3 不测 scale-to-zero，原因是 vLLM 本身不排队：
+
+- 副本为 0 时，Service 没有 endpoint，新请求直接失败，不会在 vLLM 里形成 `num_requests_waiting`；
+- Prometheus 里没有 vLLM Pod，`vllm:num_requests_waiting` 序列消失，KEDA 没有信号把副本从 0 拉回 1；
+- 要实现 0→1，需要一个能缓冲请求的入口（KEDA HTTP add-on、Knative、网关队列等），或者用别的外部队列指标。
+
+另外 GPU 冷启动 86–141s，保留 1 个 warm 副本是 D3 的基线。`cooldownPeriod: 300` 在 `min=1` 时不负责 2→1；2→1 由 HPA 的 scaleDown stabilization 控制。要显式控制就写：
+
+```yaml
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+```
+
+### 8.3.3 资源前提：HPA 说 2 不等于第二个 Pod 能跑
+
+本机是 2×4090，GPU 够，但只有 **15 vCPU / 48GiB**。Deployment 默认每 Pod `cpu: 8` / `memory: 20Gi`，两个副本需要 16 CPU / 40GiB；内存够，但 CPU 超过 15，第二个会先因 CPU Pending，不是 KEDA 失败。
+
+做 1→2 前把 Deployment 的 `cpu` 临时降到 `4`（`memory` 保持 `20Gi`，2×20=40GiB，留约 8GiB 给系统），并标注这是 scale-out 专用配置，不和单卡吞吐数字对比。单副本实验保持 `8 CPU / 20Gi`。`maxReplicaCount: 2` 也不要超过实际 GPU 数，否则第三个副本会 Pending 在 GPU 上。另外 `shm` 是 `medium: Memory` 的 2Gi，会计入 Pod 实际内存；2×20Gi + 2×2Gi + 系统接近 48GiB，跑 1→2 时要盯 `kubectl top pod` 和 OOMKilled。
+
+### 8.3.4 排障顺序
+
+```bash
+# 1) Prometheus 查询本身有没有值（port-forward 后台跑，查完杀掉）
+kubectl -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090:9090 \
+  >/tmp/pf.log 2>&1 &
+sleep 3
+curl -sG http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=sum(vllm:num_requests_waiting)' | jq .
+kill %1
+
+# 2) KEDA 有没有把 ScaledObject 标成 Ready
+kubectl describe scaledobject vllm-scaler
+
+# 3) KEDA operator / metrics adapter 日志
+kubectl -n keda get pods
+kubectl -n keda logs deploy/keda-operator --tail=80
+kubectl -n keda logs deploy/keda-operator-metrics-apiserver --tail=80
+
+# 4) HPA 有没有拿到 external metric
+kubectl describe hpa keda-hpa-vllm-scaler
+```
+
+常见现象：
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `ScaledObject` `READY=False` | trigger 配置错、Prometheus 不可达 | `kubectl describe scaledobject` 看 condition 和 event |
+| HPA `TARGETS` 是 `<unknown>/8` | KEDA metrics adapter 没拿到指标 | 查 `keda-operator-metrics-apiserver` 日志；先在 Prometheus 里跑同样的 PromQL |
+| `FailedGetExternalMetric` | `serverAddress` DNS/网络不通，或 metricName 不匹配 | 从 `keda-operator` Pod 内访问 Prometheus；检查 Service 名和 namespace |
+| HPA 算出 2，但第二个 Pod `Pending` | CPU/内存/GPU 不够 | 看 `kubectl describe pod` 的 event；按 §8.3.3 改资源 |
+| 队列很高但 HPA 不动 | 查询返回空/多序列，或 `threshold` 太大 | 直接跑 PromQL 比较结果；多序列用 `sum()` |
+
+### 8.3.5 扩容时间线要记什么
+
+KEDA 不是“队列一超 8 立刻多一个 Pod”。实际链路是：
+
+```text
+队列超过 threshold
+  → KEDA 下一次 polling（最多 15s）
+  → HPA 下一次 sync（默认 15s）
+  → Deployment 创建 Pod
+  → 调度 + 镜像/权重/模型加载（§7 的 86–141s）
+  → Pod Ready，Service 才有新 endpoint
+```
+
+所以扩容实验至少记四个时间点：
+
+1. 队列首次超过 8 的时间（压测脚本/`kubectl get --raw` 或 Prometheus 查询）；
+2. HPA `REPLICAS` 从 1 变 2 的时间（`kubectl get hpa -w`）；
+3. 第二个 Pod `Scheduled` 的时间（`kubectl get pod -o json` 的 `PodScheduled`）；
+4. 第二个 Pod `Ready` 的时间（condition `Ready`）。
+
+`HPA 变 2 → Pod Ready` 这一段就是 D3 要讲的“扩容代价”；它主要不是 KEDA 慢，而是新副本的冷启动慢。反过来，如果 HPA 一直不变 2，才去查 KEDA/Prometheus。
+
+> 不要再给同一个 Deployment 手建 HPA；KEDA 已经生成了 `keda-hpa-vllm-scaler`，两个 HPA 会互相打架。删除 ScaledObject 时也要确认 HPA 一起被清理。
 
 ### 8.4 压测
 
@@ -1118,6 +1274,8 @@ kubectl get events --sort-by=.lastTimestamp | tail -20
 ```
 
 ### 8.5 单卡预期：1→2 会 Pending
+
+> 本机是 2×4090，实际应看 §8.6；这一节保留给单卡节点/降级路径。单卡时第二个副本会因 `Insufficient nvidia.com/gpu` Pending。
 
 ```text
 vllm-qwen3-8b-xxxxx   1/1 Running
@@ -1373,6 +1531,7 @@ D2 后账户余额约 `$18.78`；D3 单卡 VM 3h 约 `$1.3`，2 卡 4h 约 `$3.7
 | Pod 被 SIGKILL | `terminationGracePeriodSeconds` < `preStop + shutdown-timeout` | 120 > 15 + 90 + 15 |
 | CPU limit 掐住 tokenizer | cgroup throttling | 提高/去掉 CPU limit，观察 TTFT |
 | `hostPath` 权限不对 | 容器非 root / 目录属主 | 统一 UID，或 initContainer `chown` |
+| 新 Pod 报 `failed to initialize NVML: Driver/library version mismatch` | `unattended-upgrades` / apt 把 NVIDIA 用户态驱动升级了，内核模块还是旧版 | `nvidia-smi` 也会报同样错；先等 apt/dpkg 结束，停掉自动升级，重启 VM 加载新模块，确认 `nvidia-smi` 正常再继续 |
 
 ---
 
