@@ -261,17 +261,23 @@ vastai search offers -n \
 
 > **选 host 时避开 `country=CN` 和 `status=deverified`。** VM 模板镜像在 Docker Hub（`docker.io/vastai/kvm`），CN host 拉镜像可能十几分钟都起不来；优先 `verified`、`R >= 0.99`、`Net_down >= 500`。2026-11-24 实测 2×5090 的 machine `69146`（CN、deverified）13 分钟仍 `actual_status=null`、SSH 拒绝，只能 destroy。
 
-**2）创建 VM：**
+**2）创建 VM（走 API，显式 `vm:true`）：**
+
+`vastai create instance` 的 CLI payload 不带 `vm` 字段（当前 CLI 也没有 `--vm` 开关），用它配 VM 模板可能起成普通容器：`actual_status=created`、`uptime=null`、SSH `Connection refused`，盘几乎不写。VM 必须走 API，显式传 `"vm": true`：
 
 ```bash
-vastai create instance <OFFER_ID> \
-  --template_hash 2c18cabd8f2f0525c2ff8446f5d4e063 \
-  --disk 130 \
-  --label d3-k3s-vm \
-  --cancel-unavail
+curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
+  -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
+  -H "Content-Type: application/json" \
+  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"runtype":"ssh_direct","label":"d3-k3s-vm","cancel_unavail":true}' \
+  | python3 -m json.tool
 ```
 
-`--template_hash` 是 Vast **模板**的 `hash_id`（32 位十六进制），不是 offer ID，也不是从镜像名算出来的。它把「镜像 + tag + 启动参数 + `vm: true` + `vms_enabled` 过滤」打包在一起；建 VM 必须用带 `vm: true` 的模板。
+返回里的 `new_contract` 就是实例 ID；2 卡把 `disk` 改成 160。
+
+> 2026-11-24 实测：`vastai create instance 47476583 --template_hash ... --disk 160` 两次都卡在 `actual_status=created`、`uptime=null`、SSH 拒绝，盘用量几乎为 0；原因是 CLI 没传 `vm:true`。建 VM 只用上面的 API。
+
+`--template_hash` 是 Vast **模板**的 `hash_id`（32 位十六进制），不是 offer ID，也不是从镜像名算出来的。它把「镜像 + tag + 启动参数 + `vms_enabled` 过滤」打包在一起；模板本身带 `vm: true`，但 **API 请求仍要显式传 `vm: true`**。
 
 当前 hash 对应 Vast recommended 的 `Ubuntu 22.04 VM` 模板：
 
@@ -295,18 +301,9 @@ vastai search templates 'hash_id == 2c18cabd8f2f0525c2ff8446f5d4e063' --raw | \
   python3 -c 'import json,sys; t=json.load(sys.stdin)[0]; print(t["name"], t["image"], t.get("tag"), "vm=", t.get("vm"), "recommended=", t.get("recommended"))'
 ```
 
-Web UI 也可以：Templates → 搜 `Ubuntu 22.04 VM` → 打开 recommended 那条，hash 在详情/URL 里。`vastai create instance` 没有 `--vm` 开关，VM 身份就来自模板的 `vm: true`；不要用 `--image` 代替 `--template_hash`。
+Web UI 的 Templates → `Ubuntu 22.04 VM` 也能看 hash；Web UI 建 VM 会自动带 `vm:true`。`--image` 不能代替 `--template_hash`。
 
-> `@vastai-automatic-tag` 会跟随 Vast 更新镜像 tag；2026-11-24 实际解析成 `docker.io/vastai/kvm:cuda-12.9.1-auto`。记录 D3 结果时把实例的 `image_uuid` 一起记下来。如果 create 报 unknown template，用上面的命令重新查 hash，不要猜。
-
-如果建出来不是 VM（下一步 `ps -p 1` 不是 `systemd`），destroy 后走 API：
-
-```bash
-curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
-  -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
-  -H "Content-Type: application/json" \
-  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"runtype":"ssh_direct","label":"d3-k3s-vm","cancel_unavail":true}'
-```
+> `@vastai-automatic-tag` 会跟随 Vast 更新镜像 tag；2026-11-24 实际解析成 `docker.io/vastai/kvm:cuda-12.9.1-auto`。记录 D3 结果时把实例的 `image_uuid` 一起记下来。如果 API 报 unknown template，用上面的命令重新查 hash，不要猜。
 
 **3）SSH 与 VM 确认：**
 
@@ -346,17 +343,16 @@ vastai search offers -n -t bid \
   'num_gpus=1 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=100 inet_down>=500 reliability>=0.98 cpu_ram>=64' \
   -o 'dph' --storage 130 --limit 10
 
-# 2) 创建；--bid_price 要 >= 上一步的 $/hr，建议上浮 10–20%
+# 2) 创建；price 要 >= 上一步的 $/hr，建议上浮 10–20%
 #    当前 3090 约 0.153，所以示例用 0.18
-vastai create instance <OFFER_ID> \
-  --template_hash 2c18cabd8f2f0525c2ff8446f5d4e063 \
-  --disk 130 \
-  --bid_price 0.18 \
-  --label d3-k3s-vm-bid \
-  --cancel-unavail
+curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
+  -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
+  -H "Content-Type: application/json" \
+  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"price":0.18,"runtype":"ssh_direct","label":"d3-k3s-vm-bid","cancel_unavail":true}' \
+  | python3 -m json.tool
 ```
 
-> bid 实例被 outbid 后可能直接 pause/stop；每完成一步就 `scp`，正式 cold start/扩容/驱逐仍然回到 §5.0 的 on-demand 命令重跑。
+> bid 也用 API：CLI 的 `create instance` 同样不带 `vm:true`。bid 实例被 outbid 后可能直接 pause/stop；每完成一步就 `scp`，正式 cold start/扩容/驱逐仍然回到 §5.0 的 on-demand 命令重跑。
 
 ### 5.1 记录机器并检查 k3s 前置条件
 
