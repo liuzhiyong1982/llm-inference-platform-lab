@@ -574,6 +574,25 @@ du -sh /var/lib/models/Qwen3-8B-AWQ
 
 ### 6.2 Deployment + Service
 
+**本节目的：把 D1 的 vLLM 进程搬进 k3s，做一次端到端功能验收，并固定 §7–§9 的对照 manifest。** 它不是吞吐/延迟实验——那些在 D1/D2 已经测过；这里只回答四个问题：
+
+1. **调度链是否通**：`runtimeClassName: nvidia` + `nvidia.com/gpu: 1` 能把 Pod 放到 GPU 上，device plugin 暴露的 `nvidia.com/gpu` 能被真正消费。
+2. **权重路径是否对**：hostPath `/var/lib/models` 挂进容器；缓存完整时 initContainer 打印 `weights cached` 并跳过下载，缓存缺失时才从 HF 拉 5.7GB。
+3. **服务是否可用**：startup/readiness/liveness 三个 probe 的语义正确，`/health` 变 Ready，Service 后面能 `curl /v1/models` 拿到 `qwen3-8b`。
+4. **对照是否可复现**：这份 `k8s/vllm.yaml` 就是 §7 冷启动、§8 KEDA、§9 驱逐的 baseline；后面只改 replicas/删除/资源，不再改镜像、模型路径和启动参数。
+
+**通过标准（缺一不算）：**
+
+- `kubectl rollout status` 成功，Pod `1/1 Running`；
+- 日志有 `Application startup complete` 和 `GPU KV cache size`；
+- `curl /v1/models` 返回 `qwen3-8b`；
+- 删除 Pod 重建时，initContainer 打印 `weights cached`，不再重新下载；
+- 记录调度→容器启动、initContainer、模型加载/KV cache 三个时间点，作为 §7 的 warm 参照。
+
+**本节不测：** 吞吐、TTFT/TPOT、并发曲线（D1/D2 已做）；KEDA 0→1/1→2（§8）；驱逐排空（§9）；多副本扩缩容（§8 的 2 卡实验）。
+
+> 为什么用 Deployment 而不是裸 Pod：§8 的 KEDA 要 scale 一个带 ReplicaSet 的对象，§9 驱逐后也要有控制器把 Pod 重建；裸 Pod 没有这两个语义。单副本用 `Recreate`，避免滚动更新先起一个因 GPU 不足而 Pending 的第二个 Pod。
+
 把下面保存为 `k8s/vllm.yaml`。关键点都在注释里：
 
 ```yaml
