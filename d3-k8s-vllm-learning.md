@@ -1153,7 +1153,7 @@ kubectl get hpa
 | `scaleTargetRef.name` | `vllm-qwen3-8b` | 要伸缩的 Deployment | ScaledObject 必须和 Deployment 同 namespace，KEDA 不支持跨 namespace 直接 scale |
 | `minReplicaCount` | `1` | 最少副本 | 设 `0` 才能 scale-to-zero，但需要能缓冲请求的入口；见下文 |
 | `maxReplicaCount` | `2` | 最多副本 | 不能超过节点空闲 GPU 数；本机 2 张 4090 |
-| `pollingInterval` | `15` | KEDA 查 trigger 的间隔（秒） | 不是 HPA 的 sync period；两者叠加决定反应时间 |
+| `pollingInterval` | `15` | KEDA 刷新 ScaledObject 状态/事件的间隔（秒） | KEDA 2.21 在 `minReplicaCount: 1` 时**不影响 HPA 伸缩**：admission event 明确提示它只影响 scale-to-zero、`idleReplicaCount` 或 `useCachedMetrics`；真正触发伸缩的是 HPA 的 sync period |
 | `cooldownPeriod` | `300` | 最后一次 trigger 活跃后等多久缩到 0 | 只在 `minReplicaCount: 0` 时生效；`min=1` 时 2→1 由 HPA 的 scaleDown stabilization 控制 |
 | `triggers[].type` | `prometheus` | trigger 类型 | 还支持 cpu/memory/rabbitmq/kafka 等 |
 | `serverAddress` | `http://...monitoring.svc:9090` | Prometheus HTTP API | 从 `keda-operator` Pod 里必须能解析和访问；NetworkPolicy 要放行 |
@@ -1317,12 +1317,15 @@ KEDA 不是“队列一超 8 立刻多一个 Pod”。实际链路是：
 
 ```text
 队列超过 threshold
-  → KEDA 下一次 polling（最多 15s）
-  → HPA 下一次 sync（默认 15s）
+  → HPA 下一次 sync（默认 15s）通过 external metrics API 取 s0-prometheus
+  → KEDA metrics adapter 查询 Prometheus（Prometheus 已按 5s scrape）
+  → HPA 算出 desiredReplicas > 1
   → Deployment 创建 Pod
   → 调度 + 镜像/权重/模型加载（§7 的 86–141s）
   → Pod Ready，Service 才有新 endpoint
 ```
+
+> KEDA 2.21 的 admission event 会提示：`PollingInterval is configured but is not relevant for scaling...`。`minReplicaCount: 1` 时不要把它当成伸缩延迟；HPA 的 sync period 才是采样节拍。
 
 所以扩容实验至少记四个时间点：
 
@@ -1373,10 +1376,10 @@ vllm bench --max-concurrency 128
   → 64 条进入 running batch，其余在 engine 队列里等
   → vLLM 暴露 vllm:num_requests_waiting（gauge，>0）
   → Prometheus 每 5s scrape 一次（ServiceMonitor interval: 5s）
-  → KEDA operator 每 15s 查一次 sum(vllm:num_requests_waiting)
+  → HPA 每 15s sync 一次，通过 external metrics API 取 s0-prometheus
+  → KEDA metrics adapter 用 sum(vllm:num_requests_waiting) 查 Prometheus
   → 结果 > threshold 8
-  → KEDA 更新 external metric s0-prometheus
-  → HPA 下一次 sync（默认 15s）算出 desiredReplicas > 1
+  → HPA 算出 desiredReplicas > 1
   → Deployment 创建第二个 Pod
   → 新 Pod Ready 前队列继续堆积；Ready 后 Service 把请求分到两个 Pod
 ```
@@ -1402,6 +1405,15 @@ vllm bench --max-concurrency 128
 | `--percentile-metrics` / `--metric-percentiles` | 只影响 bench 统计输出，不参与 KEDA |
 
 **为什么 `--max-concurrency 64` 不够：** 它和 `--max-num-seqs 64` 相等，64 个请求可能全部被 engine 接走，`num_requests_waiting` 接近 0，KEDA 不会触发。要用 128 或更高，让 running batch 满、其余排队。如果你把 vLLM 的 `--max-num-seqs` 调大，压测并发也要相应调大。
+
+**2026-11-24 实测反例：** 用旧的 `--num-prompts 300 --max-concurrency 64` 跑完后：
+
+- `vllm:request_success_total{finished_reason="length"}` = 300，说明请求确实到了 vLLM；
+- `sum(vllm:num_requests_waiting)` 只在开始出现一次 `29`，下一个采样点就是 `0`；
+- `sum(vllm:num_requests_running)` 很快到 `64` 并保持，说明 64 条已经在跑，没有持续等待；
+- HPA `TARGETS 0/8`、`REPLICAS 1`，KEDA 没算错，是队列没有持续超过 8。
+
+原因是 `--max-concurrency 64` 刚好等于 `--max-num-seqs 64`：64 个请求全部被 engine 接走，等待队列只在启动瞬间出现。HPA 每 15s 采样一次，5s 的瞬时尖峰很容易错过。用 `--max-concurrency 128` 让 64 条持续等待，才能稳定触发。
 
 压测期间确认队列：
 
