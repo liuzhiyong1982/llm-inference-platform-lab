@@ -161,3 +161,5 @@ D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learnin
 D4.5（可选，Q2）：PD 分离 2P+2D，4×L4，6–8h，目标 ≤$8；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（未执行；先完成 D4 且余额 ≥ $8）。
 
 D4.6（可选，T1-C）：tiered KV cache，2×L4，3–4h，约 $3–4；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；和 D4.5 二选一先做）。
+
+技术栈调研与 D1–D5 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/Argo CD/GPU Operator/安全/OpenCost；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线。

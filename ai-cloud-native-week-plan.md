@@ -85,9 +85,24 @@ A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/�
 
 **PR / citizenship：** PR 在加拿大自由工作，但没有美国工作授权。现在能走加拿大实体/remote-Canada、少数美国公司的 EOR contractor、或加拿大公司的美国团队内部转岗（L-1 通常需海外任职满一年）。拿到 citizenship 后 TN 是最快通道；TN 的 "Engineer" 类别对学位/P.Eng 有要求，platform/DevOps title 可能更适合 "Computer Systems Analyst"。找移民律师确认，不要把"拿到护照"当成自动美国工作许可。等待期间不要停，先用加拿大 remote 岗位积累 A 线经验。
 
-**时间分配（A 线专精 + B 线就业）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno，**同时作为 B 线 artifact 的主证据**）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。DRA、Volcano、Kubeflow、PD 分离深挖降为 30 分钟概念，不进入验收。
+**时间分配（A 线专精 + B 线就业）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno，**同时作为 B 线 artifact 的主证据**）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。DRA、Volcano、Kubeflow 全家桶、PD 分离深挖降为 30 分钟概念，不进入验收；B 线只做 1 个 KServe/MLflow vertical slice，不展开全家桶。
 
 > B 线不能只靠“我有 DevOps 履历”。D3（GPU 平台交付）、D5（多租户配额）、Q2 的 chargeback 要能各自独立讲成 10 分钟案例；否则投 B 线岗时仍然只有一个 inference benchmark 项目。
+
+### 0.7 技术栈缺口校准（2026-11-24）
+
+抽样 8 份 A 线 + 8 份 B 线 JD 后，D1–D5 的硬核部分（vLLM 调参、KV、prefix caching、PD/tiered KV、K8s/冷启动/KEDA/Kueue）覆盖良好；缺口集中在：
+
+- **A 线：** SGLang/RadixAttention、TP/多卡、DCGM + Grafana + OTel、TensorRT-LLM/Triton 选型；
+- **B 线：** KServe/OpenShift AI、Kubeflow/Ray/MLflow、Argo CD、GPU Operator/MIG/DRA、Vault/OPA/NetworkPolicy、OpenCost、RAG/MCP。
+
+完整证据、覆盖矩阵和最小补法见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)。原则：**不把 D1–D5 撑爆**，用加挂 lab 补；每季度只加 1–2 个。
+
+| 季度 | 建议加挂（按优先级） | 验收 |
+|---|---|---|
+| Q1 | SGLang（D2.5）+ DCGM/Grafana/OTel（D4.7）+ KServe（D3.5） | 1 张 vLLM/SGLang 对比表 + 1 张 Grafana 图 + 1 个 `InferenceService` |
+| Q2 | TP=2（D2.6）+ flow control（D4.8）+ Argo CD/OpenCost（D3.6） | TP=1 vs TP=2 表 + 优先级表 + GitOps 回滚 + 成本表 |
+| Q3 | 安全（D5.5）+ MLflow/Kubeflow slice（D3.7）+ RAG/MCP | 2 条拒绝日志 + secret 注入 + 1 个受控 RAG 服务 |
 
 **季度 gate（不再按 12/14 周倒排）：**
 
