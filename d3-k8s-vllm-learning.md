@@ -1139,7 +1139,7 @@ spec:
   - type: prometheus
     metadata:
       serverAddress: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
-      metricName: vllm_requests_waiting   # HPA 里的 external metric 名，不能带冒号
+      metricName: vllm_requests_waiting   # KEDA/scaler 的指标名；HPA 里实际是 s0-prometheus
       query: sum(vllm:num_requests_waiting)  # 必须返回单条序列
       threshold: "8"            # 目标队列深度；字符串
 EOF
@@ -1157,37 +1157,93 @@ kubectl get hpa
 | `cooldownPeriod` | `300` | 最后一次 trigger 活跃后等多久缩到 0 | 只在 `minReplicaCount: 0` 时生效；`min=1` 时 2→1 由 HPA 的 scaleDown stabilization 控制 |
 | `triggers[].type` | `prometheus` | trigger 类型 | 还支持 cpu/memory/rabbitmq/kafka 等 |
 | `serverAddress` | `http://...monitoring.svc:9090` | Prometheus HTTP API | 从 `keda-operator` Pod 里必须能解析和访问；NetworkPolicy 要放行 |
-| `metricName` | `vllm_requests_waiting` | 暴露给 HPA 的外部指标名 | 用下划线；不要直接把 PromQL 里的 `vllm:num_requests_waiting` 当 metricName |
+| `metricName` | `vllm_requests_waiting` | KEDA/scaler 的指标名 | HPA 实际用 `s0-prometheus`；这个值不会原样出现在 HPA 的 `metric.name` 里；用下划线，避免冒号 |
 | `query` | `sum(vllm:num_requests_waiting)` | 实际 PromQL | 必须返回单条序列；多 Pod/多 engine 要先 `sum`/`avg` 聚合 |
 | `threshold` | `"8"` | 目标值 | 字符串；HPA 用 external metric 的 averageValue 作为目标 |
 
-### 8.3.1 HPA 侧看到什么
+### 8.3.1 KEDA 生成的 HPA：完整对象与字段来源
 
-```bash
-kubectl get scaledobject vllm-scaler
-kubectl describe scaledobject vllm-scaler
-
-kubectl get hpa
-kubectl get hpa keda-hpa-vllm-scaler -o yaml
-```
-
-正常时 `ScaledObject` 的 `READY=True`、`ACTIVE=True`；`kubectl get hpa` 会看到一个 KEDA 生成的 HPA，名字固定是 `keda-hpa-vllm-scaler`，`TARGETS` 形如 `0/8`（当前队列/阈值）。`kubectl get hpa -o yaml` 里的关键字段：
+`kubectl get hpa keda-hpa-vllm-scaler -o yaml` 的实测对象（`creationTimestamp` / `resourceVersion` / `uid` 每次重建都会变）：
 
 ```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"keda.sh/v1alpha1","kind":"ScaledObject","metadata":{"annotations":{},"name":"vllm-scaler","namespace":"default"},"spec":{"cooldownPeriod":300,"maxReplicaCount":2,"minReplicaCount":1,"pollingInterval":15,"scaleTargetRef":{"name":"vllm-qwen3-8b"},"triggers":[{"metadata":{"metricName":"vllm_requests_waiting","query":"sum(vllm:num_requests_waiting)","serverAddress":"http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090","threshold":"8"},"type":"prometheus"}]}}
+  creationTimestamp: "2026-11-24T18:06:06Z"
+  generation: 1
+  labels:
+    app.kubernetes.io/managed-by: keda-operator
+    app.kubernetes.io/name: keda-hpa-vllm-scaler
+    app.kubernetes.io/part-of: vllm-scaler
+    app.kubernetes.io/version: 2.21.1
+    scaledobject.keda.sh/name: vllm-scaler
+  name: keda-hpa-vllm-scaler
+  namespace: default
+  ownerReferences:
+  - apiVersion: keda.sh/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: ScaledObject
+    name: vllm-scaler
+    uid: 435b19d6-9de3-4a14-9917-ddc7f3ba77e2
+  resourceVersion: "7006"
+  uid: 2bcf194d-5d21-4d51-a8b2-8dc3dd06e046
 spec:
-  minReplicas: 1
   maxReplicas: 2
   metrics:
-  - type: External
-    external:
+  - external:
       metric:
-        name: vllm_requests_waiting
+        name: s0-prometheus
+        selector:
+          matchLabels:
+            scaledobject.keda.sh/name: vllm-scaler
       target:
-        type: AverageValue
         averageValue: "8"
+        type: AverageValue
+    type: External
+  minReplicas: 1
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-qwen3-8b
 ```
 
-`threshold: "8"` 的语义：KEDA 把 `sum(vllm:num_requests_waiting)` 作为一个 external metric，HPA 的目标是每个副本平均 8 个排队请求。对 `sum()` 来说，可以近似记成：
+这个对象不是手写的，是 KEDA operator 根据 `ScaledObject/vllm-scaler` 生成的。字段来源：
+
+| 字段 | 值 | 来源 | 意义 / 注意 |
+|---|---|---|---|
+| `apiVersion` / `kind` | `autoscaling/v2` / `HorizontalPodAutoscaler` | Kubernetes HPA | KEDA 最终通过标准 HPA 执行伸缩，不是自己改 replicas |
+| `metadata.annotations.kubectl.kubernetes.io/last-applied-configuration` | ScaledObject 的 JSON | `kubectl apply` ScaledObject 时的记录，KEDA 带到 HPA 上 | 内容是 ScaledObject，不是 HPA 配置；不参与伸缩，可忽略 |
+| `metadata.creationTimestamp` / `generation` / `resourceVersion` / `uid` | 创建时间、版本号、UID | Kubernetes API server | 集群内唯一；重建 HPA 会变，不要写进配置 |
+| `metadata.labels.app.kubernetes.io/managed-by` | `keda-operator` | KEDA | 标记这个 HPA 由 KEDA 管理，不要手改 |
+| `metadata.labels.app.kubernetes.io/name` | `keda-hpa-vllm-scaler` | KEDA | 与 `metadata.name` 一致 |
+| `metadata.labels.app.kubernetes.io/part-of` | `vllm-scaler` | ScaledObject 名 | 表示归属哪个 ScaledObject |
+| `metadata.labels.app.kubernetes.io/version` | `2.21.1` | KEDA 版本 | 排障时先确认版本，字段形态可能随版本变 |
+| `metadata.labels.scaledobject.keda.sh/name` | `vllm-scaler` | KEDA | 关键关联标签；external metric 的 selector 也用它 |
+| `metadata.name` | `keda-hpa-vllm-scaler` | KEDA 命名规则 `keda-hpa-<ScaledObject 名>` | 不要手建同名 HPA |
+| `metadata.namespace` | `default` | 与 ScaledObject 同 namespace | ScaledObject 不能跨 namespace 直接 scale |
+| `metadata.ownerReferences` | `ScaledObject/vllm-scaler`，`controller: true` | KEDA | HPA 的属主是 ScaledObject；删 ScaledObject 会级联删 HPA |
+| `spec.minReplicas` | `1` | ScaledObject `minReplicaCount: 1` | 不缩到 0；原因见 §8.3.2 |
+| `spec.maxReplicas` | `2` | ScaledObject `maxReplicaCount: 2` | 不能超过节点空闲 GPU 数 |
+| `spec.scaleTargetRef.apiVersion` / `kind` / `name` | `apps/v1` / `Deployment` / `vllm-qwen3-8b` | ScaledObject `scaleTargetRef.name`，KEDA 默认补 `apps/v1 Deployment` | 真正被伸缩的对象 |
+| `spec.metrics[].type` | `External` | KEDA | 指标来自 `external.metrics.k8s.io`，由 KEDA metrics adapter 提供 |
+| `external.metric.name` | `s0-prometheus` | **KEDA 生成**：`s` + trigger 序号 `0` + `-` + scaler 类型 `prometheus` | **不是** ScaledObject 里的 `metricName: vllm_requests_waiting`；有些 KEDA 版本会带 metricName 后缀，实际以 `kubectl get hpa -o yaml` 为准 |
+| `external.metric.selector.matchLabels` | `scaledobject.keda.sh/name: vllm-scaler` | KEDA | 让 metrics adapter 只返回这个 ScaledObject 的指标 |
+| `external.target.type` | `AverageValue` | KEDA / HPA external metric | HPA 用 external metric 的平均值目标计算副本数 |
+| `external.target.averageValue` | `"8"` | ScaledObject `triggers[0].metadata.threshold: "8"` | 目标队列深度；`sum()` 时近似 `desiredReplicas = ceil(totalQueue / 8)` |
+| `status`（示例里没有） | — | HPA controller 写入 | `kubectl get hpa` 的 `TARGETS` / `REPLICAS` 来自 `status.currentMetrics` / `status.desiredReplicas`，不在 spec 里 |
+
+几个容易误解的点：
+
+- **`metricName` 不是 HPA 的 `metric.name`。** ScaledObject 里写的是 `metricName: vllm_requests_waiting`，但 HPA 实际用 `s0-prometheus`。所以不要在 HPA 里搜 `vllm_requests_waiting`，也不要用它判断 KEDA 是否生效；要看 `s0-prometheus` 和 `scaledobject.keda.sh/name` selector。
+- **`pollingInterval`、`cooldownPeriod`、`serverAddress`、`query` 不在 HPA 里。** 它们是 ScaledObject/trigger 的配置：KEDA operator 按 `pollingInterval` 查 Prometheus，执行 `query`，把结果通过 adapter 暴露成 `s0-prometheus`；HPA 只消费结果。
+- **`behavior` 没出现。** 说明 KEDA 没给 HPA 设置自定义行为，HPA 用默认的 scaleDown stabilization（300s）。`cooldownPeriod: 300` 只影响 scale-to-zero；`minReplicaCount: 1` 时 2→1 由 HPA 这个默认窗口控制。
+- **`ownerReferences` 决定生命周期。** 删 ScaledObject 时 HPA 会被级联删除；反过来手删 HPA，KEDA 会按 ScaledObject 重新创建它。
+
+`threshold: "8"` 的语义：KEDA 把 `sum(vllm:num_requests_waiting)` 作为 external metric，HPA 的目标是每个副本平均 8 个排队请求。对 `sum()` 来说，可以近似记成：
 
 ```text
 desiredReplicas = ceil(totalQueue / 8)
@@ -1250,7 +1306,8 @@ kubectl describe hpa keda-hpa-vllm-scaler
 |---|---|---|
 | `ScaledObject` `READY=False` | trigger 配置错、Prometheus 不可达 | `kubectl describe scaledobject` 看 condition 和 event |
 | HPA `TARGETS` 是 `<unknown>/8` | KEDA metrics adapter 没拿到指标 | 查 `keda-operator-metrics-apiserver` 日志；先在 Prometheus 里跑同样的 PromQL |
-| `FailedGetExternalMetric` | `serverAddress` DNS/网络不通，或 metricName 不匹配 | 从 `keda-operator` Pod 内访问 Prometheus；检查 Service 名和 namespace |
+| `FailedGetExternalMetric` | HPA 找不到 `s0-prometheus`：`serverAddress` DNS/网络不通、KEDA metrics adapter 没 Ready，或 ScaledObject 没 Ready | 查 `kubectl -n keda get pods` 和 adapter 日志；不要在 HPA 里找 `vllm_requests_waiting`，那是 ScaledObject 的 `metricName`，不是 HPA 的 `metric.name` |
+| HPA 里没有 `vllm_requests_waiting` | KEDA 把 trigger 暴露成 `s0-prometheus` + `scaledobject.keda.sh/name` selector | 看 `metric.name: s0-prometheus` 和 selector；这是正常现象 |
 | HPA 算出 2，但第二个 Pod `Pending` | CPU/内存/GPU 不够 | 看 `kubectl describe pod` 的 event；按 §8.3.3 改资源 |
 | 队列很高但 HPA 不动 | 查询返回空/多序列，或 `threshold` 太大 | 直接跑 PromQL 比较结果；多序列用 `sum()` |
 
