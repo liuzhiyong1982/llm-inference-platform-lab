@@ -157,3 +157,5 @@ D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix ca
 D3（k3s + vLLM Deployment、冷启动、KEDA、驱逐）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行；§7 冷启动、§8 KEDA/1→2、§9 驱逐均有实测；VM 已 Destroy）。
 
 D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按计划准备，**未执行**；4h、2×L4、llm-d 1.0 precise prefix routing vs Service round-robin；§1.4 + 附录 A 覆盖 llm-d 核心 feature，脚本见 `scripts/d4/`）。
+
+D4.5（可选，Q2）：PD 分离 2P+2D，4×L4，6–8h，目标 ≤$8；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（未执行；先完成 D4 且余额 ≥ $8）。

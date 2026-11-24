@@ -1,0 +1,93 @@
+# D4.5 PD 实验组：2 prefill + 2 decode，llm-d PD 路由。
+#
+# 基于 llm-d v1.0.0 的 pd-disaggregation router values：
+#   guides/pd-disaggregation/router/pd-disaggregation.values.yaml
+# 改动：
+#   - matchLabels 指向本 lab 的 DisaggregatedSet
+#   - maxPrefixTokensToMatch 8192（Qwen3-8B 8k 上下文）
+#   - peakPrefillThroughput 100000（先关 saturation gate；跑通后再 calibration）
+#   - FailClose / failOpen=false：PD 的 EPP 是控制面，静默绕过 P/D 会破坏语义
+#
+# 安装：
+#   helm upgrade --install d45-router \
+#     oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+#     -n d45 --version v1.0.0 \
+#     -f guides/recipes/router/base.values.yaml \
+#     -f <本文件>
+router:
+  inferencePool:
+    failureMode: FailClose
+  modelServers:
+    type: vllm
+    protocol: http
+    targetPorts:
+      - number: 8000
+    matchLabels:
+      llm-d.ai/guide: "pd-disaggregation"
+
+  proxy:
+    enabled: true
+    proxyType: envoy
+    # PD 的 EPP 负责 prefill/decode 两次调度；fail-open 会把请求直接丢给
+    # 某个 pod，绕过 P/D 语义。这里选择 fail-close，故障时明确 503。
+    failOpen: false
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+  epp:
+    replicas: 1
+    flags:
+      v: 2
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    pluginsConfigFile: "pd-config.yaml"
+    pluginsCustomConfig:
+      pd-config.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: always-disagg-pd-decider
+          - type: disagg-profile-handler
+            parameters:
+              deciders:
+                prefill: always-disagg-pd-decider
+          - type: prefill-filter
+          - type: decode-filter
+          - type: approx-prefix-cache-producer
+            parameters:
+              maxPrefixTokensToMatch: 8192
+          - type: inflight-load-producer
+          - type: prefix-cache-affinity-filter
+            parameters:
+              # 初始值：先关 saturation gate，保证 P/D 跑通；跑通后用
+              # guides/recipes/router/calibration/calibrate.sh 重测。
+              peakPrefillThroughput: 100000
+          - type: token-load-scorer
+          - type: active-request-scorer
+          - type: max-score-picker
+        schedulingProfiles:
+          - name: prefill
+            plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: prefix-cache-affinity-filter
+              - pluginRef: token-load-scorer
+              - pluginRef: max-score-picker
+          - name: decode
+            plugins:
+              - pluginRef: decode-filter
+              - pluginRef: active-request-scorer
+              - pluginRef: max-score-picker
+
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081

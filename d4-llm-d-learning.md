@@ -1415,7 +1415,7 @@ results/d4/
   6–8h，约 $5–8
 ```
 
-> L4 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×L4 上硬跑 1P1D 更有价值。
+> L4 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×L4 上硬跑 1P1D 更有价值。完整 runbook 见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)。
 
 **面试一句话：** “PD 的收益来自 prefill 和 decode 的 resource profile 不同；没有长 prompt、高并发、快 KV 传输和第二个池，拆池只会增加复杂度和空闲。”
 
@@ -1523,7 +1523,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 | feature | 最小可行拓扑 | 时间 | 预算 | 建议 |
 |---|---|---|---|---|
-| PD | 4×L4，2P + 2D，TP=1 | 6–8h | $5–8 | 单独 D4.5/Q2；不要在 2×L4 上做 1P1D |
+| PD | 4×L4，2P + 2D，TP=1 | 6–8h | $5–8 | 已排：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；不要在 2×L4 上做 1P1D |
 | wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
 | flow control | 2×L4 + 两类客户端（premium/batch） | 3–4h | ~$3 | D5/Q2 扩展 |
 | tiered prefix cache | 2×L4，64GB RAM，CPU tier | 3–4h | ~$3 | 可选；先量 HBM 命中率 |

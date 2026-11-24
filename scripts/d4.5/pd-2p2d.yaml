@@ -1,0 +1,310 @@
+# D4.5 PD 实验组：2 个 prefill（TP=1）+ 2 个 decode（TP=1），共 4×L4。
+#
+# 基于 llm-d v1.0.0 的 pd-disaggregation guide：
+#   guides/pd-disaggregation/modelserver/gpu/vllm/base/disaggregatedset.yaml
+# 改动：
+#   - gpt-oss-120b / 1P(TP=1)+1D(TP=4) -> Qwen3-8B-AWQ / 2P(TP=1)+2D(TP=1)
+#   - 本地权重 /models/Qwen3-8B-AWQ，不依赖 HF token
+#   - block-size 64，和 D4 的 prefix 实验口径一致
+#   - decode 引擎 8200，routing sidecar 8000
+#
+# 前置：
+#   - LWS 1.0.0+，enableDisaggregatedSet=true
+#   - namespace d45
+#   - /models/Qwen3-8B-AWQ 在宿主机上
+#
+# 用法：
+#   kubectl apply -n d45 -f scripts/d4.5/pd-2p2d.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pd-disagg-vllm
+automountServiceAccountToken: false
+---
+apiVersion: disaggregatedset.x-k8s.io/v1
+kind: DisaggregatedSet
+metadata:
+  name: pd-disagg-vllm
+  labels:
+    llm-d.ai/inference-serving: "true"
+    llm-d.ai/guide: pd-disaggregation
+    llm-d.ai/accelerator-variant: gpu
+    llm-d.ai/accelerator-vendor: nvidia
+    llm-d.ai/engine-type: vllm
+    llm-d.ai/model: qwen3-8b
+spec:
+  slices: 1
+  roles:
+    - name: prefill
+      spec:
+        replicas: 2          # 2 个 prefill pod，每个 1 GPU
+        groupIdentity: Hash
+        rolloutStrategy:
+          rollingUpdateConfiguration:
+            maxSurge: 0
+            maxUnavailable: 1
+        leaderWorkerTemplate:
+          size: 1
+          workerTemplate:
+            metadata:
+              labels:
+                llm-d.ai/inference-serving: "true"
+                llm-d.ai/guide: pd-disaggregation
+                llm-d.ai/accelerator-variant: gpu
+                llm-d.ai/accelerator-vendor: nvidia
+                llm-d.ai/engine-type: vllm
+                llm-d.ai/model: qwen3-8b
+                llm-d.ai/role: prefill
+            spec:
+              serviceAccountName: pd-disagg-vllm
+              runtimeClassName: nvidia
+              terminationGracePeriodSeconds: 120
+              containers:
+                - name: modelserver
+                  image: vllm/vllm-openai:v0.31.0
+                  imagePullPolicy: IfNotPresent
+                  command: ["vllm", "serve"]
+                  args:
+                    - "/models/Qwen3-8B-AWQ"
+                    - "--served-model-name=qwen3-8b"
+                    - "--max-model-len=8192"
+                    - "--gpu-memory-utilization=0.90"
+                    - "--max-num-seqs=64"
+                    - "--max-num-batched-tokens=4096"
+                    - "--tensor-parallel-size=1"
+                    - "--block-size=64"
+                    - "--enable-prefix-caching"
+                    - "--kv-transfer-config"
+                    - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}'
+                    - "--shutdown-timeout=45"
+                    - "--disable-log-requests"
+                  env:
+                    - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+                      value: "120"
+                    - name: HF_HUB_OFFLINE
+                      value: "1"
+                    - name: DO_NOT_TRACK
+                      value: "1"
+                  ports:
+                    - name: modelserver
+                      containerPort: 8000
+                      protocol: TCP
+                    - name: nixl
+                      containerPort: 5600
+                      protocol: TCP
+                  resources:
+                    requests:
+                      cpu: "2"
+                      memory: 10Gi
+                      nvidia.com/gpu: 1
+                    limits:
+                      cpu: "4"
+                      memory: 16Gi
+                      nvidia.com/gpu: 1
+                  startupProbe:
+                    httpGet:
+                      path: /v1/models
+                      port: modelserver
+                    initialDelaySeconds: 15
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 120
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: modelserver
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 6
+                  readinessProbe:
+                    httpGet:
+                      path: /v1/models
+                      port: modelserver
+                    periodSeconds: 5
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["sh", "-c", "sleep 15"]
+                  volumeMounts:
+                    - name: models
+                      mountPath: /models
+                      readOnly: true
+                    - name: shm
+                      mountPath: /dev/shm
+                    - name: cache
+                      mountPath: /.cache
+                    - name: config
+                      mountPath: /.config
+                    - name: triton
+                      mountPath: /.triton
+              volumes:
+                - name: models
+                  hostPath:
+                    path: /models
+                    type: Directory
+                - name: shm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 8Gi
+                - name: cache
+                  emptyDir: {}
+                - name: config
+                  emptyDir: {}
+                - name: triton
+                  emptyDir: {}
+
+    - name: decode
+      spec:
+        replicas: 2          # 2 个 decode pod，每个 1 GPU
+        groupIdentity: Hash
+        rolloutStrategy:
+          rollingUpdateConfiguration:
+            maxSurge: 0
+            maxUnavailable: 1
+        leaderWorkerTemplate:
+          size: 1
+          workerTemplate:
+            metadata:
+              labels:
+                llm-d.ai/inference-serving: "true"
+                llm-d.ai/guide: pd-disaggregation
+                llm-d.ai/accelerator-variant: gpu
+                llm-d.ai/accelerator-vendor: nvidia
+                llm-d.ai/engine-type: vllm
+                llm-d.ai/model: qwen3-8b
+                llm-d.ai/role: decode
+            spec:
+              serviceAccountName: pd-disagg-vllm
+              runtimeClassName: nvidia
+              terminationGracePeriodSeconds: 120
+              initContainers:
+                # Kubernetes native sidecar：先启动，作为 decode 的 P/D 路由代理。
+                - name: routing-proxy
+                  image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:main
+                  imagePullPolicy: IfNotPresent
+                  args:
+                    - "--port=8000"
+                    - "--vllm-port=8200"
+                    - "--kv-connector=nixlv2"
+                    - "--zap-log-level=1"
+                    - "--secure-serving=false"
+                  ports:
+                    - name: sidecar
+                      containerPort: 8000
+                      protocol: TCP
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: 128Mi
+                    limits:
+                      memory: 256Mi
+                  restartPolicy: Always
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    runAsNonRoot: true
+              containers:
+                - name: modelserver
+                  image: vllm/vllm-openai:v0.31.0
+                  imagePullPolicy: IfNotPresent
+                  command: ["vllm", "serve"]
+                  args:
+                    - "/models/Qwen3-8B-AWQ"
+                    - "--served-model-name=qwen3-8b"
+                    - "--max-model-len=8192"
+                    - "--gpu-memory-utilization=0.90"
+                    - "--max-num-seqs=64"
+                    - "--max-num-batched-tokens=4096"
+                    - "--tensor-parallel-size=1"
+                    - "--block-size=64"
+                    - "--enable-prefix-caching"
+                    - "--kv-transfer-config"
+                    - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}'
+                    - "--port=8200"
+                    - "--shutdown-timeout=45"
+                    - "--disable-log-requests"
+                  env:
+                    - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+                      value: "120"
+                    - name: HF_HUB_OFFLINE
+                      value: "1"
+                    - name: DO_NOT_TRACK
+                      value: "1"
+                  ports:
+                    - name: modelserver
+                      containerPort: 8200
+                      protocol: TCP
+                    - name: nixl
+                      containerPort: 5600
+                      protocol: TCP
+                  resources:
+                    requests:
+                      cpu: "2"
+                      memory: 10Gi
+                      nvidia.com/gpu: 1
+                    limits:
+                      cpu: "4"
+                      memory: 16Gi
+                      nvidia.com/gpu: 1
+                  startupProbe:
+                    httpGet:
+                      path: /v1/models
+                      port: modelserver
+                    initialDelaySeconds: 15
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 120
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: modelserver
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 6
+                  readinessProbe:
+                    httpGet:
+                      path: /v1/models
+                      port: modelserver
+                    periodSeconds: 5
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["sh", "-c", "sleep 15"]
+                  volumeMounts:
+                    - name: models
+                      mountPath: /models
+                      readOnly: true
+                    - name: shm
+                      mountPath: /dev/shm
+                    - name: cache
+                      mountPath: /.cache
+                    - name: config
+                      mountPath: /.config
+                    - name: triton
+                      mountPath: /.triton
+              volumes:
+                - name: models
+                  hostPath:
+                    path: /models
+                    type: Directory
+                - name: shm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 8Gi
+                - name: cache
+                  emptyDir: {}
+                - name: config
+                  emptyDir: {}
+                - name: triton
+                  emptyDir: {}

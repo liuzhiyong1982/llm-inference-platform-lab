@@ -1,0 +1,70 @@
+# D4.5 colocated 控制组：4 个完整 vLLM 副本 + optimized-baseline EPP。
+#
+# 安装：
+#   helm upgrade --install d45-router \
+#     oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+#     -n d45 --version v1.0.0 \
+#     -f guides/recipes/router/base.values.yaml \
+#     -f <本文件>
+router:
+  inferencePool:
+    failureMode: FailOpen
+  modelServers:
+    type: vllm
+    protocol: http
+    targetPorts:
+      - number: 8000
+    matchLabels:
+      llm-d.ai/guide: "pd-colocated"
+
+  proxy:
+    enabled: true
+    proxyType: envoy
+    failOpen: true
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+  epp:
+    replicas: 1
+    flags:
+      v: 2
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    pluginsConfigFile: "colocated-plugins.yaml"
+    pluginsCustomConfig:
+      colocated-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: approx-prefix-cache-producer
+            parameters:
+              # Qwen3-8B 的最长上下文 8k；不要用 gpt-oss 的 131072。
+              maxPrefixTokensToMatch: 8192
+          - type: inflight-load-producer
+          - type: prefix-cache-affinity-filter
+            parameters:
+              # 初始值：相当于把 saturation gate 关掉，保证两个 arm 都只按
+              # prefix + in-flight load 走。正式数字前用 calibration 重测。
+              peakPrefillThroughput: 100000
+          - type: token-load-scorer
+          - type: active-request-scorer
+        schedulingProfiles:
+          - name: default
+            plugins:
+              - pluginRef: prefix-cache-affinity-filter
+              - pluginRef: token-load-scorer
+              - pluginRef: active-request-scorer
+
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
