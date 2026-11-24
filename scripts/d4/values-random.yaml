@@ -1,0 +1,59 @@
+# D4 Lab 1：对照组。和 values-precise.yaml 走同一条 Envoy + EPP 路径，
+# 只把调度策略换成 random-picker —— 用来隔离“路由算法”的影响，
+# 避免把 EPP/Envoy 的固定开销算成 prefix routing 的收益。
+#
+# 用法：
+#   helm upgrade --install d4-router \
+#     oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+#     -n d4 --version v1.0.0 \
+#     -f guides/recipes/router/base.values.yaml \
+#     -f <本文件>
+router:
+  inferencePool:
+    failureMode: FailOpen
+  modelServers:
+    type: vllm
+    protocol: http
+    targetPorts:
+      - number: 8000
+    matchLabels:
+      llm-d.ai/guide: "d4-prefix-routing"
+
+  proxy:
+    enabled: true
+    proxyType: envoy
+    failOpen: true
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+  epp:
+    replicas: 1
+    flags:
+      v: 2
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    pluginsConfigFile: "random-plugins.yaml"
+    pluginsCustomConfig:
+      random-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: random-picker
+        schedulingProfiles:
+          - name: default
+            plugins:
+              - pluginRef: random-picker
+
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081

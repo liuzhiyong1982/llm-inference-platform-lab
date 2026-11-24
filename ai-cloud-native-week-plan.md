@@ -347,7 +347,9 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 | **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试；**B 线：500 字平台案例 + 2 条 B 线 bullet** |
 | **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单；**B 线：3 个本地 B 线 JD 映射** |
 
-> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 执行中：§7 冷启动、§8 KEDA/1→2、§9 驱逐已跑，实付约 `$4.00`）；D3 直接用 Vast RTX VM（你已在上面跑过 k8s），租借命令见该文档 §5.0。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
+> D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行：§7 冷启动、§8 KEDA/1→2、§9 驱逐；实付约 `$4.00`）；D3 直接用 Vast RTX VM（你已在上面跑过 k8s），租借命令见该文档 §5.0。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
+>
+> D4 的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按本行准备，**未执行**）：4h、2×L4、llm-d `v1.0.0` precise prefix-cache routing；主对比是 Service round-robin vs EPP，EPP random 作为控制组；2×L4 上模型改为 Qwen3-8B-AWQ、TP=1、2 副本，`peakPrefillThroughput` 需重测。可执行 manifest/脚本在 `scripts/d4/`。
 
 ### D3 / D5 的 B 线讲法
 
@@ -527,7 +529,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | 5 | [PD Disaggregation](https://llm-d.ai/docs/well-lit-paths/foundations/pd-disaggregation) | 30 min，**只看不跑** | 需要两个池才跑得动；你只要读懂"什么时候不划算" |
 | 6 | [KAITO docs](https://kaito-project.github.io/kaito/docs/)[30] | 20 min | 你集群里已经装了 KAITO——知道它和 llm-d 的关系，面试能接住追问 |
 
-> **D4 Lab 0（前置）：** request-driven 0→1 用 KEDA HTTP Add-on，见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)。它解决“0 副本时请求怎么进来”，llm-d 解决“多副本时按 prefix cache 怎么路由”；两者不是同一个问题。
+> **D4 Lab 0（前置，可选）：** request-driven 0→1 用 KEDA HTTP Add-on，见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md) §4。它解决“0 副本时请求怎么进来”，llm-d 解决“多副本时按 prefix cache 怎么路由”；两者不是同一个问题。4h 不够时先砍 Lab 0，保 Lab 1（llm-d precise routing）。
 
 > **B 线视角：** llm-d 不只是路由算法，也是一个平台组件。D4 除了 P99，还要带走：Gateway API/`InferencePool`/EPP 的部署与健康检查、路由指标（命中率/5xx）、故障模式（EPP 挂了、后端不健康）。产出见 §3 的 B 线学习表。
 

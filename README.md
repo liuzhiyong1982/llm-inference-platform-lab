@@ -63,7 +63,7 @@ c=16 / c=64 各跑两轮，表中为两轮中位数，括号内为范围；c=1 /
 
 GPU `$0.25/h` + 40GB 存储 `$0.0111/h` = **`$0.2611/h`**；FP16 下载是 ingress，未产生额外带宽费。D2 后 Vast 账户余额 **$18.81**；D3 实付 **$4.00**，D1 + D2 + D3 合计约 **$6.32**，余额约 **$14.81**。
 
-D1/D2 已 **Destroy**；D3 实例 `62375081` 仍在运行，结果 `scp` 回本地并 push 后再 Destroy。
+D1/D2 已 **Destroy**；D3 实例 `62375081` 也已于 2026-11-24 **Destroy**，D3 实付 **`$4.00`**（最终账单以 Vast 为准）。
 
 ## 复现
 
@@ -154,6 +154,6 @@ c=8 是纯量化对比：FP16 比 AWQ 慢 **36.8%**，TPOT P95 高 **60.6%**，g
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
 
-D3（k3s + vLLM Deployment、冷启动、KEDA）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（执行中：§7 冷启动与 §8 KEDA/1→2 已跑，§9 待执行）。
+D3（k3s + vLLM Deployment、冷启动、KEDA、驱逐）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行；§7 冷启动、§8 KEDA/1→2、§9 驱逐均有实测；VM 已 Destroy）。
 
-D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（draft；Lab 0 用 KEDA HTTP Add-on 演示 0→1，llm-d 主实验待补）。
+D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按计划准备，**未执行**；4h、2×L4、llm-d 1.0 precise prefix routing vs Service round-robin；脚本见 `scripts/d4/`）。

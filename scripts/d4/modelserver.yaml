@@ -1,0 +1,157 @@
+# D4 Lab 1：两个 vLLM 副本，每个 1×L4，供 llm-d EPP 做 prefix-cache 路由。
+#
+# 前置：
+#   - k3s 已装好，nvidia.com/gpu allocatable = 2
+#   - 权重已下载到宿主机 /models/Qwen3-8B-AWQ
+#   - RuntimeClass nvidia 已存在（D3 §5.4）
+#
+# 用法：
+#   kubectl create namespace d4 --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -n d4 -f scripts/d4/modelserver.yaml
+#
+# 注意：vLLM 小版本会改 flag。第一次跑先执行：
+#   kubectl exec -n d4 deploy/vllm-d4 -- vllm serve --help | grep -E 'enable-scale-out|kv-events-config|block-size|enable-prefix-caching'
+# 如果 --enable-scale-out 不存在，先确认该版本的 /v1/*/render 是否默认开启，再决定是否删掉这一行。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-d4
+  labels:
+    app: vllm-d4
+    llm-d.ai/guide: d4-prefix-routing
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: vllm-d4
+  template:
+    metadata:
+      labels:
+        app: vllm-d4
+        llm-d.ai/guide: d4-prefix-routing
+        llm-d.ai/model: qwen3-8b
+        llm-d.ai/role: decode
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.34.0
+          imagePullPolicy: IfNotPresent
+          command: ["vllm", "serve"]
+          args:
+            - "/models/Qwen3-8B-AWQ"
+            - "--served-model-name=qwen3-8b"
+            - "--max-model-len=8192"
+            - "--gpu-memory-utilization=0.90"
+            - "--max-num-seqs=64"
+            - "--max-num-batched-tokens=4096"
+            - "--block-size=64"
+            - "--enable-prefix-caching"
+            - "--enable-scale-out"
+            - "--kv-events-config"
+            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","replay_endpoint":"$(KV_EVENTS_REPLAY_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@qwen3-8b"}'
+            - "--shutdown-timeout=45"
+            - "--disable-log-requests"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_PORT
+              value: "8000"
+            - name: KV_EVENTS_ENDPOINT
+              value: "tcp://*:5556"
+            - name: KV_EVENTS_REPLAY_ENDPOINT
+              value: "tcp://*:5559"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DO_NOT_TRACK
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: kv-events
+              containerPort: 5556
+            - name: kv-replay
+              containerPort: 5559
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: 24Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /.cache
+            - name: triton
+              mountPath: /.triton
+      volumes:
+        - name: models
+          hostPath:
+            path: /models
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: cache
+          emptyDir: {}
+        - name: triton
+          emptyDir: {}
+---
+# 普通 Service，给“round-robin 基线”用。EPP 不经过这个 Service，它直接拿
+# InferencePool 里的 Pod IP。K8s Service 是 per-connection 选择，不是严格轮询；
+# 基线压测要用 --force-close 让每个请求新建连接。
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-direct
+  labels:
+    app: vllm-d4
+spec:
+  selector:
+    app: vllm-d4
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
