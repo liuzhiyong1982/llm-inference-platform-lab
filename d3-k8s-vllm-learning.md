@@ -379,7 +379,7 @@ df -h /var/lib
 
 > 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
 
-- cgroup 不是 `cgroup2fs`，k3s/kubelet 可能起不来。
+- 如果 `stat -fc %T /sys/fs/cgroup` 不是 `cgroup2fs`（例如 `tmpfs`），说明还是 cgroup v1，k3s/kubelet 可能起不来。Ubuntu 22.04 可在 `/etc/default/grub` 的 `GRUB_CMDLINE_LINUX` 里加 `systemd.unified_cgroup_hierarchy=1`，`sudo update-grub` 后重启；改不了就换支持 cgroup v2 的 VM。
 - `/var/lib` 不可写，通常是权限或磁盘满；先解决再装。
 - 如果检查失败，换 RTX VM 或本地/云 VM，不要在 Vast 普通容器里硬扛。
 
