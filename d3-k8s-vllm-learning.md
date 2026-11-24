@@ -1650,10 +1650,10 @@ terminationGracePeriodSeconds > preStop + shutdown-timeout + 余量
 
 | 场景 | preStop | shutdown-timeout | grace | 请求 | 目的 |
 |---|---|---|---|---|---|
-| A 无排空基线 | 0 | 默认 | 30s | 8 × 512 | 证明 SIGTERM 直接打断在途请求 |
-| B 有排空 | 15s | 90s | 120s | 8 × 512 | 证明在途请求能跑完、无 SIGKILL |
-| C 窗口不够 | 15s | 90s | 120s | 32 × 1024 | 证明 shutdown-timeout 必须大于最长请求 |
-| D PDB | 15s | 90s | 120s | 8 × 512 | 说明 PDB 只保护自愿驱逐 |
+| A 无排空基线 | 0 | 默认 | 30s | 8 × 4096 | 证明 SIGTERM 直接打断在途请求 |
+| B 有排空 | 15s | 90s | 120s | 8 × 4096 | 证明在途请求能跑完、无 SIGKILL |
+| C 窗口不够 | 15s | 5s | 120s | 8 × 4096 | 证明 shutdown-timeout 必须大于最长请求 |
+| D PDB | 15s | 90s | 120s | 8 × 4096 | 说明 PDB 只保护自愿驱逐 |
 
 通过标准：
 
@@ -1848,7 +1848,7 @@ data:
 
     URL = os.environ["URL"]
     N = int(os.getenv("N", "8"))
-    MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))
+    MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
 
     def one(i):
         t0 = time.time()
@@ -1893,7 +1893,7 @@ spec:
     - name: "N"
       value: "8"
     - name: "MAX_TOKENS"
-      value: "512"
+      value: "4096"
     volumeMounts:
     - name: scripts
       mountPath: /scripts
@@ -1908,7 +1908,7 @@ kubectl get pod drain-client
 
 > `N` 在 YAML 1.1 里会被解析成布尔值；env 的 `name` 必须写成带引号的 `"N"`（`MAX_TOKENS`/`URL` 也建议一起加引号），否则 `kubectl apply` 会报 `cannot unmarshal bool into Go struct field EnvVar.spec.containers.env.name`。
 
-`N=8`、`MAX_TOKENS=512`，8 条请求大约 45s；90s 的 shutdown 窗口足够跑完。
+`N=8`、`MAX_TOKENS=4096`，8 条请求大约 30s；90s 的 shutdown 窗口足够跑完。**不要用 512**：这台 4090 上 8×512 只要 3.6s，你还没删 Pod 请求就结束了，A 会变成无效基线。
 
 #### 9.4.3 发请求 + 删 Pod
 
@@ -1926,7 +1926,7 @@ POD=$(kubectl get pod -l app=vllm-nodrain -o jsonpath='{.items[0].metadata.name}
 date -u +%Y-%m-%dT%H:%M:%SZ
 kubectl get pod "$POD" -o json > /tmp/nodrain-before.json
 
-# 5 秒后删 Pod；不要等它退出
+# 看到 START 后 2–5 秒内删 Pod；不要等它退出
 sleep 5
 kubectl delete pod -l app=vllm-nodrain --wait=false
 date -u +%Y-%m-%dT%H:%M:%SZ
@@ -1956,6 +1956,8 @@ kubectl get pod drain-client -o jsonpath='{.status.phase}{"\n"}'
 - 容器 `exitCode`：0 / 143（SIGTERM）/ 137（SIGKILL）。
 
 无排空基线预期：没有 preStop，SIGTERM 到达时 endpoint 可能还没摘干净；vLLM 没有 `--shutdown-timeout`，在途请求容易被 abort。失败是预期结果，不是你脚本写错了。
+
+> **2026-11-24 第一次 A（无效，仅记录）：** client `19:03:26` 开始、`19:03:30` 结束，8/8 HTTP 200，latency 约 3.62s；Pod 到 `19:04:10` 才删，比 client 结束晚 40s，删除时已经没有在途请求。所以这组 8/8 不能算 A 的结果。原因是 `MAX_TOKENS=512` 在 4090 上只要 3.6s；重跑用 `4096`，看到 8 个 `START` 后 2–5s 内删。**4096 重跑的有效 A：0/8，8 条都在 30.82s 后 ConnectionError，见 §9.11。**
 
 #### 9.4.5 清理 A
 
@@ -1997,7 +1999,7 @@ spec:
     - name: "N"
       value: "8"
     - name: "MAX_TOKENS"
-      value: "512"
+      value: "4096"
     volumeMounts:
     - name: scripts
       mountPath: /scripts
@@ -2075,19 +2077,22 @@ grep -iE "shutdown|drain|abort|SIGTERM|waiting" /tmp/vllm-drain.log | tail -30
 
 ### 9.6 场景 C：排空窗口不够
 
-把客户端改成 `N=32`、`MAX_TOKENS=1024`，重复 B：
+这台 4090 上 8×512 只要约 3.6s、8×4096 约 30s；90s 的窗口其实很宽。为了在 lab 里稳定复现“请求比 shutdown-timeout 长”，不改请求长度，直接把主 Deployment 的 `--shutdown-timeout` 从 90 改成 **5s**：
 
 ```bash
-kubectl delete pod drain-client --ignore-not-found
-# 重新 apply 时把 env N=32、MAX_TOKENS=1024
+kubectl edit deploy vllm-qwen3-8b
+# 找到 args 里 "--shutdown-timeout" 后面的 "90"，改成 "5"
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 ```
+
+然后保持客户端 `N=8`、`MAX_TOKENS=4096`，重复 B。
 
 预期：
 
-- 32 条请求的总时长超过 90s；
-- vLLM 在 `--shutdown-timeout 90` 到期后 abort 剩余请求；
+- 8 条 4096 请求还没跑完，5s 的 shutdown 窗口先到；
+- vLLM abort 剩余请求；
 - 客户端出现失败/超时；
-- Pod 可能在 90s 左右退出，也可能拖到 120s 被 SIGKILL；记录实际值。
+- Pod 在 5s 左右退出，通常不会触发 120s 的 SIGKILL；记录实际值。
 
 这个场景不是“配置错了”，而是用来证明：
 
@@ -2095,7 +2100,13 @@ kubectl delete pod drain-client --ignore-not-found
 shutdown-timeout 必须大于最长在途请求，否则排空窗口不够
 ```
 
-调参方向：增大 `--shutdown-timeout`、增大 grace、限制单请求最大输出（`max_tokens`）、或把长请求拆小。
+生产里如果请求可能超过 90s，就等价于这个场景；调参方向是增大 `--shutdown-timeout`、增大 grace、限制单请求最大输出（`max_tokens`）、或把长请求拆小。测完把 `--shutdown-timeout` 改回 90：
+
+```bash
+kubectl edit deploy vllm-qwen3-8b
+# "5" 改回 "90"
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
+```
 
 ### 9.7 场景 D：PDB 的取舍
 
@@ -2126,9 +2137,9 @@ spec:
 
 | 场景 | preStop | shutdown/grace | 在途请求 | 200 | 失败/5xx | 最大延迟 | Terminating 时长 | exitCode | SIGKILL |
 |---|---|---|---|---|---|---|---|---|---|
-| A 无排空 | 0 | 默认/30s | 8×512 | | | | | | |
-| B 有排空 | 15s | 90s/120s | 8×512 | | | | | | |
-| C 窗口不够 | 15s | 90s/120s | 32×1024 | | | | | | |
+| A 无排空 | 0 | 无/30s | 8×4096 | 0 | 8 ConnectionError | 30.82s | ~30s | 未捕获（推断 137） | 是（推断） |
+| B 有排空 | 15s | 90s/120s | 8×4096 | 8 | 0 | 37.64s | 42s | 0 | 否 |
+| C 窗口不够 | 15s | 5s/120s | 8×4096 | 0 | 8 ConnectionError | 120.44s | ~120s | 未捕获（推断 137） | 是（推断） |
 
 补充记录：
 
@@ -2144,7 +2155,7 @@ spec:
 A：SIGTERM 只告诉进程退出，不保证 Endpoint/kube-proxy/网关已经把这个 Pod 摘掉。preStop sleep 给控制面收敛时间，避免新请求继续打到正在退出的 Pod。
 
 **Q：grace、preStop、shutdown-timeout 的关系？**
-A：grace 是总预算，从 deletion 开始算；preStop 在 SIGTERM 前；shutdown-timeout 是 vLLM 收到 SIGTERM 后等在途请求的上限。必须满足 `grace > preStop + shutdown-timeout + 余量`，否则 SIGKILL（exit 137）。
+A：grace 是总预算，从 deletion 开始算；preStop 在 SIGTERM 前；shutdown-timeout 是 vLLM 收到 SIGTERM 后 engine 等在途请求的上限。必须满足 `grace > preStop + shutdown-timeout + 余量`，否则 SIGKILL（exit 137）。但实测 C 证明它只是必要条件：`shutdown-timeout: 5s` 只让 EngineCore 在 5s 后 abort，API server 还在等连接关闭，Pod 仍拖到 grace 120s 被 SIGKILL。
 
 **Q：`kubectl delete pod` 能验证 PDB 吗？**
 A：不能。PDB 只约束 Eviction API（drain/维护）；直接 delete 绕过 PDB。
@@ -2174,6 +2185,68 @@ kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
 ```bash
 kubectl delete pdb vllm-pdb --ignore-not-found
 ```
+
+### 9.11 2026-11-24 实测总结
+
+环境：2×RTX 4090，kernel `6.8.0-149`，driver `580.178.04`，vLLM `v0.34.0`；Deployment `4 CPU / 20Gi / 1 GPU`；客户端和 vLLM 同集群，走 Service。负载统一为 **8 并发 × `max_tokens=4096`**，删除时 8 条都在途。
+
+| 场景 | preStop | shutdown | grace | 在途 | 200 | 失败 | 最大延迟 | delete → 退出 | exitCode | SIGKILL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A 无排空 | 0 | 无（abort `0s`） | 30s | 8 | 0 | 8 ConnectionError | 30.82s | ~30s | 未捕获（推断 137） | 是（推断） |
+| B 有排空 | 15s | 90s | 120s | 8 | 8 | 0 | 37.64s | 42s | 0 | 否 |
+| C 窗口不够 | 15s | 5s | 120s | 8 | 0 | 8 ConnectionError | 120.44s | ~120s | 未捕获（推断 137） | 是（推断） |
+
+时间点：
+
+- **A**：client `19:24:46.8` 发出 8 条；`19:24:47` 删 Pod；8 条全部在 `19:25:17.6` 报 `ConnectionError`，最大 30.82s。
+- **B**：client `19:12:02.6` 发出；`19:12:03` 删 Pod；8 条全部 `200`，最后一条 `19:12:40.3`，最大 37.64s；容器 `19:12:45` exit 0。
+- **C**：client `19:27:12.9` 发出；`19:27:13` 删 Pod；8 条全部在 `19:29:13.4` 报 `ConnectionError`，最大 120.44s。
+
+vLLM 日志证据：
+
+```text
+# A：没有 --shutdown-timeout
+[shutdown] API server: stopping engine client mode=abort timeout=0s
+[shutdown] Process manager: force killing remaining processes count=1
+INFO: Waiting for connections to close. (CTRL+C to force quit)
+
+# B：--shutdown-timeout 90
+[shutdown] EngineCore: start mode=drain timeout=90s
+[shutdown] EngineCore: draining in-flight requests count=8 timeout=90s
+[shutdown] EngineCore: request processing complete; starting resource teardown
+# 19:12:45 exit 0
+
+# C：--shutdown-timeout 5
+[shutdown] EngineCore: start mode=drain timeout=5s
+[shutdown] EngineCore: draining in-flight requests count=8 timeout=5s
+[shutdown] Process manager: force killing remaining process EngineCore pid 133
+INFO: Waiting for connections to close. (CTRL+C to force quit)
+```
+
+### 9.11.1 关键发现：shutdown-timeout 不是总退出上限
+
+B 证明配置有效：`preStop 15s` + `--shutdown-timeout 90s` + grace 120s，8 条 4096 请求全部完成，Pod exit 0，总 Terminating 42s。
+
+A 证明没有排空会坏：vLLM 以 `mode=abort timeout=0s` 直接杀掉 EngineCore；API server 还在等连接关闭，Pod 拖到 grace 30s 被 SIGKILL，客户端看到的是 30.8s 后的 `ConnectionError`，不是快速 5xx。
+
+C 是最容易误解的：`--shutdown-timeout 5s` **只让 EngineCore 在 5s 后 abort**，并不等于 Pod 5s 退出。EngineCore 在 `19:27:33` 被 force kill，但 API server 仍然 `Waiting for connections to close`，进程一直挂到 grace **120s**，最后被 SIGKILL；客户端等到 120.4s 才报 `ConnectionError`。
+
+所以关系应该写成：
+
+```text
+Pod 总退出时间 ≈ preStop + max(shutdown-timeout, API server 等连接关闭的时间)
+且必须 < terminationGracePeriodSeconds
+```
+
+`grace > preStop + shutdown-timeout` 只是必要条件，不是充分条件；如果客户端保持 keep-alive 连接、或 API server 不主动断开，Pod 仍可能拖到 grace 被 SIGKILL。
+
+### 9.11.2 对 D3 配置的结论
+
+- 当前 B 配置（`preStop 15s` + `shutdown 90s` + grace `120s`）对 8×4096 的 38s 请求是够的；
+- 不要用 `shutdown-timeout: 5s` 期望“5 秒退出”；它只会 abort engine，连接仍挂到 grace；
+- 如果线上客户端会保持长连接，grace 要按“最长请求 + 连接关闭时间”留余量，不能只按 `preStop + shutdown` 算；
+- 对 chat：保留 2 副本 + PDB + 预热；单副本替换期间，新请求仍会在新 Pod Ready 前失败（冷启动约 116s），但在途请求可以像 B 一样完成；
+- PDB 没有在单节点上实跑（会驱逐系统 Pod），只保留 §9.7 的概念结论。
 
 ---
 
