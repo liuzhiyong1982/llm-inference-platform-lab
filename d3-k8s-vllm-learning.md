@@ -396,7 +396,7 @@ df -h /var/lib
 | k8s | 无 `k3s`、无 `kubeadm`（干净 VM，模板 `2c18...` 的 `onstart` 为空） |
 | image | `docker.io/vastai/kvm:cuda-12.9.1-auto`，template id `781848` |
 
-> 2026-11-24 16:57 `apt-daily-upgrade.timer` 补跑 `unattended-upgrade`，把 NVIDIA 用户态包从 580.95.05 升到 580.178.04，内核模块仍是 580.95.05；新 Pod 因此报 `failed to initialize NVML: Driver/library version mismatch`。同一轮还装上了 6.8.0-149 内核。重启后以实际 `nvidia-smi` / `uname -r` 为准，并确认 `nvidia-smi` 正常后再继续。
+> 2026-11-24 16:57 `apt-daily-upgrade.timer` 补跑 `unattended-upgrade`，把 NVIDIA 用户态包从 580.95.05 升到 580.178.04，内核模块仍是 580.95.05；新 Pod 因此报 `failed to initialize NVML: Driver/library version mismatch`。同一轮还装上了 6.8.0-149 内核。17:44 重启后实测 kernel `6.8.0-149-generic`、driver `580.178.04`，`nvidia-smi` 正常，k3s 和 vLLM 都恢复；后续以实际 `nvidia-smi` / `uname -r` 为准。
 
 > 如果上次用的是 k3s，直接复用同一版安装命令，并记录 `k3s --version`、实例 image/template、GPU 型号和关键参数（`--disable traefik`、`--flannel-backend` 等）。如果上次是 kubeadm/kind，先告诉我要换哪套；不要在同一份 D3 里混两种发行版。
 
@@ -1002,7 +1002,7 @@ kubectl get pod "$pod" -o json | jq -r '
 >
 > 三次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；若之后要做严格 cold 对照或重跑 image-cold，先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
 >
-> 这三次测量时 Deployment 的 `memory` 是 `32Gi`；§6.2 之后已改为 `20Gi`。内存 request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间；如果要严格复现当前 manifest，重跑一次 warm 对照即可。
+> 这三次测量时 Deployment 的 `memory` 是 `32Gi`；§6.2 之后已改为 `20Gi`。内存 request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间；如果要严格复现当前 manifest，重跑一次 warm 对照即可。另外 17:44 重启后 kernel 从 `6.8.0-59` 变成 `6.8.0-149`、driver 从 `580.95.05` 变成 `580.178.04`；进 §8 前建议重跑一次 warm，确认新环境下量级没变。
 
 归因规则：
 
