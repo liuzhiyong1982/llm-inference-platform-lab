@@ -1002,7 +1002,7 @@ kubectl get pod "$pod" -o json | jq -r '
 >
 > 三次运行都说明实际服务的是 `/models/Qwen3-8B-AWQ-v1`（§6.5 之后），但 initContainer 当时仍检查 `/models/Qwen3-8B-AWQ`。§6.5 已改成两者共用 `MODEL_PATH`；若之后要做严格 cold 对照或重跑 image-cold，先重新 `kubectl apply`，否则会删错目录或根本不触发下载。
 >
-> 这三次测量时 Deployment 的 `memory` 是 `32Gi`；§6.2 之后已改为 `20Gi`。内存 request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间；如果要严格复现当前 manifest，重跑一次 warm 对照即可。另外 17:44 重启后 kernel 从 `6.8.0-59` 变成 `6.8.0-149`、driver 从 `580.95.05` 变成 `580.178.04`；进 §8 前建议重跑一次 warm，确认新环境下量级没变。
+> 这三次测量时 Deployment 的 `memory` 是 `32Gi`；§6.2 之后已改为 `20Gi`。内存 request/limit 不直接参与 vLLM 的启动路径，预计不影响这组时间。另外 17:44 重启后 kernel 从 `6.8.0-59` 变成 `6.8.0-149`、driver 从 `580.95.05` 变成 `580.178.04`。**决定不重跑 warm**：§7 这组数字只作为旧环境记录，§8 的扩容窗口按新环境单独记录，不直接和 86s / 141s 对比。
 
 归因规则：
 
