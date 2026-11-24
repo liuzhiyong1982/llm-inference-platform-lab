@@ -892,9 +892,26 @@ sudo rm -rf "$HOST_DIR"
 
 kubectl scale deploy/vllm-qwen3-8b --replicas=1
 kubectl rollout status deploy/vllm-qwen3-8b --timeout=30m
+
+# image-cold（可选）：先缩到 0，删掉节点上的 vLLM 镜像，再拉起
+kubectl scale deploy/vllm-qwen3-8b --replicas=0
+kubectl wait --for=delete pod -l app=vllm --timeout=180s
+
+# 目的：确认没有容器还占着镜像
+sudo k3s crictl ps -a | grep vllm || echo "no vllm containers"
+
+# 目的：删镜像记录；--prune 清掉所有未被引用的镜像
+sudo k3s crictl rmi docker.io/vllm/vllm-openai:v0.34.0
+sudo k3s crictl rmi --prune
+sudo k3s crictl images | grep vllm || echo "image removed"
+
+kubectl scale deploy/vllm-qwen3-8b --replicas=1
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=30m
 ```
 
 > 删之前先看 `echo "deleting $HOST_DIR"` 打的是不是当前服务的版本目录。initContainer 没和主容器共用 `MODEL_PATH` 时，`weights cached` 会骗你：删了正在服务的目录也不会重新下载。
+>
+> **image-cold 的可信度取决于 containerd 有没有真的删掉 blobs。** `crictl rmi` 删的是 image record；content store/snapshot 可能还留着层，重新拉起如果只花几秒，那是本地复用，不是网络拉取。要测真实网络冷拉，用一台干净 VM 或另一个没拉过该镜像的节点；不要为了这个可选场景去手删 containerd 的 content store。10GB 镜像在 900Mbps 下理论约 1.5–2 分钟，Docker Hub 限速或冷缓存会更久。image-cold 的 `init_start - scheduled` 才是镜像拉取，主容器不会再拉一次。
 
 ### 7.3 分阶段拆解
 
