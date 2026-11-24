@@ -1611,91 +1611,491 @@ kubectl get pods -w
 
 ## 9. Lab 4：驱逐与优雅退出
 
-### 9.1 先测“没有排空”的基线
+### 9.1 先修概念：删除 Pod 时到底发生什么
 
-复制 Deployment，去掉这三样：
+`kubectl delete pod`、Deployment 缩容、`kubectl drain` 最终都会让 apiserver 给 Pod 打上 `deletionTimestamp`。之后的顺序是：
 
-- `--shutdown-timeout 90`
-- `preStop` 的 `sleep 15`
-- `terminationGracePeriodSeconds`（默认 30s）
-
-复制时至少要改三处，否则两个 Deployment 会抢同一张卡和同一个 Service：`metadata.name`（如 `vllm-nodrain`）、`spec.selector.matchLabels.app`（如 `vllm-nodrain`）、`template.metadata.labels.app`（同上），并单独建一个 Service。更简单的做法是**先**用无排空配置做本节，再 apply §6.2 的完整配置做 §9.2，不要让两个 Deployment 并存。复制路径还要把下面脚本的 URL 改成新 Service 名；简单路径 Service 名不变。
-
-然后压一批长请求（8 并发 × 512 output tokens，约 45s；能在 90s 排空窗口内跑完），5 秒后删 Pod：
-
-> 脚本要在集群内跑（例如用一个带 `requests` 的 Pod），或者先 `kubectl port-forward svc/vllm-qwen3-8b 8000:8000` 再把 URL 改成 `127.0.0.1:8000`。port-forward 在 Pod 删除时会断，这本身也是“客户端观测到失败”的一部分；报告里要注明用的是哪条路径。
-
-```bash
-# 终端 A：客户端（在集群内或能直连 Service 的地方）
-python3 - <<'PY'
-import concurrent.futures, time, requests
-
-URL = "http://vllm-qwen3-8b:8000/v1/completions"
-
-def one(i):
-    t = time.time()
-    try:
-        r = requests.post(URL, json={
-            "model": "qwen3-8b",
-            "prompt": "Write a long detailed story about a lighthouse.",
-            "max_tokens": 512,
-            "temperature": 0,
-            "ignore_eos": True,
-        }, timeout=180)
-        return r.status_code, time.time() - t
-    except Exception as e:
-        return type(e).__name__, time.time() - t
-
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-    futs = [ex.submit(one, i) for i in range(8)]
-    for f in concurrent.futures.as_completed(futs):
-        print(f.result())
-PY
-
-# 终端 B：5 秒后删 Pod
-sleep 5
-kubectl delete pod -l app=vllm
+```text
+1. apiserver 标记 Pod Terminating
+2. EndpointSlice controller 把 Pod 从 ready endpoints 摘除
+3. kubelet 执行 preStop hook（如果有）
+4. preStop 结束，kubelet 给容器 PID 1 发 SIGTERM
+5. vLLM 停止接新请求，等待在途请求，最多 --shutdown-timeout
+6. 进程退出；超过 terminationGracePeriodSeconds 还没退出，kubelet 发 SIGKILL
 ```
 
-> 想验证“排空窗口不够”时，把 `range(8)` 改成 `range(32)`、`max_tokens` 改成 1024；这时 90s 内跑不完是预期结果，不是脚本 bug。
+三个旋钮不是一回事：
 
-统计：
+| 旋钮 | 作用 | 不配会怎样 |
+|---|---|---|
+| `preStop` | 在 SIGTERM 前等待，给 Endpoint/kube-proxy/网关收敛时间 | SIGTERM 可能早于 endpoint 摘除，新请求仍被路由到正在退出的 Pod |
+| `--shutdown-timeout` | vLLM 收到 SIGTERM 后等在途请求的上限 | 默认可能立即退出，在途请求被 abort |
+| `terminationGracePeriodSeconds` | kubelet 从 deletion 开始算的总宽限；包含 preStop + shutdown | 太短会在 vLLM 还没排空时 SIGKILL（exit 137） |
 
-- HTTP 200 多少条；
-- 异常/5xx 多少条；
-- 最大延迟；
-- Pod 从 `Terminating` 到消失多少秒。
+时间关系必须满足：
 
-### 9.2 再测“有排空”
+```text
+terminationGracePeriodSeconds > preStop + shutdown-timeout + 余量
+120s > 15s + 90s + 15s
+```
 
-先把无排空的 Deployment/Service 缩到 0 或删掉，再 apply §6.2 的完整配置（`--shutdown-timeout 90` + `preStop 15s` + grace 120s），重复同一批请求和删除动作。
+另外两个概念：
 
-> 删除 Pod 后 Deployment 会立刻起新 Pod，但新 Pod 要几十秒才 Ready；这段窗口 Service 没有可用 Endpoint，**新请求**会失败。本实验只看“删除瞬间已在途的请求”，不要把新请求的失败算进排空成功率。
+- **自愿驱逐**：`kubectl drain`、节点维护、升级，走 Eviction API，受 PDB 约束；
+- **非自愿/直接删除**：`kubectl delete pod`、节点故障、OOM，**不受 PDB 保护**。
+
+本实验只看“删除瞬间已经在途的请求”。删除后 Deployment 会起新 Pod，但新 Pod 要几十秒才 Ready；这段窗口的**新请求**失败是另一件事，不能算进排空成功率。
+
+### 9.2 实验矩阵与通过标准
+
+| 场景 | preStop | shutdown-timeout | grace | 请求 | 目的 |
+|---|---|---|---|---|---|
+| A 无排空基线 | 0 | 默认 | 30s | 8 × 512 | 证明 SIGTERM 直接打断在途请求 |
+| B 有排空 | 15s | 90s | 120s | 8 × 512 | 证明在途请求能跑完、无 SIGKILL |
+| C 窗口不够 | 15s | 90s | 120s | 32 × 1024 | 证明 shutdown-timeout 必须大于最长请求 |
+| D PDB | 15s | 90s | 120s | 8 × 512 | 说明 PDB 只保护自愿驱逐 |
+
+通过标准：
+
+- A：至少出现 1 个失败/异常，或 Pod 很快退出（记录实际结果；如果 vLLM 默认也等了，说明默认值比预期温和）；
+- B：8/8 HTTP 200，无 5xx/连接重置，Pod 在 120s 内退出，`exitCode=0`，没有 SIGKILL；
+- C：出现失败是预期，记录失败比例和 Pod 退出方式；
+- D：单副本 + `minAvailable: 1` 时 `kubectl drain` 被 PDB 阻塞；`kubectl delete pod` 绕过 PDB。
+
+### 9.3 准备：停掉 KEDA，确认主 Deployment
+
+驱逐实验期间不要让 KEDA/HPA 改 replicas；否则删 Pod 后 HPA 可能同时扩缩，变量不干净。
+
+```bash
+# 目的：停掉 D3 §8.3 的队列 ScaledObject
+kubectl delete scaledobject vllm-scaler --ignore-not-found
+kubectl get hpa
+# 确认 keda-hpa-vllm-scaler 已删除
+
+# 主 Deployment 固定 1 副本
+kubectl scale deploy vllm-qwen3-8b --replicas=1
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
+```
+
+确认主 Deployment 是 §6.2 的“有排空”配置：
+
+```bash
+kubectl get deploy vllm-qwen3-8b -o json | jq -r '
+  .spec.template.spec.terminationGracePeriodSeconds,
+  .spec.template.spec.containers[0].args,
+  .spec.template.spec.containers[0].lifecycle,
+  .spec.template.spec.containers[0].resources
+'
+```
+
+期望看到：
+
+- `terminationGracePeriodSeconds: 120`；
+- args 里有 `--shutdown-timeout` 和 `90`；
+- `lifecycle.preStop` 是 `sleep 15`；
+- resources 是 `cpu: 4` / `memory: 20Gi`。
+
+如果不是，先按 §6.2 的完整 YAML 恢复，再做 §9。
+
+### 9.4 场景 A：无排空基线
+
+这台 VM 有 2 张 4090，主 vLLM 占 1 张；可以再起一个 `vllm-nodrain` 占第二张，两个 Deployment 并存，不动主服务。
+
+> 只有 1 张卡时不要并存：先删主 Deployment，跑完 A 再恢复 §6.2；但这样中间会有一段不可用。下面按 2 卡机写。
+
+#### 9.4.1 创建无排空 Deployment
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-nodrain
+  labels:
+    app: vllm-nodrain
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-nodrain
+  template:
+    metadata:
+      labels:
+        app: vllm-nodrain
+        model: qwen3-8b
+    spec:
+      runtimeClassName: nvidia
+      # 默认 30s；故意不配 preStop 和 --shutdown-timeout
+      terminationGracePeriodSeconds: 30
+      initContainers:
+      - name: fetch-weights
+        image: vllm/vllm-openai:v0.34.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HF_XET_HIGH_PERFORMANCE
+          value: "1"
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -eu
+          if [ -f /models/Qwen3-8B-AWQ/config.json ] && \
+             find /models/Qwen3-8B-AWQ -maxdepth 1 -name '*.safetensors' | grep -q .; then
+            echo "weights cached"
+            exit 0
+          fi
+          python3 -c 'from huggingface_hub import snapshot_download; snapshot_download("Qwen/Qwen3-8B-AWQ", local_dir="/models/Qwen3-8B-AWQ")'
+        volumeMounts:
+        - name: models
+          mountPath: /models
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:v0.34.0
+        imagePullPolicy: IfNotPresent
+        command: ["vllm", "serve"]
+        args:
+        - "/models/Qwen3-8B-AWQ"
+        - "--served-model-name"
+        - "qwen3-8b"
+        - "--max-model-len"
+        - "8192"
+        - "--gpu-memory-utilization"
+        - "0.90"
+        - "--max-num-seqs"
+        - "64"
+        - "--disable-log-requests"
+        # 故意不写 --shutdown-timeout
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: "4"
+            memory: "20Gi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "4"
+            memory: "20Gi"
+            nvidia.com/gpu: 1
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 6
+        # 故意不写 preStop
+        volumeMounts:
+        - name: models
+          mountPath: /models
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: models
+        hostPath:
+          path: /var/lib/models
+          type: Directory
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "2Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-nodrain
+spec:
+  selector:
+    app: vllm-nodrain
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+EOF
+
+kubectl rollout status deploy/vllm-nodrain --timeout=15m
+kubectl get pods -l app=vllm-nodrain -o wide
+```
+
+启动约 116s。等它 `1/1 Running` 后再发请求。
+
+#### 9.4.2 客户端 Pod
+
+把压测脚本放进 ConfigMap，Pod 用 vLLM 镜像（已缓存，自带 `requests`）：
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drain-client
+data:
+  client.py: |
+    import concurrent.futures, os, time, requests
+
+    URL = os.environ["URL"]
+    N = int(os.getenv("N", "8"))
+    MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))
+
+    def one(i):
+        t0 = time.time()
+        print(f"START req={i}", flush=True)
+        try:
+            r = requests.post(URL, json={
+                "model": "qwen3-8b",
+                "prompt": "Write a long detailed story about a lighthouse.",
+                "max_tokens": MAX_TOKENS,
+                "temperature": 0,
+                "ignore_eos": True,
+            }, timeout=300)
+            dt = time.time() - t0
+            print(f"END req={i} status={r.status_code} latency={dt:.2f}s", flush=True)
+            return r.status_code, dt
+        except Exception as e:
+            dt = time.time() - t0
+            print(f"END req={i} error={type(e).__name__} latency={dt:.2f}s", flush=True)
+            return type(e).__name__, dt
+
+    print(f"START url={URL} n={N} max_tokens={MAX_TOKENS}", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=N) as ex:
+        futs = [ex.submit(one, i) for i in range(N)]
+        results = [f.result() for f in concurrent.futures.as_completed(futs)]
+    ok = sum(1 for r in results if r[0] == 200)
+    print(f"SUMMARY ok={ok}/{N} results={results}", flush=True)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drain-client
+spec:
+  restartPolicy: Never
+  containers:
+  - name: client
+    image: vllm/vllm-openai:v0.34.0
+    imagePullPolicy: IfNotPresent
+    command: ["python3", "-u", "/scripts/client.py"]
+    env:
+    - name: URL
+      value: http://vllm-nodrain:8000/v1/completions
+    - name: N
+      value: "8"
+    - name: MAX_TOKENS
+      value: "512"
+    volumeMounts:
+    - name: scripts
+      mountPath: /scripts
+  volumes:
+  - name: scripts
+    configMap:
+      name: drain-client
+EOF
+
+kubectl get pod drain-client
+```
+
+`N=8`、`MAX_TOKENS=512`，8 条请求大约 45s；90s 的 shutdown 窗口足够跑完。
+
+#### 9.4.3 发请求 + 删 Pod
+
+终端 A：
+
+```bash
+kubectl logs -f drain-client
+```
+
+等日志里出现 `START req=0` 到 `START req=7`（8 条都在途）后，终端 B：
+
+```bash
+# 先记录目标 Pod 和时间点
+POD=$(kubectl get pod -l app=vllm-nodrain -o jsonpath='{.items[0].metadata.name}')
+date -u +%Y-%m-%dT%H:%M:%SZ
+kubectl get pod "$POD" -o json > /tmp/nodrain-before.json
+
+# 5 秒后删 Pod；不要等它退出
+sleep 5
+kubectl delete pod -l app=vllm-nodrain --wait=false
+date -u +%Y-%m-%dT%H:%M:%SZ
+```
+
+观察：
+
+```bash
+kubectl get pods -l app=vllm-nodrain -w
+kubectl get endpointslice -l kubernetes.io/service-name=vllm-nodrain -w
+kubectl get events --sort-by=.lastTimestamp | tail -20
+```
+
+客户端结束后：
+
+```bash
+kubectl logs drain-client
+kubectl get pod drain-client -o jsonpath='{.status.phase}{"\n"}'
+```
+
+#### 9.4.4 记录 A
+
+- `SUMMARY ok=x/8`；
+- 失败类型（`ConnectionError` / `ReadTimeout` / 5xx）；
+- 最大 latency；
+- Pod 从 `Terminating` 到消失的秒数；
+- 容器 `exitCode`：0 / 143（SIGTERM）/ 137（SIGKILL）。
+
+无排空基线预期：没有 preStop，SIGTERM 到达时 endpoint 可能还没摘干净；vLLM 没有 `--shutdown-timeout`，在途请求容易被 abort。失败是预期结果，不是你脚本写错了。
+
+#### 9.4.5 清理 A
+
+```bash
+kubectl delete deploy vllm-nodrain --ignore-not-found
+kubectl delete svc vllm-nodrain --ignore-not-found
+kubectl delete pod drain-client --ignore-not-found
+```
+
+等 GPU 释放：
+
+```bash
+kubectl get pods -l app=vllm-nodrain
+# 没有 Pod 再继续
+```
+
+### 9.5 场景 B：有排空
+
+主 Deployment 已经是 §6.2 的完整配置：`preStop 15s` + `--shutdown-timeout 90` + grace 120s。确认后把客户端 URL 改回主 Service：
+
+```bash
+# 改客户端 URL（删掉重建）
+kubectl delete pod drain-client --ignore-not-found
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drain-client
+spec:
+  restartPolicy: Never
+  containers:
+  - name: client
+    image: vllm/vllm-openai:v0.34.0
+    imagePullPolicy: IfNotPresent
+    command: ["python3", "-u", "/scripts/client.py"]
+    env:
+    - name: URL
+      value: http://vllm-qwen3-8b:8000/v1/completions
+    - name: N
+      value: "8"
+    - name: MAX_TOKENS
+      value: "512"
+    volumeMounts:
+    - name: scripts
+      mountPath: /scripts
+  volumes:
+  - name: scripts
+    configMap:
+      name: drain-client
+EOF
+```
+
+先抓旧 Pod 日志（Pod 删除后日志就没了）：
+
+```bash
+POD=$(kubectl get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -f "$POD" -c vllm > /tmp/vllm-drain.log 2>&1 &
+```
+
+终端 A：
+
+```bash
+kubectl logs -f drain-client
+```
+
+等 8 条 `START` 都出现后，终端 B：
+
+```bash
+POD=$(kubectl get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
+date -u +%Y-%m-%dT%H:%M:%SZ
+kubectl get pod "$POD" -o json > /tmp/drain-before.json
+
+sleep 5
+kubectl delete pod -l app=vllm --wait=false
+date -u +%Y-%m-%dT%H:%M:%SZ
+```
+
+观察：
+
+```bash
+kubectl get pods -l app=vllm -w
+kubectl get endpointslice -l kubernetes.io/service-name=vllm-qwen3-8b -w
+kubectl get events --sort-by=.lastTimestamp | tail -30
+```
+
+期望顺序：
+
+1. 旧 Pod `Terminating`，先从 EndpointSlice 摘除；
+2. `preStop` sleep 15s，新请求不再进来；
+3. SIGTERM 后 vLLM 继续跑在途请求，最多 90s；
+4. 8 条请求完成，Pod 在 120s 内退出；
+5. `exitCode=0`，没有 SIGKILL；Deployment 起新 Pod，新 Pod 约 116s 后 Ready。
+
+客户端结果：
+
+```bash
+kubectl logs drain-client
+# SUMMARY ok=8/8 results=[(200, ...), ...]
+```
+
+检查旧 Pod 退出方式（Pod 对象还在时）：
+
+```bash
+kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+kubectl get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}{"\n"}'
+```
+
+- `0`：正常退出；
+- `143`：被 SIGTERM 结束（可能正常，但说明 vLLM 没等到自己 graceful exit）；
+- `137`：SIGKILL，说明 grace 不够或进程卡住。
+
+vLLM 日志里找 shutdown 相关行：
+
+```bash
+grep -iE "shutdown|drain|abort|SIGTERM|waiting" /tmp/vllm-drain.log | tail -30
+```
+
+### 9.6 场景 C：排空窗口不够
+
+把客户端改成 `N=32`、`MAX_TOKENS=1024`，重复 B：
+
+```bash
+kubectl delete pod drain-client --ignore-not-found
+# 重新 apply 时把 env N=32、MAX_TOKENS=1024
+```
 
 预期：
 
-1. Pod 进入 `Terminating`，先从 Endpoints 摘除；
-2. `preStop` sleep 15s，新请求不再进来；
-3. SIGTERM 后 vLLM 继续跑在途请求，最多 90s；
-4. 请求完成，Pod 在 120s 内退出，没有 SIGKILL；如果 90s 内没跑完，说明 `--shutdown-timeout` 小于最长请求，应该调大或缩短请求。
+- 32 条请求的总时长超过 90s；
+- vLLM 在 `--shutdown-timeout 90` 到期后 abort 剩余请求；
+- 客户端出现失败/超时；
+- Pod 可能在 90s 左右退出，也可能拖到 120s 被 SIGKILL；记录实际值。
 
-验证日志：
+这个场景不是“配置错了”，而是用来证明：
 
-```bash
-# Pod 消失后日志就没了；删除前先开一个 `kubectl logs -f` 到文件，或删除后立刻抓
-kubectl logs -l app=vllm --tail=100 | grep -iE "shutdown|drain|abort|SIGTERM"
-kubectl get pod -l app=vllm -w
+```text
+shutdown-timeout 必须大于最长在途请求，否则排空窗口不够
 ```
 
-### 9.3 记录模板
+调参方向：增大 `--shutdown-timeout`、增大 grace、限制单请求最大输出（`max_tokens`）、或把长请求拆小。
 
-| 配置 | 在途请求 | 成功 | 失败 | 最大延迟 | Terminating 时长 | 是否 SIGKILL |
-|---|---|---|---|---|---|---|
-| 无排空（默认 30s） | 8 | | | | | |
-| 有排空（90s + 15s + 120s） | 8 | | | | | |
-| 有排空 + 32×1024（可选，验证窗口不够） | 32 | | | | | |
-
-### 9.4 PDB 的取舍
+### 9.7 场景 D：PDB 的取舍
 
 ```yaml
 apiVersion: policy/v1
@@ -1709,9 +2109,69 @@ spec:
       app: vllm
 ```
 
-- 单副本 + `minAvailable: 1`：`kubectl drain` 会永远阻塞，因为没有任何自愿驱逐能保持 1 个可用副本。
-- 生产要至少 2 副本 + `minAvailable: 1`，再配合 `maxUnavailable` 滚动更新。
-- PDB 只管**自愿驱逐**（drain/升级），不管 `kubectl delete pod` 和节点故障。
+结论先说：
+
+- **单副本 + `minAvailable: 1`**：`kubectl drain` 会一直阻塞，因为没有任何自愿驱逐能保持 1 个可用副本；
+- **至少 2 副本 + `minAvailable: 1`**：drain 可以逐个驱逐，但要有第二张 GPU/第二个节点承接；
+- **PDB 只管自愿驱逐**：`kubectl delete pod`、节点宕机、OOM 都不受它保护；
+- **PDB 不保证零 downtime**：它只保证“驱逐时至少还有 N 个 Ready”，新 Pod 冷启动期间新请求仍可能失败。
+
+单节点 k3s 不要真跑 `kubectl drain` 来验证 PDB：它会把 CoreDNS、metrics-server 等系统 Pod 也纳入驱逐，可能把集群弄坏。PDB 放在 2 节点集群或多副本环境验证；单节点只做概念题。
+
+如果要在 2 卡机上验证多副本 PDB，需要先把主 Deployment 扩到 2（4 CPU/20Gi × 2），再观察 `kubectl get pdb` 和 `kubectl drain`；不要和 §9 的单副本排空实验混在一起。
+
+### 9.8 记录模板
+
+| 场景 | preStop | shutdown/grace | 在途请求 | 200 | 失败/5xx | 最大延迟 | Terminating 时长 | exitCode | SIGKILL |
+|---|---|---|---|---|---|---|---|---|---|
+| A 无排空 | 0 | 默认/30s | 8×512 | | | | | | |
+| B 有排空 | 15s | 90s/120s | 8×512 | | | | | | |
+| C 窗口不够 | 15s | 90s/120s | 32×1024 | | | | | | |
+
+补充记录：
+
+- 删除动作时间戳（`date -u`）；
+- 旧 Pod `deletionTimestamp`；
+- EndpointSlice 摘除时间（如果抓到了）；
+- 新 Pod `created` / `Ready` 时间（用来解释删除后的新请求失败）；
+- 客户端 URL 是 Service 还是 port-forward（port-forward 断开本身会导致失败，不能算 vLLM 排空失败）。
+
+### 9.9 结论与面试问法
+
+**Q：为什么需要 preStop？**
+A：SIGTERM 只告诉进程退出，不保证 Endpoint/kube-proxy/网关已经把这个 Pod 摘掉。preStop sleep 给控制面收敛时间，避免新请求继续打到正在退出的 Pod。
+
+**Q：grace、preStop、shutdown-timeout 的关系？**
+A：grace 是总预算，从 deletion 开始算；preStop 在 SIGTERM 前；shutdown-timeout 是 vLLM 收到 SIGTERM 后等在途请求的上限。必须满足 `grace > preStop + shutdown-timeout + 余量`，否则 SIGKILL（exit 137）。
+
+**Q：`kubectl delete pod` 能验证 PDB 吗？**
+A：不能。PDB 只约束 Eviction API（drain/维护）；直接 delete 绕过 PDB。
+
+**Q：单副本为什么不能配 `minAvailable: 1`？**
+A：任何自愿驱逐都会让可用副本降到 0，PDB 会拒绝，drain 永远阻塞。要么 2 副本 + minAvailable 1，要么单副本接受维护窗口。
+
+**Q：扩容/替换期间新请求为什么失败？**
+A：旧 Pod 摘除后、新 Pod Ready 前，Service 没有可用 endpoint；vLLM 冷启动约 116s。这个窗口要靠多副本、PDB、surge/预热池或网关重试来覆盖。
+
+### 9.10 清理
+
+```bash
+kubectl delete pod drain-client --ignore-not-found
+kubectl delete deploy vllm-nodrain --ignore-not-found
+kubectl delete svc vllm-nodrain --ignore-not-found
+
+# 恢复主 Deployment 1 副本
+kubectl scale deploy vllm-qwen3-8b --replicas=1
+kubectl rollout status deploy/vllm-qwen3-8b --timeout=15m
+
+# 重新 apply D3 §8.3 的 ScaledObject/vllm-scaler（min=1, max=2）
+```
+
+如果创建过 PDB，也要删除：
+
+```bash
+kubectl delete pdb vllm-pdb --ignore-not-found
+```
 
 ---
 
