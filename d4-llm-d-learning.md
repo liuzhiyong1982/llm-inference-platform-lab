@@ -1138,8 +1138,18 @@ git checkout release-1.0
 export GAIE_VERSION=v1.6.2
 kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/v1-manifests.yaml"
 
-kubectl get crd | grep -E 'inferencepools|inferenceobjectives'
+kubectl get crd inferencepools.inference.networking.k8s.io
 ```
+
+> **要先装 Gateway API CRD 吗？** standalone 路径**不需要**。GAIE v1.6.2 的 `v1-manifests.yaml` 只含 `InferencePool` 一个 CRD（`InferenceObjective` 已迁到 `llm-d/llm-d-router`）；standalone router 用 Envoy sidecar，不创建 `Gateway`/`HTTPRoute`。
+>
+> Gateway API CRD 是 **Gateway Mode（§7.6）** 的前置，而且只装 CRD 还不够，还要一个 Gateway controller（Envoy Gateway / Istio / agentgateway）。D4 不装。
+>
+> 如果 `helm upgrade d4-router` 报 `no matches for kind "HTTPRoute"`，说明该 chart 版本引用了 Gateway API 资源，再补：
+>
+> ```bash
+> kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml"
+> ```
 
 安装 standalone router（在 llm-d 仓库根目录）：
 
