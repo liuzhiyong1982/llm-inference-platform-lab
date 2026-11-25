@@ -16,7 +16,7 @@
 ## 最短路径
 
 ```bash
-export LAB=$(pwd)
+export LAB=${LAB:-$(pwd)}   # VM 上先 export LAB=/root/lab
 
 # 0. 4×4090 VM / k3s / GPU / 权重见主文档 §4（4×L4 VM 不存在）
 

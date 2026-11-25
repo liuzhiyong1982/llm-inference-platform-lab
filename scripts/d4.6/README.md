@@ -16,7 +16,7 @@
 ## 最短路径
 
 ```bash
-export LAB=$(pwd)
+export LAB=${LAB:-$(pwd)}   # VM 上先 export LAB=/root/lab
 
 # 0. 2×3060 12GB VM / k3s / GPU / 权重见主文档 §4（instance 62540497；2×L4 VM 不存在）
 kubectl create namespace d46 --dry-run=client -o yaml | kubectl apply -f -

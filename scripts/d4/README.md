@@ -55,8 +55,8 @@ sudo MODEL_ID=Qwen/Qwen3-8B-AWQ bash bootstrap-vm.sh
 ## 最短路径
 
 ```bash
-# 0. 在 llm-inference-platform-lab 根目录
-export LAB=$(pwd)
+# 0. 设置 LAB：本地=仓库根目录；VM 上是 /root/lab
+export LAB=${LAB:-$(pwd)}
 # 新 VM 从零装 k3s / GPU runtime / device plugin / Helm：见主文档 §3.1.1
 
 # 1. 模型服务器（前置：k3s + NVIDIA device plugin + /models/Qwen3-4B-AWQ）

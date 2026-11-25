@@ -977,19 +977,27 @@ vastai search offers -n \
 
 **重租时必须走 D3 §5.0 的 API + `"vm": true`**；`vastai create instance` 的 CLI payload 不带 `vm` 字段，可能起成普通容器（SSH 拒绝、k3s 起不来）。拿到 offer ID 后复用 D3 §5.0 的 `curl PUT /asks/<OFFER_ID>/`，把 `disk` 设为 130、`label` 改成 `d4-llmd`。62540497 的镜像是 `docker.io/vastai/kvm:cuda-12.9.1-auto`，已经是 VM。
 
-以下命令都在 lab 仓库根目录执行：
+先设置 `LAB`——它必须指向**同时包含 `scripts/` 和 `llm-d/`** 的目录：
 
 ```bash
+# 本地有仓库 clone
 cd /path/to/llm-inference-platform-lab
 export LAB=$(pwd)
 
+# VM 上没有 clone（本 lab 布局）
+export LAB=/root/lab
+```
+
+以下命令在 VM 上执行：
+
+```bash
 nvidia-smi
 kubectl get nodes -o wide
 kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\n"}'
 # 期望 2
 ```
 
-> **VM 上的固定布局（本 lab 约定）**：`/root/lab/{scripts,llm-d,notes}`，`export LAB=/root/lab`（已写入 `/etc/profile.d/lab.sh` 和 `~/.bashrc`）；`models -> /models`、`results -> /results`。新 VM 按这个建目录，不要把 `llm-d`、`scripts` 散在 `/root` 下。**`LAB` 必须同时包含 `scripts/` 和 `llm-d/`**，否则 §5.5 的 `guides/recipes/...` 会报 `no such file or directory`。
+> **VM 上的固定布局（本 lab 约定）**：`/root/lab/{scripts,llm-d,notes}`，`export LAB=/root/lab`（已写入 `/etc/environment`、`/etc/profile.d/lab.sh` 和 `~/.bashrc`；**已有的 shell 要手动 `export LAB=/root/lab` 或重登**）；`models -> /models`、`results -> /results`。新 VM 按这个建目录，不要把 `llm-d`、`scripts` 散在 `/root` 下。**`LAB` 必须同时包含 `scripts/` 和 `llm-d/`**，否则 §5.5 的 `guides/recipes/...` 会报 `no such file or directory`。
 
 下载权重到宿主机（两个 Pod 共享，不要每个 Pod 各下一次）：
 
@@ -1186,7 +1194,7 @@ done
 在 `llm-inference-platform-lab` 仓库根目录先确认 `LAB`，再 clone llm-d：
 
 ```bash
-: "${LAB:?先在 §5.2 设置 LAB 为 llm-inference-platform-lab 根目录}"
+: "${LAB:?先在 §5.2 设置 LAB（必须同时包含 scripts/ 和 llm-d/；VM 上是 /root/lab）}"
 [ -d llm-d ] || git clone https://github.com/llm-d/llm-d.git
 cd "${LAB}/llm-d"
 git checkout release-1.0
