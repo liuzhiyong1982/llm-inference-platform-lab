@@ -935,6 +935,8 @@ kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\
 # 期望 2
 ```
 
+> **VM 上的固定布局（本 lab 约定）**：`/root/lab/{scripts,llm-d,notes}`，`export LAB=/root/lab`（已写入 `/etc/profile.d/lab.sh` 和 `~/.bashrc`）；`models -> /models`、`results -> /results`。新 VM 按这个建目录，不要把 `llm-d`、`scripts` 散在 `/root` 下。**`LAB` 必须同时包含 `scripts/` 和 `llm-d/`**，否则 §5.5 的 `guides/recipes/...` 会报 `no such file or directory`。
+
 下载权重到宿主机（两个 Pod 共享，不要每个 Pod 各下一次）：
 
 ```bash
@@ -1161,7 +1163,41 @@ helm upgrade --install d4-router \
   -f "${LAB}/scripts/d4/values-precise.yaml"
 ```
 
-> `values-precise.yaml` 里的 `modelServers.matchLabels` 必须匹配模型服务器 Pod 的 `llm-d.ai/guide=d4-prefix-routing`；`targetPorts` 必须是 8000；`modelName` 必须是 `qwen3-4b`。
+**`values-precise.yaml` 关键字段**
+
+先看外层（谁进 pool、proxy 怎么跑）：
+
+| 字段 | 值 | 作用 / 为什么 |
+|---|---|---|
+| `router.inferencePool.failureMode` | `FailOpen` | EPP 不可用时 Envoy 继续按 headless Service 转发；`FailClose` 则返回 503。§7.3 会实测 |
+| `router.modelServers.matchLabels` | `llm-d.ai/guide=d4-prefix-routing` | **决定哪些 Pod 进 pool**；必须等于 `modelserver.yaml` 里的 label |
+| `router.modelServers.targetPorts` | `8000` | vLLM 的 HTTP 端口 |
+| `router.proxy.proxyType` | `envoy` | standalone 自带的数据面 |
+| `router.proxy.failOpen` | `true` | Envoy 自己的 ext_proc 失败策略；和 `failureMode` 是**两个开关**，别混 |
+| `router.epp.replicas` | `1` | precise 的索引是进程本地状态；D4 不做 active-active |
+
+再看 EPP 插件链（`pluginsCustomConfig.precise-plugins.yaml`）：
+
+| 插件 | 关键参数 | 作用 |
+|---|---|---|
+| `token-producer` | `modelName: qwen3-4b`；`attemptTimeout: 2s` | 调 vLLM `/v1/*/render` 拿 token IDs。`modelName` 必须等于 `--served-model-name`，否则 render 被拒、路由**静默退化** |
+| `endpoint-notification-source` | — | 监听 Ready endpoints，把 Pod 增删喂给 dataLayer |
+| `precise-prefix-cache-producer` | `blockSizeTokens: 64`；`hashAlgorithm: xxh64`；`speculativeIndexing: true` | 订阅 KV events、建精确索引。block 必须等于 vLLM `--block-size`；hash 算法在整个索引生命周期内不能变 |
+| ↳ `kvEventsConfig` | `engineType: vllm`；`topicFilter: kv@`；`socketPort: 5556`；`replaySocketPort: 5559` | 与 vLLM 的 `--kv-events-config` 逐项对齐 |
+| ↳ `indexerConfig` | `enableMetrics: true` | 暴露 `llm_d_epp_kv_cache_index_*`，§5.6/§6 要用 |
+| `inflight-load-producer` | 引用 `precise-prefix-cache-producer` | 统计每个 Pod 的 in-flight token，供 filter/scorer 使用 |
+| `prefix-cache-affinity-filter` | `peakPrefillThroughput` | 用预测 TTFT 做饱和门控。guide 的 `15926` 是 H100/32B/TP=2，**必须按 §5.8 重测** |
+| `token-load-scorer` | — | 按当前 token 负载打分，避免压到已经忙的副本 |
+
+最后是装配关系：
+
+| 字段 | 作用 |
+|---|---|
+| `dataLayer.sources[].pluginRef` | 把 `endpoint-notification-source` 的 Pod 事件交给 producer 索引 |
+| `schedulingProfiles[].plugins` | 顺序：先 `prefix-cache-affinity-filter`（过滤/扩散），再 `token-load-scorer`（打分） |
+| `extraServicePorts` | 对外 80 → Envoy sidecar 8081；EPP 的 9002 是 ext_proc，不对外 |
+
+> 换 arm 只改插件：`optimized` 把 producer 换成 `approx-prefix-cache-producer`（`values-optimized.yaml`），`random` 换成 `random-picker`（`values-random.yaml`）；pool/proxy 部分不动。
 
 检查：
 
@@ -1190,29 +1226,52 @@ spec:
 
 ### 5.6 验证 EPP 和索引
 
+**先补 metrics 的 RBAC。** EPP v1.0.0 的 `/metrics` 默认 `--metrics-endpoint-auth=true`：无 token 返回 **401**；有 token 但 EPP 不能做 TokenReview/SubjectAccessReview 返回 **500**。chart 不创建这两项授权：
+
+```bash
+kubectl create clusterrole d4-metrics-reader \
+  --verb=get --non-resource-url=/metrics \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create clusterrolebinding d4-metrics-reader \
+  --clusterrole=d4-metrics-reader --serviceaccount=d4:default \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create clusterrolebinding d4-epp-auth-delegator \
+  --clusterrole=system:auth-delegator --serviceaccount=d4:d4-router-epp \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+> 第一条让抓取方（`d4:default`）能读 `/metrics`；第二条让 EPP 的 SA 能调 TokenReview/SAR。单机 lab 也可以给 EPP 加 `--metrics-endpoint-auth=false`，但 `helm upgrade` 会覆盖，不推荐。
+
+**抓取：port-forward + SA token。**
+
 ```bash
 EPP_POD=$(kubectl get pods -n d4 -o jsonpath='{.items[*].metadata.name}' \
   | tr ' ' '\n' | grep '^d4-router-epp' | head -1)
-echo "$EPP_POD"
+TOKEN=$(kubectl create token default -n d4 --duration=1h)
 
-kubectl logs -n d4 "$EPP_POD" -c epp --tail=120
-kubectl get --raw "/api/v1/namespaces/d4/pods/${EPP_POD}:9090/proxy/metrics" \
-  | grep -E 'kv_cache_events_active_subscribers|kv_cache_events_messages_received_total|kv_cache_index_lookup'
+kubectl port-forward -n d4 "pod/$EPP_POD" 19090:9090 >/tmp/pf-epp.log 2>&1 &
+PF=$!; sleep 3
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:19090/metrics \
+  | grep -E 'active_subscribers|index_(admissions|lookup)|decisions_total'
+kill $PF
+
+kubectl logs -n d4 "$EPP_POD" -c epp --tail=80
 ```
 
-如果 `-c epp` 报容器名不存在，先看 Pod 的容器列表：
+> **不要用 `kubectl get --raw "...:9090/proxy/metrics"`**：API server 会剥掉 `Authorization` 头，EPP 仍返回 401，kubectl 显示为 “You must be logged in”。
 
-```bash
-kubectl get pod -n d4 "$EPP_POD" -o jsonpath='{.spec.containers[*].name}{"\n"}'
-```
+**判据分两层，别混：**
 
-期望：
+| 指标 | 期望 | 说明 |
+|---|---|---|
+| `llm_d_epp_kv_cache_events_active_subscribers` | `2` | 只证明 ZMQ 连上了两个副本，**不证明有事件或命中** |
+| `llm_d_epp_kv_cache_index_admissions_total` | 发请求后 > 0 | block 进了索引 |
+| `llm_d_epp_kv_cache_index_lookup_hits_total` | 重复前缀后 > 0 | 查到了 |
+| `llm_d_epp_prefix_cache_affinity_filter_decisions_total` | 出现 `outcome="sticky"` | 路由真的按命中粘住了 |
 
-- `llm_d_epp_kv_cache_events_active_subscribers` = 2（两个 vLLM Pod）；
-- `messages_received_total` 在发请求后增长；
-- `index_lookup_requests_total` 在发请求后增长。
+> **测试 prompt 必须 ≥ 1 个 block（64 token）且前缀重复**，否则 `outcome` 永远是 `no_match`，看起来像“路由没生效”。用 ~2k token 的同一段文本打两次：vLLM 侧 `vllm:prefix_cache_hits_total` 会涨，EPP 侧 `lookup_hits_total` / `admissions_total` 也会涨。
 
-如果 subscribers 不是 2：检查 `podDiscoveryConfig.socketPort: 5556`、`topicFilter: kv@`、Pod 的 5556/5559 端口，以及 vLLM 日志里是否真的启用了 KV events。
+如果 subscribers 不是 2：检查 `podDiscoveryConfig.socketPort: 5556`、`topicFilter: kv@`、Pod 的 5556/5559 端口，以及 vLLM 启动日志里是否真的开了 KV events。
 
 ### 5.7 路由 smoke test
 
@@ -1772,6 +1831,20 @@ kubectl rollout restart deploy/d4-router-epp -n d4
 
 D4 用 **standalone**：Envoy sidecar 和 EPP 在同一个 Pod，客户端直接访问 `d4-router-epp:80`。生产多模型/多租户通常用 **Gateway Mode**：一个共享 Gateway（Istio / Envoy Gateway / agentgateway）承载多条 HTTPRoute，每条 route 的 backendRef 指向一个 `InferencePool`。
 
+**先厘清「router」指什么**：llm-d 的 router 不是一个二进制，而是 **数据面（proxy，默认 Envoy）+ 控制面（EPP）** 的打包。standalone 和 Gateway Mode 的区别**不是路由算法**——两边是同一个 EPP、同一套 precise/optimized 插件——而是**数据面由谁提供**：
+
+```text
+standalone:   client → Service d4-router-epp:80
+                       → [Pod: Envoy :80 ──ext_proc──> EPP :9002]
+                       → Envoy 直接转发到选中的 vLLM Pod:8000
+
+Gateway Mode: client → Gateway（Istio / Envoy Gateway / agentgateway）
+                       → ext_proc → EPP Service（独立 Deployment）
+                       → Gateway 转发到选中的 vLLM Pod:8000
+```
+
+所以：**standalone = llm-d 自带 proxy**；**Gateway Mode = 复用你已有的 Gateway，llm-d 只提供 EPP**。D4 选 standalone 是为了少装一个 Gateway controller，不是因为路由能力弱。
+
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -1804,6 +1877,8 @@ spec:
 | 适用 | 单模型、学习/验证 | 共享入口、多模型、金丝雀/分流 |
 
 > `InferencePool` 的实际名字以 `kubectl get inferencepool -n d4` 为准；HTTPRoute 的 backendRef 必须指向它。
+>
+> **standalone 自己也有两种形态**：`router.proxy.mode: sidecar`（默认，Envoy 与 EPP 同 Pod，删 EPP 会连数据面一起删）和 `service`（proxy 独立 Deployment，EPP 挂掉时 Envoy 还在，更接近生产）。§7.3 测 FailOpen/FailClose 时会用到这个区别。
 
 D4 不装 Gateway 的原因：4h 内要装 Gateway controller、调 listener/证书/路由，时间会挤掉主实验；standalone 已经能验证 `InferencePool`/EPP 的核心契约。面试时把这张表和 HTTPRoute 讲清楚即可。
 
