@@ -1268,6 +1268,10 @@ spec:
     failureMode: FailOpen
 ```
 
+> **Helm 不装 operator，也不「生成」pool。** chart 把 `InferencePool`、Deployment、Service、ConfigMap、RBAC 直接渲染成 YAML 交给 API server；集群里没有 llm-d operator。EPP 本身是 controller，但它只 **watch** `InferencePool` 和 Pod，不创建它们。
+>
+> 名字容易混：`d4-router` 既是 **Helm release 名**，也是 **`InferencePool` 对象名**；release 里还有 `d4-router-epp` Deployment（epp + envoy 两个容器）、两个 Service、两个 ConfigMap、SA/RBAC。`kubectl get deploy -n d4` 只有 `d4-router-epp` 和 `vllm-d4`，没有第三个「controller」。
+
 ### 5.6 验证 EPP 和索引
 
 **先补 metrics 的 RBAC。** EPP v1.0.0 的 `/metrics` 默认 `--metrics-endpoint-auth=true`：无 token 返回 **401**；有 token 但 EPP 不能做 TokenReview/SubjectAccessReview 返回 **500**。chart 不创建这两项授权：
