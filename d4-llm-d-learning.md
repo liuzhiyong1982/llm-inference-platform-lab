@@ -1456,33 +1456,146 @@ kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
 
 如果 calibration Job 跑不通：临时把 `peakPrefillThroughput` 设成 `100000`（相当于关闭 saturation override，只保留 prefix affinity），在结果里明确写“未校准，gate 被人为关闭”。不要把这个值当生产值。
 
-### 5.9 切到 random baseline（只切配置，数据在 §6.5 跑）
+### 5.9 跑四组：direct → random → optimized → precise
 
-> **这一节不产生实验结果。** 它只把 EPP 换成 `random-picker` 并验证切换成功；真正的 1–3 轮压测在 §6.5，用 `ARM="random"` 跑，结果写到 `/results/random-run1.json` 等文件。D4 的四个 arm 都是「先切配置，再跑数据」，切和跑是分开的两步。
+到这里部署和校准都完成了。**下面每组都是独立闭环：切配置 → 验证 → 跑 → 记结果。** 不要先切完所有配置再回来跑，也不要跳着切。§6 只解释设计依据和判读，执行时不用翻。
+
+**四组共用的固定参数**
+
+| 参数 | 值 |
+|---|---|
+| sessions / turns | 32 / 4（共 128 请求） |
+| prefix / suffix words | 1100 / 80 |
+| max tokens | 128 |
+| concurrency | 16 |
+| seed | 42 |
+| warmup | 4 |
+| SLO | TTFT ≤ 2000 ms，TPOT ≤ 100 ms |
+
+**5.9.0 一次性准备（同一 shell 里执行）**
 
 ```bash
+cd "${LAB}"
+
+kubectl create configmap d4-bench -n d4 \
+  --from-file=bench_prefix.py=scripts/d4/bench_prefix.py \
+  --from-file=run_bench.sh=scripts/d4/run_bench.sh \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+POD_URLS=$(kubectl get pods -n d4 -l app=vllm-d4 \
+  -o jsonpath='{range .items[*]}http://{.status.podIP}:8000,{end}' | sed 's/,$//')
+echo "$POD_URLS"
+
+# 四组共用：arm / url / force_close / run
+run_arm() {
+  export URL="$2" ARM="$1" RUN="$4" FORCE_CLOSE="$3" POD_URLS
+  export SESSIONS=32 TURNS=4 PREFIX_WORDS=1100 SUFFIX_WORDS=80
+  export MAX_TOKENS=128 CONCURRENCY=16 SEED=42 WARMUP=4
+  kubectl delete pod d4-bench -n d4 --ignore-not-found
+  envsubst < scripts/d4/bench-pod.yaml | kubectl apply -n d4 -f -
+  kubectl wait --for=condition=Ready pod/d4-bench -n d4 --timeout=120s
+  kubectl logs -f d4-bench -n d4
+}
+```
+
+> `run_arm` 是 shell 函数；换了 shell 要重新执行这一段。结果写到 `/results/<ARM>-run<N>.json`。
+
+**5.9.1 Arm 1：direct（基线，3 轮）**
+
+不需要 router，直接打 Service，并让每个请求新建连接：
+
+```bash
+run_arm direct "http://vllm-direct:8000/v1/completions" 1 1
+run_arm direct "http://vllm-direct:8000/v1/completions" 1 2
+run_arm direct "http://vllm-direct:8000/v1/completions" 1 3
+```
+
+**5.9.2 Arm 2：random（控制组，1 轮）**
+
+先切配置并验证：
+
+```bash
+cd "${LAB}/llm-d"
 helm upgrade d4-router \
   oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
   -n d4 --version v1.0.0 \
   -f guides/recipes/router/base.values.yaml \
   -f "${LAB}/scripts/d4/values-random.yaml"
-
 kubectl rollout restart deploy/d4-router-epp -n d4
 kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+
+kubectl get cm d4-router-epp -n d4 -o jsonpath='{.data}' | grep -o 'random-plugins.yaml'
+kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'random-picker'
 ```
 
-确认切成功：ConfigMap 里应该是 `random-plugins.yaml`，EPP 启动日志里应该出现 `random-picker`。
+再跑：
 
 ```bash
-kubectl get cm d4-router-epp -n d4 -o jsonpath='{.data}' | grep -o 'random-plugins.yaml' | head -1
-kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'random-picker' | head -1
+cd "${LAB}"
+run_arm random "http://d4-router-epp/v1/completions" 0 1
 ```
 
-`random-picker` 和 precise 走同一条 Envoy + EPP 路径，只是忽略 cache/score；它用来回答：“P99 的改善是路由算法带来的，还是因为多了一跳 EPP？” 如果时间只够两组，跑 direct vs precise，random 作为加分项。
+**5.9.3 Arm 3：optimized（T0 参考，1–3 轮）**
 
-### 5.10 optimized baseline：T0 arm + fallback（只切配置，数据在 §6.5 跑）
+切配置并验证：
 
-> 和 §5.9 一样：这里只切换并验证配置，不跑数据。正式结果在 §6.5 用 `ARM="optimized"` 跑，写到 `/results/optimized-run1.json`。
+```bash
+cd "${LAB}/llm-d"
+helm upgrade d4-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+  -n d4 --version v1.0.0 \
+  -f guides/recipes/router/base.values.yaml \
+  -f "${LAB}/scripts/d4/values-optimized.yaml"
+kubectl rollout restart deploy/d4-router-epp -n d4
+kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+
+kubectl get cm d4-router-epp -n d4 -o jsonpath='{.data}' | grep -o 'optimized-plugins.yaml'
+kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'approx-prefix-cache-producer'
+```
+
+跑：
+
+```bash
+cd "${LAB}"
+run_arm optimized "http://d4-router-epp/v1/completions" 0 1
+# 时间够再跑 RUN=2、3
+```
+
+**5.9.4 Arm 4：precise（主实验，3 轮）**
+
+切回 precise 并验证：
+
+```bash
+cd "${LAB}/llm-d"
+helm upgrade d4-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+  -n d4 --version v1.0.0 \
+  -f guides/recipes/router/base.values.yaml \
+  -f "${LAB}/scripts/d4/values-precise.yaml"
+kubectl rollout restart deploy/d4-router-epp -n d4
+kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+
+kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'precise-prefix-cache-producer'
+```
+
+跑：
+
+```bash
+cd "${LAB}"
+run_arm precise "http://d4-router-epp/v1/completions" 0 1
+run_arm precise "http://d4-router-epp/v1/completions" 0 2
+run_arm precise "http://d4-router-epp/v1/completions" 0 3
+```
+
+**每组跑完检查**
+
+- `/results/<arm>-run1.json` 存在，`errors=0`；
+- `precise` 额外看 EPP：`active_subscribers=2`，`decisions_total{outcome="sticky"}` 有增长；
+- 四组跑完，把 `/results/*.json` scp 回本地并 commit（机器是租的，数字是你的）。
+
+### 5.10 optimized baseline 细节（可选，执行见 5.9.3）
+
+> 这一节解释 optimized 的用途、最小依赖和 DIY 对照；**执行已经在 §5.9.3 完成**，跑实验时不需要读这里。
 
 `values-optimized.yaml` 有两个用途：
 
@@ -1535,6 +1648,32 @@ kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'approx-pref
 | llm-d optimized | 是（近似） | 是（token 级） | — |
 
 > 自己写出来的是「另一个 router」，不是 optimized baseline：EPP 的固定开销、tokenize 路径、saturation 逻辑都不同，数字不能和 precise 直接比，§6.7 的归因会失效。而 optimized 只是换一个 `values-optimized.yaml`（一次 `helm upgrade`），DIY 的成本远高于此。
+
+**如果从本节直接开始：optimized 的完整压测命令**
+
+（和 §5.9.3 等价，放在这里是为了不跳回上一节）
+
+```bash
+cd "${LAB}"
+export URL="http://d4-router-epp/v1/completions"
+export ARM="optimized" RUN="1" FORCE_CLOSE="0"
+export POD_URLS=$(kubectl get pods -n d4 -l app=vllm-d4 \
+  -o jsonpath='{range .items[*]}http://{.status.podIP}:8000,{end}' | sed 's/,$//')
+export SESSIONS="32" TURNS="4" PREFIX_WORDS="1100" SUFFIX_WORDS="80"
+export MAX_TOKENS="128" CONCURRENCY="16" SEED="42" WARMUP="4"
+
+kubectl create configmap d4-bench -n d4 \
+  --from-file=bench_prefix.py=scripts/d4/bench_prefix.py \
+  --from-file=run_bench.sh=scripts/d4/run_bench.sh \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl delete pod d4-bench -n d4 --ignore-not-found
+envsubst < scripts/d4/bench-pod.yaml | kubectl apply -n d4 -f -
+kubectl wait --for=condition=Ready pod/d4-bench -n d4 --timeout=120s
+kubectl logs -f d4-bench -n d4
+```
+
+> 跑第 2、3 轮只改 `RUN`。每轮前脚本会自动 `POST /reset_prefix_cache`；404 说明 `VLLM_SERVER_DEV_MODE=1` 没开。
 
 > **公平性：** `optimized` 和 `precise` 要用同一个 `peakPrefillThroughput`。如果你在 §5.8 校准了 precise，把 `${LAB}/scripts/d4/values-optimized.yaml` 也改成同一个值；否则 T0 vs T1 的差异会混入 saturation gate 的差异。
 
@@ -1630,59 +1769,15 @@ hit_rate = Δvllm:prefix_cache_hits_total / Δvllm:prefix_cache_queries_total
 - **GPU 采样**：`nvidia-smi --query-gpu=utilization.gpu,power.draw,clocks.sm --format=csv -l 5` 另开一个终端记录；util 只作解释，不作 SLO。
 - **不要**：把 direct 的 per-connection 随机说成“严格 round-robin”；把 EPP 的固定开销算成 prefix routing 的收益；把不同模型/不同卡的数字混在一起。
 
-### 6.5 跑四组
+### 6.5 跑四组（命令已内联，见 §5.9）
 
-先把脚本打进 ConfigMap（回到 lab 仓库根目录）：
+执行命令不再放在本节：§5.9.1–§5.9.4 已经按 arm 拆好，每个 arm 都是「切换 → 验证 → 压测」的闭环；§5.10 末尾还有一份 optimized 的完整块。本节只保留设计说明，避免同一段命令出现三遍。
 
-```bash
-cd "${LAB}"
-
-kubectl create configmap d4-bench -n d4 \
-  --from-file=bench_prefix.py=scripts/d4/bench_prefix.py \
-  --from-file=run_bench.sh=scripts/d4/run_bench.sh \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-拿 Pod IP：
-
-```bash
-POD_URLS=$(kubectl get pods -n d4 -l app=vllm-d4 \
-  -o jsonpath='{range .items[*]}http://{.status.podIP}:8000,{end}' | sed 's/,$//')
-echo "$POD_URLS"
-```
-
-跑一轮（以 precise 为例）：
-
-```bash
-# precise arm：每轮前重启 EPP，清空 KV 索引；vLLM cache 由脚本 POST /reset_prefix_cache
-# （需要 VLLM_SERVER_DEV_MODE=1；404 说明没清，结果不可比）
-kubectl rollout restart deploy/d4-router-epp -n d4
-kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
-
-export URL="http://d4-router-epp/v1/completions"
-export ARM="precise" RUN="1" FORCE_CLOSE="0"
-export POD_URLS
-export SESSIONS="32" TURNS="4" PREFIX_WORDS="1100" SUFFIX_WORDS="80"
-export MAX_TOKENS="128" CONCURRENCY="16" SEED="42" WARMUP="4"
-
-kubectl delete pod d4-bench -n d4 --ignore-not-found
-envsubst < scripts/d4/bench-pod.yaml | kubectl apply -n d4 -f -
-kubectl wait --for=condition=Ready pod/d4-bench -n d4 --timeout=120s
-kubectl logs -f d4-bench -n d4
-```
-
-`direct` arm 把 `URL` 换成 `http://vllm-direct:8000/v1/completions`，`FORCE_CLOSE=1`。
-
-`optimized` arm 先按 §5.10 切到 `values-optimized.yaml`（含验证命令，这里不重复），再按上面的命令跑，`ARM="optimized"`。
-
-`random` arm 先按 §5.9 切到 `values-random.yaml`，`URL` 保持 `http://d4-router-epp/v1/completions`，`ARM="random"`。
-
-```text
-切配置：§5.9（random） / §5.10（optimized） / §5.5 或 §5.8（precise）
-跑数据：本节 §6.5，用对应的 ARM 值
-```
-
-每轮开始前，脚本会自动对 `POD_URLS` 发 `POST /reset_prefix_cache`；如果返回 404/405，手动重启两个 Pod，或在结果里注明“cache reset 不可用，轮次之间可能有残留”。
+- **轮数**：`direct` 3 轮、`precise` 3 轮、`optimized` 1–3 轮、`random` 1 轮。
+- **切换顺序**：`direct`（不用切）→ `random`（§5.9.2）→ `optimized`（§5.9.3）→ `precise`（§5.9.4）。
+- **每换一个 EPP arm**：`helm upgrade` → `kubectl rollout restart deploy/d4-router-epp` → 验证插件 → 再跑。
+- **cache reset**：每轮前脚本对每个 vLLM Pod `POST /reset_prefix_cache`；需要 `VLLM_SERVER_DEV_MODE=1`，404 说明没清，结果不可比。
+- **结果**：`/results/<ARM>-run<N>.json`，四组跑完 scp 回本地并 commit。
 
 ### 6.6 结果模板
 
