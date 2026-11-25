@@ -268,8 +268,8 @@ EPP 不可用 + FailOpen：
 | 实例 | Vast **62540497** | UK；`actual_status=running`，已可 SSH 登录；登录后先 `nvidia-smi` |
 | GPU | **2×RTX 3060 12GB** | 每个副本 1 张，TP=1；只有 2 张卡，不能做 2P+2D |
 | GPU 功耗 | 170W/卡 | 记录 `nvidia-smi -q -d POWER`；绝对数字不能和 D1/D2 的 40W L4 比 |
-| CPU / RAM | 40 vCPU（effective）/ 257,779 MiB ≈ 252GB | 2×vLLM + EPP + Envoy + bench 客户端足够 |
-| 磁盘 | 130GB | 镜像 ~10GB + 4B 权重 ~2.7GB + 结果/日志 |
+| CPU / RAM | 40 vCPU（effective）/ **98GB**（VM 内 `free -g`；Vast host 字段 252GB 不是 VM 配额） | 2×vLLM + EPP + Envoy + bench 客户端足够 |
+| 磁盘 | 130GB 购买（VM 内 126G，120G 可用） | 镜像 ~10GB + 4B 权重 ~2.7GB + 结果/日志 |
 | 价格 | **`$0.26148/h`**（含 130GB disk） | on-demand，按秒计费 |
 | 镜像 / 驱动 | `docker.io/vastai/kvm:cuda-12.9.1-auto`；host driver 580.95.05，CUDA max 13.0 | `nvidia-smi` 确认两张卡都在 |
 | SSH | `ssh3.vast.ai:16434` | 端口以 Vast 控制台为准 |
@@ -284,7 +284,7 @@ EPP 不可用 + FailOpen：
 >
 > | GPU | 地点 | $/h | RAM | 备注 |
 > |---|---|---|---|---|
-> | 2×3060 12GB | UK | 0.26148 | 252GB | **本次实际租用（62540497）** |
+> | 2×3060 12GB | UK | 0.26148 | 98GB（VM） | **本次实际租用（62540497）** |
 > | 2×3090 | UK | 0.935 | 251GB | 备选；24GB 显存，8B 也能跑 |
 > | 2×4090 | Quebec | 0.935 | 125GB | 备选；更快，但 R<0.99 |
 > | 2×5090 | UK | 1.868 | 503GB | 32GB，没必要 |
@@ -310,8 +310,8 @@ ps -p 1 -o comm=                 # 必须是 systemd；不是就说明拿到的�
 nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,power.limit \
   --format=csv,noheader
 # 期望两行：RTX 3060 / 12288 MiB / 170 W 左右
-df -h /                          # 期望 >=130GB
-free -g                          # 期望 ~252GB
+df -h /                          # 期望 >=120GB 可用（购买 130GB，VM 内约 126G）
+free -g                          # 期望 ~98GB（Vast host 字段 252GB 不是 VM 配额）
 lsb_release -ds                  # Ubuntu 22.04.x LTS；没有该命令就 cat /etc/os-release
 stat -fc %T /sys/fs/cgroup       # 期望 cgroup2fs
 ```
@@ -505,7 +505,7 @@ kubectl delete pod -n d4 gpu-smoke
 | EPP | 2 CPU / 4Gi | 8Gi | 单副本 |
 | Envoy | 1 CPU / 1Gi | 2Gi | sidecar |
 | bench 客户端 | 2 CPU / 4Gi | 4 CPU / 8Gi | 不用 GPU |
-| 合计 requests | ~13 CPU / ~41Gi | — | 40 vCPU / 252GB 够 |
+| 合计 requests | ~13 CPU / ~41Gi | — | 40 vCPU / 98GB 够 |
 
 ### 3.4 版本矩阵与预检
 
@@ -1810,7 +1810,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 **何时用：** 长共享前缀、多轮/agentic、HBM 压力大、CPU RAM 富余；**何时不用：** 短 prompt、缓存本来就能全放 HBM、CPU RAM 不够、没有快传输。
 
-**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×3060 12GB，252GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×3060 的 HBM 只有 12GB/卡，P2P 的默认 gpt-oss-120b 放不下，且没有 NVLink。
+**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×3060 12GB，98GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×3060 的 HBM 只有 12GB/卡，P2P 的默认 gpt-oss-120b 放不下，且没有 NVLink。
 
 **面试一句话：** “tiered 是单 Pod 的 HBM→CPU/FS 扩展，P2P 是跨 Pod 从 peer 的 CPU tier 拉；两者都只在‘前缀复用 + HBM 不够’时才划算。”
 
@@ -1867,7 +1867,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 | PD | 4×24GB VM（4×4090），2P + 2D，TP=1 | 5h（6h 起超 $10） | ~$9.3 | **本次 skipped/blocked**：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；62540497 是 2×3060，不能 2P+2D；4×3060 VM 不存在；4×4090 5h 保留为可选 |
 | wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
 | flow control | 2×3060 12GB（现成实例）+ 两类客户端（premium/batch） | 3–4h | ~$1.0 | D5/Q2 扩展；不用另租卡 |
-| tiered prefix cache | 2×3060 12GB，252GB RAM，CPU tier 16GiB | 4–5h | ~$1.0–1.3 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
+| tiered prefix cache | 2×3060 12GB，98GB RAM，CPU tier 16GiB | 4–5h | ~$1.0–1.3 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
 | P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；24GB 卡上默认模型放不下 |
 | autoscaling | 4×24GB VM（2→4 副本） | 3h | ~$8 | Q2；D3 已有 0→1/1→2 基础 |
 | rollout / 零停机 | 3–4×24GB VM（留 surge） | 2h | ~$4 | D3 §9 的扩展 |
@@ -1881,7 +1881,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 A：官方验证过的 end-to-end 部署配方，分 Foundations / Models / Operations 三条 pillar，成熟度 Tier 0–5；Tier 绑定 reference environment。D4 只跑 `precise-prefix-cache-routing`，`optimized-baseline` 作 fallback。详见 §1.0。
 
 **Q2：Vast 上能租到 2×L4 的 VM 吗？**
-A：**不能。** 2026-11-25 实测 `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，容器起不来。2 卡 VM 当时只有 RTX 3090/4090/5090；**本次实际租的是 2×RTX 3060 12GB（instance 62540497，UK，`$0.26148/h` 含 130GB disk，40 vCPU / 252GB RAM）**，2×3090（UK $0.935/h、251GB RAM）只是备选。**“L4 容器”和“L4 VM”是两回事**，看 `vms_enabled`，不要拿容器 offer ID 建 VM。D4 用 2×3060 + Qwen3-4B-AWQ，结果标 3060；D4.5 的 4×L4 VM 同样不存在，**本次 2×3060 只有 2 卡、不能 2P+2D，D4.5 标记 skipped/blocked**，4×4090 5h（约 $9.3）保留为可选。详见 §3.1。
+A：**不能。** 2026-11-25 实测 `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，容器起不来。2 卡 VM 当时只有 RTX 3090/4090/5090；**本次实际租的是 2×RTX 3060 12GB（instance 62540497，UK，`$0.26148/h` 含 130GB disk，40 vCPU / 98GB RAM）**，2×3090（UK $0.935/h、251GB RAM）只是备选。**“L4 容器”和“L4 VM”是两回事**，看 `vms_enabled`，不要拿容器 offer ID 建 VM。D4 用 2×3060 + Qwen3-4B-AWQ，结果标 3060；D4.5 的 4×L4 VM 同样不存在，**本次 2×3060 只有 2 卡、不能 2P+2D，D4.5 标记 skipped/blocked**，4×4090 5h（约 $9.3）保留为可选。详见 §3.1。
 
 **Q3：ZMQ 是什么？为什么 precise routing 需要它？**
 A：ZeroMQ，嵌入式消息库；vLLM PUB 5556 发 KV block 事件，EPP SUB 建精确 prefix 索引，5559 replay 补历史；PUB/SUB 不可靠，所以要监控 `active_subscribers` 和 topic/block size。详见 §5.4。

@@ -12,7 +12,7 @@
 #   kubectl create namespace d46 --dry-run=client -o yaml | kubectl apply -f -
 #   kubectl apply -n d46 -f scripts/d4.6/modelserver-tiered.yaml
 #
-# 注意：CPU tier 放在 /dev/shm，计入 Pod memory limit；本次 host 252GB RAM，
+# 注意：CPU tier 放在 /dev/shm，计入 Pod memory limit；本次 VM 内 98GB RAM，
 # 2×16GiB CPU tier + vLLM RSS 余量充足。
 apiVersion: apps/v1
 kind: Deployment
