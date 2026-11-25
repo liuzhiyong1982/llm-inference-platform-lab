@@ -1456,7 +1456,9 @@ kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
 
 如果 calibration Job 跑不通：临时把 `peakPrefillThroughput` 设成 `100000`（相当于关闭 saturation override，只保留 prefix affinity），在结果里明确写“未校准，gate 被人为关闭”。不要把这个值当生产值。
 
-### 5.9 切到 random baseline
+### 5.9 切到 random baseline（只切配置，数据在 §6.5 跑）
+
+> **这一节不产生实验结果。** 它只把 EPP 换成 `random-picker` 并验证切换成功；真正的 1–3 轮压测在 §6.5，用 `ARM="random"` 跑，结果写到 `/results/random-run1.json` 等文件。D4 的四个 arm 都是「先切配置，再跑数据」，切和跑是分开的两步。
 
 ```bash
 helm upgrade d4-router \
@@ -1469,9 +1471,18 @@ kubectl rollout restart deploy/d4-router-epp -n d4
 kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
 ```
 
+确认切成功：ConfigMap 里应该是 `random-plugins.yaml`，EPP 启动日志里应该出现 `random-picker`。
+
+```bash
+kubectl get cm d4-router-epp -n d4 -o jsonpath='{.data}' | grep -o 'random-plugins.yaml' | head -1
+kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'random-picker' | head -1
+```
+
 `random-picker` 和 precise 走同一条 Envoy + EPP 路径，只是忽略 cache/score；它用来回答：“P99 的改善是路由算法带来的，还是因为多了一跳 EPP？” 如果时间只够两组，跑 direct vs precise，random 作为加分项。
 
-### 5.10 optimized baseline：T0 arm + fallback
+### 5.10 optimized baseline：T0 arm + fallback（只切配置，数据在 §6.5 跑）
+
+> 和 §5.9 一样：这里只切换并验证配置，不跑数据。正式结果在 §6.5 用 `ARM="optimized"` 跑，写到 `/results/optimized-run1.json`。
 
 `values-optimized.yaml` 有两个用途：
 
@@ -1486,6 +1497,16 @@ helm upgrade d4-router \
   -n d4 --version v1.0.0 \
   -f guides/recipes/router/base.values.yaml \
   -f "${LAB}/scripts/d4/values-optimized.yaml"
+
+kubectl rollout restart deploy/d4-router-epp -n d4
+kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+```
+
+确认切成功：ConfigMap 里应该是 `optimized-plugins.yaml`，EPP 日志里应该出现 `approx-prefix-cache-producer`。
+
+```bash
+kubectl get cm d4-router-epp -n d4 -o jsonpath='{.data}' | grep -o 'optimized-plugins.yaml' | head -1
+kubectl logs -n d4 deploy/d4-router-epp -c epp --tail=200 | grep -o 'approx-prefix-cache-producer' | head -1
 ```
 
 它用 `approx-prefix-cache-producer`，不需要 `--enable-scale-out` 和 KV events；仍然能对比 round-robin vs EPP 的 P99 和命中率，只是“前缀位置”是估计的。结果里必须写清楚是 **optimized baseline，不是 precise**。
@@ -1652,20 +1673,14 @@ kubectl logs -f d4-bench -n d4
 
 `direct` arm 把 `URL` 换成 `http://vllm-direct:8000/v1/completions`，`FORCE_CLOSE=1`。
 
-`optimized` arm 先把 router 切到 `values-optimized.yaml`，再按上面的命令跑，`ARM="optimized"`：
+`optimized` arm 先按 §5.10 切到 `values-optimized.yaml`（含验证命令，这里不重复），再按上面的命令跑，`ARM="optimized"`。
 
-```bash
-cd "${LAB}/llm-d"
-helm upgrade d4-router \
-  oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
-  -n d4 --version v1.0.0 \
-  -f guides/recipes/router/base.values.yaml \
-  -f "${LAB}/scripts/d4/values-optimized.yaml"
-kubectl rollout restart deploy/d4-router-epp -n d4
-kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+`random` arm 先按 §5.9 切到 `values-random.yaml`，`URL` 保持 `http://d4-router-epp/v1/completions`，`ARM="random"`。
+
+```text
+切配置：§5.9（random） / §5.10（optimized） / §5.5 或 §5.8（precise）
+跑数据：本节 §6.5，用对应的 ARM 值
 ```
-
-`random` arm 先把 router 切到 `values-random.yaml`，`URL` 保持 `http://d4-router-epp/v1/completions`，`ARM="random"`。
 
 每轮开始前，脚本会自动对 `POD_URLS` 发 `POST /reset_prefix_cache`；如果返回 404/405，手动重启两个 Pod，或在结果里注明“cache reset 不可用，轮次之间可能有残留”。
 
