@@ -1497,6 +1497,8 @@ helm upgrade d4-router \
 
 ### 6.1 四个 arm
 
+> **arm 是什么**：实验分组（treatment group），借自临床试验/A-B 测试的术语。**不是 vLLM 实例，也不是 ARM 架构。** 一个 arm = 一种**路由配置**；四个 arm 共用同一对 vLLM 副本、同一 workload、同一 SLO，只改「请求怎么进入后端」。脚本里的 `ARM` 只是结果文件名前缀（`/results/<ARM>-run<N>.json`），不控制启动几个 vLLM。
+
 | arm | URL | 说明 | 优先级 |
 |---|---|---|---|
 | `direct` | `http://vllm-direct:8000/v1/completions` | 普通 Service；K8s per-connection 选择，不是严格轮询；用 `FORCE_CLOSE=1` 让每个请求新建连接 | **P0** |
