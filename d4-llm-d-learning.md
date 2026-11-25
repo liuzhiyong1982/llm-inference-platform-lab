@@ -1042,58 +1042,24 @@ precise 路由不是“开个 EPP 就行”，它依赖 vLLM 暴露三样东西�
 
 ### 5.4 验证 render 与 KV events
 
-**先搞清楚是哪些 flag 让这两个能力可用**（vLLM 官方口径，0.34 一致；完整清单见 §5.3）：
+这一步验收两个前提：**两个 Pod 都能用引擎 tokenizer 渲染 token IDs**，**KV events 的 PUB/REPLAY 都在监听**。两者都由 flag 显式打开，默认是关的：
 
 | 能力 | 打开它的 flag | 默认 | 缺了的表现 |
 |---|---|---|---|
 | `/v1/completions/render`、`/v1/chat/completions/render`、`/v1/responses/render` | `--enable-scale-out` | **关** | 404 |
-| KV events PUB（5556） | `--kv-events-config` 里的 `"enable_kv_cache_events": true` + `"publisher": "zmq"` + `"endpoint": "tcp://*:5556"` | **关**（publisher=`null`） | 5556 不监听，EPP `active_subscribers=0` |
-| replay（5559） | 同一 JSON 的 `"replay_endpoint": "tcp://*:5559"` | 空 | EPP 重启后补不了历史事件 |
-| 精确索引能对上 | `--block-size=64` + JSON 的 `"topic": "kv@<podIP>:<port>@<served-model-name>"` | block 16（以启动日志为准） | key 对不上、查不到，退化成负载均衡 |
+| KV events PUB（5556） | `--kv-events-config` 里的 `enable_kv_cache_events=true` + `publisher=zmq` + `endpoint=tcp://*:5556` | **关**（publisher=`null`） | 5556 不监听，EPP `active_subscribers=0` |
+| replay（5559） | 同一 JSON 的 `replay_endpoint` | 空 | EPP 重启后补不了历史 |
+| 索引能对上 | `--block-size=64` + `topic` | block 16（以启动日志为准） | key 对不上、永远 miss |
 
-> `vllm launch render` 和 `vllm serve --tokens-only` **总是**注册 render 端点，不受 `--enable-scale-out` 影响；D4 两种都不用，走普通 `vllm serve` + `--enable-scale-out`。
+> `vllm launch render` 和 `vllm serve --tokens-only` **总是**注册 render 端点，不受 `--enable-scale-out` 影响；D4 不用这两种模式。
 >
-> 对应到 `scripts/d4/modelserver.yaml` 就是三行：`--enable-scale-out`、`--kv-events-config '{...}'`、`--block-size=64`。`optimized` baseline 两个能力都不需要，见 §5.10。
+> 对应 `modelserver.yaml` 的三行：`--enable-scale-out`、`--kv-events-config`、`--block-size=64`；每个 flag 的完整说明见 §5.3。`optimized` baseline 两个能力都不需要，见 §5.10。
 >
-> `--enable-prefix-caching` 只影响“命中能不能发生”，不影响 render / KV events 是否可用；manifest 显式写它是为了不依赖版本默认值。
+> `--enable-prefix-caching` 只影响“命中能不能发生”，不影响这两个能力是否可用。
 
-**先分清三种「端口」**：`kubectl get pods -o wide` **没有 PORTS 列**，K8s 不像 `docker ps` 那样显示端口。
+**1）render：两个 Pod 都要返回 `token_ids`**
 
-| 层级 | 含义 | 怎么看 |
-|---|---|---|
-| 声明 | `spec.containers[].ports` 写了什么 | `kubectl get pod -o jsonpath` |
-| 监听 | 进程真的 bind 了 5556/5559 | `kubectl exec` 里连 `127.0.0.1` |
-| 可达 | 宿主/其他 Pod 能不能连上 | 从宿主 `curl` / `connect_ex` |
-
-```bash
-# 1) 声明了哪些端口
-kubectl get pods -n d4 -l app=vllm-d4 \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{range .spec.containers[0].ports[*]}{.name}={.containerPort}{" "}{end}{"\n"}{end}'
-# 期望 http=8000 kv-events=5556 kv-replay=5559
-
-# 2) 进程是否真的在监听（vLLM 镜像自带 python3）
-for pod in $(kubectl get pods -n d4 -l app=vllm-d4 -o name); do
-  echo -n "$pod: "
-  kubectl exec -n d4 "$pod" -- python3 -c "import socket; print(' '.join(f'{p}={\"open\" if socket.socket().connect_ex((\"127.0.0.1\",p))==0 else \"closed\"}' for p in (5556,5559)))"
-done
-# 期望两个 Pod 都是 5556=open 5559=open；closed 说明 --kv-events-config 没生效
-
-# 3) 从宿主是否可达（k3s 的 host 能直接访问 Pod IP）
-for ip in $(kubectl get pods -n d4 -l app=vllm-d4 -o jsonpath='{range .items[*]}{.status.podIP}{" "}{end}'); do
-  printf "%s " "$ip"
-  curl -sS -m 3 -o /dev/null -w "8000=%{http_code} " "http://$ip:8000/v1/models"
-  python3 - "$ip" <<'PY'
-import socket, sys
-ip = sys.argv[1]
-for p in (5556, 5559):
-    s = socket.socket(); s.settimeout(2)
-    print(f"{p}={'open' if s.connect_ex((ip, p)) == 0 else 'closed'}", end=" ")
-print()
-PY
-done
-```
-
-拿到两个 Pod IP，逐个测 render。**在宿主上跑**，比 `kubectl run` 测试 Pod 少一层网络和 attach 干扰：
+在**宿主**上跑，少一层测试 Pod 的网络和 attach 干扰：
 
 ```bash
 POD_IPS=$(kubectl get pods -n d4 -l app=vllm-d4 -o jsonpath='{range .items[*]}{.status.podIP}{" "}{end}')
@@ -1104,21 +1070,60 @@ for ip in $POD_IPS; do
     -d '{"model":"qwen3-4b","prompt":"render check","max_tokens":1}')
   echo "== $ip http=$code $(grep -o '"token_ids":\[[^]]*\]' "/tmp/render-$ip.json" | head -1)"
 done
-# 期望两行都是 http=200 token_ids=[...]
+# 期望两行：http=200 token_ids=[7322,...]
 ```
 
-> 如果第二个 IP 连 `==` 都没打印，说明**测试脚本本身被打断**（常见于 `kubectl run -i` 的 attach 流被 `head` 提前关闭），不是 vLLM 返回空。换上面的宿主 curl 复测即可。
+- **404**：`--enable-scale-out` 没开（默认 false）。先确认版本支持，再决定是否走 §5.10：
+  ```bash
+  kubectl exec -n d4 deploy/vllm-d4 -- vllm serve --help | grep enable-scale-out
+  ```
+- **只打印一个 IP 就结束**：测试脚本被打断（常见于 `kubectl run -i` 的 attach 流被 `head` 提前关闭），不是 vLLM 返回空；用上面的宿主 curl 复测即可。
 
-**404 基本都是 `--enable-scale-out` 没开**（该 flag 默认 false）；先确认版本里有这个 flag，再决定是否走 §5.10 fallback：
+**2）KV events：声明、监听、可达是三件事**
+
+`kubectl get pods -o wide` **没有 PORTS 列**，K8s 不像 `docker ps` 那样显示端口。
+
+| 层级 | 含义 | 判据 |
+|---|---|---|
+| 声明 | `spec.containers[].ports` 写了什么 | `http=8000 kv-events=5556 kv-replay=5559` |
+| 监听 | 进程真的 bind 了 | Pod 内连 `127.0.0.1:5556/5559` 为 open |
+| 可达 | 别的 Pod 能不能连上 | 宿主连 Pod IP 为 open（EPP 走 Pod 网络） |
 
 ```bash
-kubectl exec -n d4 deploy/vllm-d4 -- vllm serve --help \
-  | grep -E 'enable-scale-out|kv-events-config'
+# 声明
+kubectl get pods -n d4 -l app=vllm-d4 \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{range .spec.containers[0].ports[*]}{.name}={.containerPort}{" "}{end}{"\n"}{end}'
+
+# 监听（Pod 内连本地端口；vLLM 镜像自带 python3）
+for pod in $(kubectl get pods -n d4 -l app=vllm-d4 -o name); do
+  echo -n "$pod: "
+  kubectl exec -n d4 "$pod" -- python3 -c 'import socket; [print(p, "open" if socket.socket().connect_ex(("127.0.0.1", p)) == 0 else "closed") for p in (5556, 5559)]' | tr '\n' ' '
+  echo
+done
+
+# 可达（宿主 -> Pod IP；单节点 k3s 默认没有 NetworkPolicy）
+for ip in $(kubectl get pods -n d4 -l app=vllm-d4 -o jsonpath='{range .items[*]}{.status.podIP}{" "}{end}'); do
+  python3 - "$ip" <<'PY'
+import socket, sys
+ip = sys.argv[1]
+print(ip, *(f"{p}={'open' if socket.socket().connect_ex((ip, p)) == 0 else 'closed'}" for p in (5556, 5559)))
+PY
+done
+# 期望两个 Pod 都是 5556=open 5559=open
 ```
 
-> 端口 open 只证明 vLLM 在发事件；**最终判据是 §5.6 的 `active_subscribers=2`**，以及 `messages_received_total` 在涨。
+> 5556 `closed` → `--kv-events-config` 没生效（看 Pod args 和启动日志）；`open` 但 EPP 订阅不到 → 看 §5.6 的 `active_subscribers`。**端口 open 只证明 vLLM 在发，最终判据是 EPP 收到。**
 
-> **ZMQ（ZeroMQ）是什么：** 一个嵌入式异步消息库，不是 Kafka 那样的消息队列中间件。vLLM 在每个 KV block 分配/驱逐时，通过 **PUB 5556** 发事件；EPP 用 **SUB** 订阅，建“哪个副本有哪段前缀”的精确索引；**5559 是 replay**，EPP 重启后补历史。`PUB/SUB` 没有 ACK、没有持久化，所以必须监控 `active_subscribers`、`messages_received_total`，并保证 topic（`kv@podIP:port@model`）和 `block-size=64` 对齐。用 ZMQ 而不是 HTTP/gRPC，是因为事件频率高、需要一对多 fan-out、且不想引入 broker。
+**3）ZMQ 是什么**
+
+> 一个嵌入式异步消息库，不是 Kafka 那样的消息队列中间件。vLLM 在每个 KV block 分配/驱逐时，通过 **PUB 5556** 发事件；EPP 用 **SUB** 订阅，建“哪个副本有哪段前缀”的精确索引；**5559 是 replay**，EPP 重启后补历史。`PUB/SUB` 没有 ACK、没有持久化，所以必须监控 `active_subscribers`、`messages_received_total`，并保证 topic（`kv@podIP:port@model`）和 `block-size=64` 对齐。用 ZMQ 而不是 HTTP/gRPC，是因为事件频率高、需要一对多 fan-out、且不想引入 broker。
+
+**本节验收**
+
+- [ ] 两个 Pod IP 都返回 `http=200` + `token_ids`
+- [ ] 两个 Pod 的 5556/5559 都 `open`（声明、监听、可达三层一致）
+- [ ] `vllm serve --help` 里有 `--enable-scale-out`
+- [ ] 进入 §5.5；EPP 起来后用 §5.6 的 `active_subscribers=2` 收口
 
 ### 5.5 安装 GAIE CRD + llm-d router
 
