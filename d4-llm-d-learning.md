@@ -1498,7 +1498,20 @@ run_arm() {
 }
 ```
 
-> `run_arm` 是 shell 函数；换了 shell 要重新执行这一段。结果写到 `/results/<ARM>-run<N>.json`。
+**`run_arm()` 做了什么**
+
+调用形式：`run_arm <arm> <url> <force_close> <run>`
+
+| 步骤 | 动作 |
+|---|---|
+| 1 | 把 4 个参数映射到 `ARM` / `URL` / `FORCE_CLOSE` / `RUN`，并导出 `POD_URLS` |
+| 2 | 导出固定的 workload 参数：32 session、4 turn、1100/80 词、128 token、c=16、seed=42、4 个 warmup |
+| 3 | 删掉上一轮的 `d4-bench` Pod（`--ignore-not-found`） |
+| 4 | `envsubst` 渲染 `bench-pod.yaml`，`kubectl apply` 创建新 Pod |
+| 5 | 等 Pod Ready（最多 120s） |
+| 6 | `kubectl logs -f` 跟到压测结束；结果由容器写到 `/results/<ARM>-run<N>.json` |
+
+> 它**不切换 router**（切换在调用前的 `helm upgrade` 里），也**不主动清 cache**——cache reset 是 bench 容器启动后对每个 `POD_URLS` 发 `POST /reset_prefix_cache`。`run_arm` 是 shell 函数，换了 shell 要重新执行 5.9.0。
 
 **5.9.1 Arm 1：direct（基线，3 轮）**
 
