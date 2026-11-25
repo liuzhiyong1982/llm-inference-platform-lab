@@ -1975,6 +1975,8 @@ Service d4-router-epp:80
 >
 > 所以 FailOpen 保的是“连接层可用”，**不是“LLM 请求可用”**。这一点比“FailOpen 是否 200”重要得多。
 
+> **能不能把 `request_body_mode` 改成 `BUFFERED` 来救 body？** 理论上可以（Envoy 先缓冲，失败时能重放原始 body），但本 chart v1.0.0 实测**不行**：把内联 `envoy.yaml` 里的 `FULL_DUPLEX_STREAMED` 改成 `BUFFERED` 后，正常 POST 直接空回复（curl exit 52），EPP 日志里也没有收到请求——说明该 EPP 的 ext_proc 实现依赖流式 body。`request_body_mode` 不在 chart 的独立 values 里，改它要覆盖整个 `envoy.yaml`，且 `helm upgrade` 会还原。**不要在生产里盲改**；要解决 fail-open 的 body 丢失，优先选 EPP HA + FailClose，或等 chart 上游修复。
+
 **测试方法：用 iptables 在 EPP Pod 的 netns 里拒绝 9002**
 
 这样做是“connection refused”，不是“进程卡住”；不需要改 Deployment，也不会删掉 Envoy sidecar。
