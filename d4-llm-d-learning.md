@@ -1199,6 +1199,8 @@ helm upgrade --install d4-router \
 
 > 换 arm 只改插件：`optimized` 把 producer 换成 `approx-prefix-cache-producer`（`values-optimized.yaml`），`random` 换成 `random-picker`（`values-random.yaml`）；pool/proxy 部分不动。
 
+> **为什么 block 是 64，不是 32/16？** block 越小，索引粒度越细、序列最后一个不完整 block 的浪费越少；但 KV events 和索引条目成倍增加，vLLM 的 paged attention 也多一层间接寻址。对 D4 的 ~1.5k token 前缀，64 和 32 的**可命中长度通常一样**（都向下取整到 1472），差异 <5%；16 则会让事件量再翻倍。所以跟 guide 默认 64，**不要在中途改**。真要测就单独做 A/B：同时改 vLLM `--block-size` 和 EPP `blockSizeTokens`，重启 vLLM + EPP（索引和 KV cache 都会清空），否则静默 miss。
+
 检查：
 
 ```bash
