@@ -988,9 +988,49 @@ kubectl run curl-models --rm -i --restart=Never -n d4 \
 
 期望返回 `qwen3-4b`。
 
+**`modelserver.yaml` 里每个 flag 为什么这么写**
+
+precise 路由不是“开个 EPP 就行”，它依赖 vLLM 暴露三样东西：**引擎的 tokenizer（render）**、**真实的 KV block 事件（ZMQ）**、**和 EPP 一致的 block 粒度**。下面按“必需 / 影响结果 / 运维”分组。
+
+**A. precise 必需（少一个就跑不成 precise）**
+
+| flag | 作用 | 不设或设错会怎样 |
+|---|---|---|
+| `--enable-scale-out` | 注册 `/v1/completions/render`、`/v1/chat/completions/render`、`/v1/responses/render`，EPP 的 token-producer 靠它拿到引擎 tokenizer 的 token IDs | 404；EPP 无法 tokenize，precise 直接不可用 |
+| `--kv-events-config '{...}'` | 打开 ZMQ PUB，上报 KV block 的分配/驱逐；JSON 需含 `enable_kv_cache_events=true`、`publisher=zmq`、`endpoint=tcp://*:5556`、`replay_endpoint=tcp://*:5559`、`topic=kv@<podIP>:<port>@<model>` | `publisher` 默认 `null`，5556 不监听；EPP 索引为空，`active_subscribers=0` |
+| `--block-size=64` | 固定 KV block 粒度，保证引擎的 block key 和 EPP 的索引一致 | 默认 16；和 EPP 的 `blockSizeTokens` 不一致时**不报错，只是永远 miss** |
+| `--served-model-name=qwen3-4b` | 让请求里的 `model`、EPP 的 `modelName`、KV topic 三者对齐 | 请求 404 `model not found`，或事件 topic 匹配不上 |
+| `--enable-prefix-caching` | 打开 vLLM 自动前缀缓存——路由到“有缓存”的副本，前提是那里真有缓存 | V1 多数版本默认已开；显式写是为了不依赖版本默认值。关掉则 precise 收益归零 |
+
+**B. 影响命中率 / 延迟（不是 precise 专用，但会改变结果）**
+
+| flag | 作用 | 对 D4 的影响 |
+|---|---|---|
+| `--max-model-len=8192` | 单请求上下文上限 | 决定单个 session 的 KV 占用；32×1.5k tokens 的 cache 竞争就按它算 |
+| `--gpu-memory-utilization=0.90` | 分配给 KV cache 的显存比例 | 越高 block 越多、驱逐越少、命中越高，但 activation 余量越小 |
+| `--max-num-seqs=16` | 每副本最大并发序列数 | 和压测 c=16 对齐；太小会排队，太大 KV 峰值过高 |
+| `--max-num-batched-tokens=4096` | 单步最多处理多少 token（chunked prefill 预算） | 影响 TTFT 和 prefill/decode 抢占；四个 arm 必须保持一致 |
+
+**C. 运维 / 噪声（不影响正确性）**
+
+| flag | 作用 |
+|---|---|
+| `--shutdown-timeout=45` | 优雅退出，等 in-flight 请求跑完 |
+| `--disable-log-requests` | 关逐请求日志，避免压测时 I/O 拖慢 |
+
+**vLLM 与 EPP 的对齐关系**（任何一项不一致，precise 都不报错，只会静默 miss）：
+
+| vLLM | EPP（`values-precise.yaml`） |
+|---|---|
+| `--block-size=64` | `blockSizeTokens: 64` |
+| `endpoint: tcp://*:5556` | `socketPort: 5556` |
+| `replay_endpoint: tcp://*:5559` | `replaySocketPort: 5559` |
+| `topic: kv@...` | `topicFilter: "kv@"` |
+| `--served-model-name=qwen3-4b` | `modelName: qwen3-4b` |
+
 ### 5.4 验证 render 与 KV events
 
-**先搞清楚是哪些 flag 让这两个能力可用**（vLLM 官方口径，0.34 一致）：
+**先搞清楚是哪些 flag 让这两个能力可用**（vLLM 官方口径，0.34 一致；完整清单见 §5.3）：
 
 | 能力 | 打开它的 flag | 默认 | 缺了的表现 |
 |---|---|---|---|
