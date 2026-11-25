@@ -1696,6 +1696,8 @@ kubectl logs -f d4-bench -n d4
 
 ## 6. 压测设计
 
+> **本节只讲 D4 路由实验的压测设计。** D4.6（tiered KV cache）是独立 lab，见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)，不在本文；D4.5（PD 分离）见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)，本次 skipped。
+
 ### 6.1 四个 arm
 
 > **arm 是什么**：实验分组（treatment group），借自临床试验/A-B 测试的术语。**不是 vLLM 实例，也不是 ARM 架构。** 一个 arm = 一种**路由配置**；四个 arm 共用同一对 vLLM 副本、同一 workload、同一 SLO，只改「请求怎么进入后端」。脚本里的 `ARM` 只是结果文件名前缀（`/results/<ARM>-run<N>.json`），不控制启动几个 vLLM。
