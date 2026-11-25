@@ -990,7 +990,22 @@ kubectl run curl-models --rm -i --restart=Never -n d4 \
 
 ### 5.4 验证 render 与 KV events
 
-拿到两个 Pod IP，并逐个测 render（vLLM 0.30+ 在 `--enable-scale-out` 下提供；0.34 以 `--help` 为准）：
+**先搞清楚是哪些 flag 让这两个能力可用**（vLLM 官方口径，0.34 一致）：
+
+| 能力 | 打开它的 flag | 默认 | 缺了的表现 |
+|---|---|---|---|
+| `/v1/completions/render`、`/v1/chat/completions/render`、`/v1/responses/render` | `--enable-scale-out` | **关** | 404 |
+| KV events PUB（5556） | `--kv-events-config` 里的 `"enable_kv_cache_events": true` + `"publisher": "zmq"` + `"endpoint": "tcp://*:5556"` | **关**（publisher=`null`） | 5556 不监听，EPP `active_subscribers=0` |
+| replay（5559） | 同一 JSON 的 `"replay_endpoint": "tcp://*:5559"` | 空 | EPP 重启后补不了历史事件 |
+| 精确索引能对上 | `--block-size=64` + JSON 的 `"topic": "kv@<podIP>:<port>@<served-model-name>"` | block 16（以启动日志为准） | key 对不上、查不到，退化成负载均衡 |
+
+> `vllm launch render` 和 `vllm serve --tokens-only` **总是**注册 render 端点，不受 `--enable-scale-out` 影响；D4 两种都不用，走普通 `vllm serve` + `--enable-scale-out`。
+>
+> 对应到 `scripts/d4/modelserver.yaml` 就是三行：`--enable-scale-out`、`--kv-events-config '{...}'`、`--block-size=64`。`optimized` baseline 两个能力都不需要，见 §5.10。
+>
+> `--enable-prefix-caching` 只影响“命中能不能发生”，不影响 render / KV events 是否可用；manifest 显式写它是为了不依赖版本默认值。
+
+拿到两个 Pod IP，并逐个测 render：
 
 ```bash
 POD_IPS=$(kubectl get pods -n d4 -l app=vllm-d4 \
@@ -1009,9 +1024,27 @@ kubectl run render-check --rm -i --restart=Never -n d4 \
     done'
 ```
 
-期望返回里有 `token_ids`。如果 404：`--enable-scale-out` 没开，或该版本没有 render 端点——**不要继续 precise，走 §5.10 fallback**。
+期望返回里有 `token_ids`。**404 基本都是 `--enable-scale-out` 没开**（该 flag 默认 false）；先确认版本里有这个 flag，再决定是否走 §5.10 fallback：
 
-确认 KV events 端口在监听：
+```bash
+kubectl exec -n d4 deploy/vllm-d4 -- vllm serve --help \
+  | grep -E 'enable-scale-out|kv-events-config'
+```
+
+确认 KV events 端口在监听（vLLM 镜像自带 python3，直接连本地端口）：
+
+```bash
+for pod in $(kubectl get pods -n d4 -l app=vllm-d4 -o name); do
+  echo "== $pod"
+  kubectl exec -n d4 "$pod" -- python3 -c '
+import socket
+for port in (5556, 5559):
+    s = socket.socket(); s.settimeout(1)
+    print(port, "open" if s.connect_ex(("127.0.0.1", port)) == 0 else "closed")
+'
+done
+# 期望 5556 open、5559 open；closed 说明 --kv-events-config 没生效
+```
 
 ```bash
 kubectl get pods -n d4 -l app=vllm-d4 -o wide
