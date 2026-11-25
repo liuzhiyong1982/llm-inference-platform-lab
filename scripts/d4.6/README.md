@@ -12,6 +12,7 @@
 | `values-tiered.yaml` | Tiered router（GPU + CPU prefix index，`lruCapacityPerServer=1800`） |
 | `run_arm.sh` | 单轮闭环：重启 EPP → 抓 metrics → 跑 bench → 抓 metrics |
 | `analyze.py` | 读 JSON/metrics，生成总体、按 turn、offload、EPP 索引表 |
+| `verify_cpu_tier.py` | 单 Pod 受控验证 store/load/`reset_external`；打一个目标前缀、刷掉、再打一次 |
 | `plot_d46.py` | 生成 `results/d4.6/d4.6-tiered-vs-hbm.png` |
 
 压测客户端复用 `scripts/d4/bench_prefix.py` / `bench-pod.yaml`。
@@ -48,12 +49,20 @@ for r in 1 2 3; do bash scripts/d4.6/run_arm.sh tiered vllm-tiered "$r"; done
 
 # 3. 分析
 python3 scripts/d4.6/analyze.py
+
+# 4. 可选：单 Pod 验证 CPU tier 的 store/load/reset
+POD=$(kubectl get pods -n d46 -l app=vllm-tiered -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n d46 "pod/$POD" 18000:8000 >/tmp/pf-cpu-tier.log 2>&1 &
+PF=$!; sleep 3
+python3 scripts/d4.6/verify_cpu_tier.py --base-url http://127.0.0.1:18000
+kill $PF
 ```
 
 ## 依赖与出图
 
 - `run_arm.sh`：bash、`kubectl`、`envsubst`、`curl`；EPP metrics 需要主文档 §5.1 的 RBAC。
 - `analyze.py`：Python 3，只读 JSON/文本。
+- `verify_cpu_tier.py`：Python 3；对单个 tiered Pod 的 port-forward 运行，不需要 EPP。
 - `plot_d46.py`：需要 matplotlib。没有就建临时 venv：
 
 ```bash
