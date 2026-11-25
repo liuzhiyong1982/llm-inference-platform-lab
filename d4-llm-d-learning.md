@@ -1794,14 +1794,27 @@ hit_rate = Δvllm:prefix_cache_hits_total / Δvllm:prefix_cache_queries_total
 
 ### 6.6 结果模板
 
-**客户端汇总**（`direct` / `precise` 3 轮；`optimized` 1–3 轮；`random` 1–3 轮，填中位数/范围）：
+**本次实测（2026-11-25，2×3060 12GB + Qwen3-4B-AWQ，32 session × 4 turn = 128 请求）**
 
-| arm | 轮次 | ok | TTFT P50 (ms) | TTFT P95 | TTFT P99 | TPOT P95 | E2E P99 | output tok/s | goodput (req/s) |
-|---|---|---|---|---|---|---|---|---|---|
-| direct | 3 | | | | | | | | |
-| optimized | 1–3 | | | | | | | | |
-| random | 1–3 | | | | | | | | |
-| precise | 3 | | | | | | | | |
+| arm | 轮次 | ok / errors | TTFT P50 (ms) | TTFT P95 | TTFT P99 | TPOT P50 | output tok/s | goodput |
+|---|---|---|---|---|---|---|---|---|
+| direct | 3 | 384 / 0 | 628 | 3114 | 4475 | 27.6 | 424 | 0.914 |
+| random | 1 | 128 / 0 | 798 | 3739 | 5056 | 26.1 | 438 | 0.844 |
+| **optimized** | 3 | 384 / 0 | **216** | **3140** | **3459** | **20.8** | **570** | **0.906** |
+| precise | 3 | 384 / 0 | 298 | 3292 | 3969 | 20.9 | 558 | 0.875 |
+
+> direct 的 run1 是冷缓存（P50 1227ms），表中取 3 轮中位数；实际范围 P50 628–1227ms、P99 3866–4506ms。所有轮次 `errors=0`。
+
+**归因（TTFT P99 中位数）**
+
+| 对比 | ΔP99 | 解释 |
+|---|---|---|
+| direct → random | **+581 ms** | 多一层 Envoy + EPP 的代理税，且随机路由打散前缀缓存 |
+| random → optimized | **−1597 ms** | 近似前缀亲和生效，命中率显著上升 |
+| optimized → precise | **+510 ms** | render 平均 42 ms/请求 + 精确索引开销，准确性收益没抵消 |
+| direct → precise | −506 ms（−11%） | 总收益存在，但不如 optimized |
+
+> **结论**：在 2 副本、1.5k 长前缀、无驱逐压力的场景下，`optimized` 的近似索引已经够用；`precise` 的 42ms/请求 render 成本没有被额外命中率抵消。precise 的价值应随副本数、驱逐频率、旁路 EPP 的请求比例上升——这是面试时要能说清的边界。
 
 **命中率与分布**（每轮前后各取一次 metrics，算 delta）：
 
@@ -1824,7 +1837,7 @@ python3 scripts/d4/plot_d4.py \
 
 **一句话归因模板**：
 
-> 在同一对 RTX 3060 12GB、同一 Qwen3-4B-AWQ、同一 128 条共享前缀请求下，市场默认的 optimized baseline（approx prefix + token load）TTFT P99 是 `____ ms`，precise 是 `____ ms`（`__%`），direct 是 `____ ms`；precise 的加权 prefix hit rate 从 optimized 的 `__%` 升到 `__%`。代价是 EPP `____ ms` 的固定开销（用 random arm 对比），以及 single-EPP 的可用性风险。
+> 在同一对 RTX 3060 12GB、同一 Qwen3-4B-AWQ、同一 128 条共享前缀请求下，市场默认的 optimized baseline（approx prefix + token load）TTFT P99 是 **3459 ms**，precise 是 **3969 ms（+14.7%）**，direct 是 **4475 ms**；optimized 相比 direct 降低 **22.7%**。random 的 **5056 ms** 说明代理固定开销约 **+581 ms**，而 optimized 把这份开销赚了回来。precise 没有赢过 optimized：render 平均 **42 ms/请求**，准确性收益不足以抵消。
 
 ### 6.7 怎么判读
 
