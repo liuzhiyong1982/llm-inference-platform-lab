@@ -95,6 +95,62 @@
 | QoS | Quality of Service | 服务质量 |
 | RBAC | Role-Based Access Control | 基于角色的访问控制 |
 
+### 1.0.2 并行方式速查（TP / PP / DP / EP）
+
+> 这一节回答“多张卡怎么用”，也是 §3.1 选 `TP=1 × 2 副本` 的依据。flag 以 `vllm serve --help` 为准（本文镜像是 `vllm/vllm-openai:v0.34.0`）。
+
+**四种并行切的是什么**
+
+| 维度 | 切什么 | 通信 | 频率 | 放哪 | vLLM flag | 解决什么 |
+|---|---|---|---|---|---|---|
+| TP | 每层权重矩阵 | all-reduce | 每层一次 | 节点内（NVLink） | `--tensor-parallel-size` | 单卡装不下 / 降单请求延迟 |
+| PP | 连续若干层 | stage 间 p2p 传 activation | 每 microbatch 一次 | 可跨节点 | `--pipeline-parallel-size` | 单节点也装不下 / 卡间无 NVLink |
+| DP | 整个模型复制 | 推理时无 | — | 任意 | `--data-parallel-size`（内部）或不带 DP flag 的独立实例（外部） | 提吞吐 |
+| EP | MoE 专家 | all-to-all | 每层（MoE） | 跨节点（RDMA） | `--enable-expert-parallel` | 专家多到单机放不下 |
+
+**TP vs 副本：延迟换吞吐**
+
+- TP 把同一层的矩阵拆到多卡，每卡算得更少 → 单请求 TTFT/TPOT 更低；但每层 all-reduce，PCIe 上开销大，**总吞吐不涨反可能降**。
+- 副本复制整个模型，副本间零通信 → 总吞吐近似线性涨，单请求延迟不变。
+- 故障域：TP 是一个进程组，一崩全崩；副本挂一个还剩一半。
+- 扩容粒度：TP=2 是 2 卡一跳；副本是 1 卡一跳。
+- 前缀缓存：TP 内部仍是一份逻辑 KV cache；副本是 N 份独立 cache，互相看不见——**这正是 D4 要测的东西**。
+- 2×3060 上的具体选型和四条理由见 §3.1「为什么是 2 副本 × TP=1」。
+
+**vLLM 自带的 DP 有三种形态**
+
+| 形态 | 启动 | 入口 | 谁选副本 | 是否 KV-aware |
+|---|---|---|---|---|
+| 内部 DP | `--data-parallel-size N` | 一个 | vLLM API server | 否，只看 running/waiting 队列 |
+| Hybrid LB | `--data-parallel-hybrid-lb` | 每节点一个 | 上游 LB + 节点内 API server | 否 |
+| 外部 DP | N 个独立 `vllm serve`，不带 `--data-parallel-*` | N 个 | 外部 router（Envoy/EPP） | 取决于 router |
+
+- 内部 DP 是「engine core 复制、API server 共享」：一个 endpoint，N 份权重、N 份独立 KV cache；`--max-num-seqs` 按 rank 计，`--max-num-queued-reqs` / `--max-num-queued-tokens` 按整个 server 计。
+- DP 与 TP 正交：`--data-parallel-size 4 --tensor-parallel-size 2` 需要 8 张卡。
+- 官方文档原话：内部 LB「could be made more sophisticated in future by incorporating KV cache aware logic」——**vLLM 知道每个 rank 有独立 KV cache，但还没做前缀感知路由**，这就是 llm-d/EPP 的空间。
+- 对非 MoE 模型，外部 DP 就是「起 N 个完全独立的 vLLM，前面挂 router」；`--data-parallel-rank` 那套 CLI 只在 MoE 的 DP+EP 场景需要。
+
+**PP 可以跨节点，但不必跨节点**
+
+- PP 按层切：36 层的 4B 用 `--pipeline-parallel-size 2`，就是每卡 18 层。
+- 通信只在 stage 边界传 activation，量级远小于 TP 的每层 all-reduce → **适合跨节点**。
+- 实践公式：`TP = 每节点 GPU 数，PP = 节点数`；2 节点 × 8 卡就是 TP=8、PP=2。
+- 跨节点两种跑法：Ray（`--distributed-executor-backend ray`），或 mp 后端 + `--nnodes/--node-rank/--master-addr`，worker 节点加 `--headless`。
+- 代价是 **pipeline bubble**：batch=1 时 stage 0 算完要等 stage 1，fill/drain 让首 token 更慢；并发高、气泡被连续批处理填满后吞吐才起来。所以 PP 是吞吐/容量工具，不是延迟工具。
+- vLLM 文档的边角结论：**卡间没有 NVLink（如 L40S）时，拆模型优先用 PP 而不是 TP**，因为 all-reduce 太贵。2×3060 同理，但 4B 根本不需要拆。
+- 约束：模型必须实现 `SupportsPP`，否则启动报错；层要能切（vLLM 支持不等分，但每段至少一层）。
+- **PP ≠ P/D 分离**：PP 是同一请求在层维度串行，仍是一个实例、一份逻辑 KV；P/D 是把 prefill/decode 拆成两个服务并传 KV。D4.5 做的是后者。
+
+**选型顺序**
+
+```text
+单卡装得下吗？          否 → 加 TP 到装得下
+单卡延迟达 SLO 吗？     否 → 继续加 TP
+还有卡？                   → 全部做副本（DP）
+模型跨节点？               → TP 留在节点内，PP 跨节点
+MoE 专家放不下？           → EP（需要 RDMA）
+```
+
 ### 1.1 计划里的 D4 要求
 
 | 计划要求 | 本文对应 | 产出 |
@@ -299,7 +355,7 @@ EPP 不可用 + FailOpen：
 >
 > `vms_enabled=false` 的 VM 再便宜也不能用；同一 GPU 的 VM 和容器 offer ID 不同。创建后先 `nvidia-smi` 确认两张卡都在，再装 k3s。62540497 的镜像是 `docker.io/vastai/kvm:cuda-12.9.1-auto`（VM，不是容器）。
 
-**为什么是「2 副本 × TP=1」，不是「单实例 × TP=2」**
+**为什么是「2 副本 × TP=1」，不是「单实例 × TP=2」**（四种并行的完整对比见 §1.0.2）
 
 TP（Tensor Parallelism，张量并行）换单请求延迟，副本换总吞吐：
 
@@ -1974,6 +2030,15 @@ A：standalone 模式下 Envoy 是 **EPP Pod 的 sidecar**，不是 vLLM Pod 的
 
 **Q5：FailOpen / FailClose 是什么意思？**
 A：EPP 不可用时数据面的两种策略。**FailOpen = 放行**：Envoy 的 ext_proc 失败后不阻断，按自己的 LB 把请求发给后端，可用性优先，但失去 prefix/load 感知，P99 可能升高。**FailClose = 阻断**：直接返回 503，路由控制优先，但 EPP 变成硬依赖。standalone 看 `router.proxy.failOpen`，Gateway Mode 看 `InferencePool.failureMode`；两者不要混。D4 用 `kill -STOP 1` 暂停 EPP 来测，不能直接删 Pod（会连 Envoy 一起删）。详见 §7.3。
+
+**Q6：2 张卡为什么不跑 TP=2，而要开 2 个副本？**
+A：TP 换的是**单请求延迟**，副本换的是**总吞吐**。4B-AWQ 单卡放得下（约 2.7GB），TP 的第一价值用不上；3060 没有 NVLink，TP 每层 all-reduce 走 PCIe 不划算；而且 D4 要测路由，必须有 2 份**独立** KV cache，单实例只有一份。详见 §3.1、§1.0.2。
+
+**Q7：vLLM 自己能做 DP 吗？为什么不直接 `--data-parallel-size 2`？**
+A：能，分内部 DP（一个 endpoint，vLLM 自己分发）、Hybrid LB（每节点一个 endpoint + 上游 LB）、外部 DP（N 个独立实例 + 外部 router）三种。内部 DP 的 LB 只看各 engine 的 running/waiting 队列，**不感知 KV cache**（官方文档原话：could be made more sophisticated in future by incorporating KV cache aware logic），EPP 也插不进去。D4 用的是外部 DP。详见 §1.0.2。
+
+**Q8：PP 一定要跨物理节点吗？**
+A：不必。PP 按层切，同机也能跑；但它只在 stage 边界传 activation，通信量远小于 TP 的每层 all-reduce，所以实践公式是 `TP = 每节点 GPU 数，PP = 节点数`。代价是 **pipeline bubble**，低并发时延迟更差，所以 PP 是吞吐/容量工具。**PP 也不等于 P/D 分离**：前者是一个实例在层维度串行，后者是 prefill/decode 两个服务。详见 §1.0.2。
 
 ---
 
