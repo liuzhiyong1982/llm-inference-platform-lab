@@ -313,6 +313,48 @@ EPP 不可用 + FailOpen：
 >
 > Gateway Mode 下，Envoy 是 Gateway 的数据面（Envoy Gateway / Istio），EPP 独立部署；也不是注入到模型 Pod。只有你额外装 Istio 并开启 namespace injection，才会有 Istio 自己的 Envoy sidecar 被注入，那是另一件事，D4 不用。
 
+### 2.5 GAIE 与 llm-d 是什么关系
+
+一句话：**GAIE 定标准，llm-d 做实现（并扩展）。**
+
+| 层 | 谁负责 | 在 D4 集群里对应什么 |
+|---|---|---|
+| API 契约 | GAIE（Kubernetes SIG） | `InferencePool` CRD + 对象 `d4-router` |
+| EPP 协议 | GAIE 规范（ext_proc / Endpoint Picker Protocol） | Envoy ↔ EPP 的 gRPC 9002 |
+| EPP 实现 + 插件 | llm-d（`llm-d-router`） | `d4-router-epp` Pod 里的 `epp` 容器 |
+| 数据面 | standalone 用 llm-d 自带 Envoy；Gateway Mode 用你的 Gateway | 同 Pod 的 `envoy-proxy` |
+| 插件配置格式 | llm-d 扩展（`llm-d.ai/v1 EndpointPickerConfig`） | `values-precise.yaml` 的内联配置 |
+| 模型服务 | vLLM（也可换 SGLang） | 两个 `vllm-d4` Pod |
+
+**为什么会分成两个项目**：GAIE 早期自带 EPP 参考实现；2026 年 GAIE 把完整 EPP、`InferenceObjective`、`InferenceModelRewrite` 迁到 `llm-d/llm-d-router`，自己只保留 `InferencePool` CRD、EPP 协议规范和 conformance 测试。所以现在：
+
+- 你 `kubectl apply` 的 GAIE `v1-manifests.yaml` **只有一个 CRD**（`InferencePool`）；
+- 真正干活的 EPP 来自 llm-d 的镜像 `ghcr.io/llm-d/llm-d-router-endpoint-picker`。
+
+**类比**：GAIE 像 USB 标准（接口、供电、协议），llm-d 像具体的 USB 设备。标准保证「任何符合协议的网关 + 任何符合协议的 EPP 能互通」；llm-d 在这个协议之上加了 precise prefix index、flow control 等自己的插件。
+
+在现有集群里可以直接看出分工：
+
+```bash
+# CRD 来自 GAIE
+kubectl get crd inferencepools.inference.networking.k8s.io -o jsonpath='{.spec.group}{"\n"}'
+# inference.networking.k8s.io
+
+# InferencePool 对象由 llm-d chart 创建
+kubectl get inferencepool -n d4
+# d4-router
+
+# EPP 镜像来自 llm-d
+kubectl get deploy -n d4 d4-router-epp \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="epp")].image}{"\n"}'
+# ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0
+```
+
+> 三个容易混的概念：
+> - **Gateway API**：`Gateway`/`HTTPRoute`，是 GAIE 的上游标准，只有 Gateway Mode 才需要；
+> - **GAIE**：在 Gateway API 之上加 `InferencePool` + EPP 协议；
+> - **llm-d**：整套推理平台（router / model server / PD / tiered cache），其中 router 实现了 GAIE 的 EPP。
+
 ---
 
 ## 3. 环境、版本、预算
