@@ -60,10 +60,11 @@ c=16 / c=64 各跑两轮，表中为两轮中位数，括号内为范围；c=1 /
 | D1 | `61674313` | 约 3.9h | **$1.03** | GPU + 40GB 存储，2026-11-20 |
 | D2 | `62184627` | 约 4.9h | **$1.29**（约 $1.2） | GPU + 40GB 存储，2026-11-23；含 FP16 下载 |
 | D3 | `62375081`（含前期重建） | 约 4h | **$4.00** | 2×RTX 4090 VM + 130GB 存储；含 KEDA、HTTP Add-on、驱逐实验 |
+| D4 | `62540497` | 约 4.5h | **$1.19** | 2×RTX 3060 12GB VM + 130GB 存储，2026-11-25 |
 
 GPU `$0.25/h` + 40GB 存储 `$0.0111/h` = **`$0.2611/h`**；FP16 下载是 ingress，未产生额外带宽费。D2 后 Vast 账户余额 **$18.81**；D3 实付 **$4.00**，D1 + D2 + D3 合计约 **$6.32**，余额约 **$14.81**。
 
-D1/D2 已 **Destroy**；D3 实例 `62375081` 也已于 2026-11-24 **Destroy**，D3 实付 **`$4.00`**（最终账单以 Vast 为准）。
+D1/D2 已 **Destroy**；D3 实例 `62375081` 也已于 2026-11-24 **Destroy**，D3 实付 **`$4.00`**（最终账单以 Vast 为准）。D4 实付 **`$1.19`**；D1 + D2 + D3 + D4 合计约 **`$7.51`**，余额约 **`$13.74`**。
 
 ## 复现
 
@@ -150,16 +151,35 @@ c=8 是纯量化对比：FP16 比 AWQ 慢 **36.8%**，TPOT P95 高 **60.6%**，g
 
 差 1 道题（2 个百分点），在 n=50 的噪声内（单个比例 95% CI 约 ±8 点）；**未检测到 AWQ 明显掉点**。结合 4.5：AWQ 在 c=8 快 36.8%、TPOT P95 好 60.6%，是当前 24GB L4 更优的默认配置。50 条只是 smoke test，不能外推到其他任务。
 
+## D4 结果（2026-11-25）
+
+llm-d precise prefix-cache routing：2×RTX 3060 12GB、Qwen3-4B-AWQ、2 副本 TP=1、128 条共享前缀请求（32 session × 4 turn，c=16）。完整 setup、失败记录和成本见 [`results/d4/summary.md`](./results/d4/summary.md)，执行步骤见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md) §5。
+
+| arm | n | TTFT P50 | TTFT P95 | TTFT P99 | TPOT P50 | output tok/s | goodput |
+|---|---|---|---|---|---|---|---|
+| direct（Service 基线） | 3 | 628 ms | 3114 ms | 4475 ms | 27.6 ms | 424 | 0.914 |
+| random（EPP 控制组） | 1 | 798 ms | 3739 ms | 5056 ms | 26.1 ms | 438 | 0.844 |
+| **optimized（approx）** | 3 | **216 ms** | **3140 ms** | **3459 ms** | **20.8 ms** | **570** | **0.906** |
+| precise（KV 事件） | 3 | 298 ms | 3292 ms | 3969 ms | 20.9 ms | 558 | 0.875 |
+
+![D4 TTFT](./results/d4/d4-ttft.png)
+
+**归因（P99）**：direct → random **+581 ms**（Envoy+EPP 代理税）；random → optimized **−1597 ms**（近似前缀亲和）；optimized → precise **+510 ms**（render 平均 42 ms/请求 + 精确索引开销）。optimized 比 direct 低 **22.7%**；precise 没有赢过 optimized。
+
+**结论**：2 副本、1.5k 长前缀、无驱逐压力时，approx 索引已经够用；precise 的额外准确性用不上，42 ms/请求的 render 成本是实打实的。precise 的价值边界是更多副本、频繁驱逐、旁路 EPP 的请求比例。
+
+**成本**：Vast 计费 4.54h × `$0.26148/h` ≈ **$1.19**。
+
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
 
 D3（k3s + vLLM Deployment、冷启动、KEDA、驱逐）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行；§7 冷启动、§8 KEDA/1→2、§9 驱逐均有实测；VM 已 Destroy）。
 
-D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按计划准备，**未跑实验**；4h、**2×RTX 3060 12GB VM（instance 62540497，`$0.2615/h`，5h ≈ $1.3）**、Qwen3-4B-AWQ、llm-d 1.0 precise prefix routing vs Service round-robin；`max-model-len 8192`、`max-num-seqs 16`、`gpu-memory-utilization 0.90`、`block-size 64`，`peakPrefillThroughput` 需重测；§1.4 + 附录 A 覆盖 llm-d 核心 feature，脚本见 `scripts/d4/`；缩写全称见该文 §1.0.1）。
+D4（llm-d 路由）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（**2026-11-25 已执行**；2×RTX 3060 12GB、Qwen3-4B-AWQ、llm-d 1.0 precise routing；`peakPrefillThroughput=2657`；结果见上表与 `results/d4/`；§1.4 + 附录 A 覆盖 llm-d 核心 feature，脚本见 `scripts/d4/`；缩写全称见该文 §1.0.1）。
 
 D4.5（可选，Q2）：PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；**本次 instance 62540497 是 2×3060 12GB，只有 2 卡，不能 2P+2D；4×3060 VM 不存在，D4.5 标记 skipped/blocked**；4×4090 5h（约 $9.3）保留为可选；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（本次不执行）。
 
-D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，4–5h，约 $1.0–1.3**；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；先完成 D4）。
+D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，4–5h，约 $1.0–1.3**；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；D4 已完成，可复用当前 VM）。
 
 技术栈调研与 D1–D5 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/Argo CD/GPU Operator/安全/OpenCost；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线。

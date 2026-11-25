@@ -1830,10 +1830,12 @@ hit_rate = Δvllm:prefix_cache_hits_total / Δvllm:prefix_cache_queries_total
 ```bash
 cd "${LAB}"
 python3 scripts/d4/plot_d4.py \
-  /results/direct-run1.json /results/optimized-run1.json \
-  /results/random-run1.json /results/precise-run1.json \
-  --out /results/d4-ttft.png
+  results/d4/direct-run1.json results/d4/optimized-run1.json \
+  results/d4/random-run1.json results/d4/precise-run1.json \
+  --out results/d4/d4-ttft.png
 ```
+
+> 本次图里用的是各 arm 的**中位数**（3 轮中位；random 1 轮），不是 run1：direct run1 是冷缓存，直接画会失真。
 
 **一句话归因模板**：
 
@@ -2183,13 +2185,13 @@ A：MoE 模型的专家并行。单机放不下全部专家时，把专家切到
 
 ### 10.1 成本
 
-| 项 | 单价 | 5h 成本 |
+| 项 | 单价 | 实际 |
 |---|---|---|
-| 2×3060 12GB VM + 130GB 存储 | `$0.26148/h` | 约 `$1.31` |
-| 安装/排障 +1h | 同上 | 已含在 5h 内 |
-| 合计 | — | **约 `$1.31`** |
+| 2×3060 12GB VM + 130GB 存储 | `$0.26148/h` | 4.54h ≈ **`$1.19`** |
+| 安装/排障 | 同上 | 已含在 4.54h 内 |
+| 合计 | — | **约 `$1.19`** |
 
-D3 后 credit 约 `$14.93`；D4 后约 `$13.6`。实付以 Vast 账单为准。
+Vast 计费时长 16344s ≈ 4.54h。D3 后 credit 约 `$14.93`；D4 后约 **`$13.74`**。实付以 Vast 账单为准。
 
 ### 10.2 清理
 
@@ -2218,37 +2220,38 @@ scp root@<host>:/results/* results/d4/
 
 ### 10.3 验收清单
 
-- [ ] 2×3060 12GB VM（instance 62540497），`nvidia.com/gpu` allocatable = 2；记录 driver / power limit；
-- [ ] 两个 vLLM Pod 各 1 GPU，`/v1/models` 返回 `qwen3-4b`；
-- [ ] `/v1/completions/render` 返回 `token_ids`（precise 路径）；
-- [ ] EPP `active_subscribers=2`，`messages_received_total` 增长；
-- [ ] `InferencePool` + EPP + Envoy Ready；`d4-router-epp:80` 可访问；
-- [ ] smoke test：同一前缀集中到一个 Pod，hit rate 明显高于另一个；
-- [ ] `peakPrefillThroughput` 已校准（或明确写“gate 关闭”）；
-- [ ] `direct` / `precise` 各 3 轮；`optimized` 至少 1 轮（时间够 3 轮）；`random` 至少 1 轮（可砍）；
-- [ ] 每轮前 reset cache；precise 每轮前重启 EPP；
-- [ ] P99 表 + 命中率表 + 每 Pod 分布 + `d4-ttft.png`；
+> **2026-11-25 执行状态**：主实验完成；**§7.3 故障表未跑**（时间盒），B 线讲法和 §1.4/附录 A 的 D 档验收未逐项做。
+
+- [x] 2×3060 12GB VM（instance 62540497），`nvidia.com/gpu` allocatable = 2；driver 580.178.04 / 170W；
+- [x] 两个 vLLM Pod 各 1 GPU，`/v1/models` 返回 `qwen3-4b`；
+- [x] `/v1/completions/render` 返回 `token_ids`（precise 路径）；
+- [x] EPP `active_subscribers=2`，`index_admissions_total` / `lookup_hits_total` 增长；
+- [x] `InferencePool` + EPP + Envoy Ready；`d4-router-epp:80` 可访问；
+- [x] smoke test：2 session 5/5 分流，`decisions_total{outcome="sticky"}` +8；
+- [x] `peakPrefillThroughput=2657` 已校准；
+- [x] `direct` / `precise` 各 3 轮；`optimized` 3 轮；`random` 1 轮；
+- [x] 每轮前 reset cache（`VLLM_SERVER_DEV_MODE=1`）；precise 每轮前重启 EPP；
+- [x] P99 表 + `d4-ttft.png`；per-arm hit rate 未采样（客户端 JSON 不含 `cached_tokens`）；
 - [ ] 故障表至少跑 EPP FailOpen；时间够再跑 FailClose / render 404；
 - [ ] B 线运维图 + 10 分钟讲法；
-- [ ] §1.4 的 19 项核心 feature 至少到 D 档：每项能说清“是什么/何时不用/关键指标”；
+- [ ] §1.4 的 19 项核心 feature 至少到 D 档；
 - [ ] 附录 A 的 PD/wide EP/flow control/tiered/P2P/autoscaling/batch/rollout/API 每项能讲 1 分钟；
-- [ ] `results/d4/` 提交 + push；VM Destroy；成本记录。
+- [x] `results/d4/` 提交 + push；成本 `$1.19` 记录；
+- [ ] VM Destroy（D4.6 未决定，当前仍 running）。
 
 ### 10.4 结果目录
 
 ```text
 results/d4/
-  direct-run1.json
-  direct-run2.json
-  direct-run3.json
+  direct-run1..3.json
   random-run1.json
-  precise-run1.json
-  precise-run2.json
-  precise-run3.json
-  metrics-before-*.txt
-  metrics-after-*.txt
+  optimized-run1..3.json
+  precise-run1..3.json
+  smoke-run1.json / smoke2-run1.json
   d4-ttft.png
-  summary.md          # 表 + 一句话归因 + 故障记录 + 成本
+  summary.md          # setup + 表 + 归因 + 故障记录 + 成本
+
+> per-arm 的 metrics-before/after 本次未落盘（只有 precise 的 EPP 总量），所以没有 `metrics-*.txt`。
 ```
 
 `summary.md` 模板：
