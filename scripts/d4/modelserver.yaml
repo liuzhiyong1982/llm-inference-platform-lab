@@ -69,6 +69,9 @@ spec:
               value: "tcp://*:5556"
             - name: KV_EVENTS_REPLAY_ENDPOINT
               value: "tcp://*:5559"
+            # bench 每轮前 POST /reset_prefix_cache；vLLM 0.34 需要 dev mode 才注册该端点
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
             - name: HF_HUB_OFFLINE
               value: "1"
             - name: DO_NOT_TRACK

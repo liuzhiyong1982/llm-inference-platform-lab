@@ -1094,6 +1094,8 @@ precise 路由不是“开个 EPP 就行”，它依赖 vLLM 暴露三样东西�
 | `--shutdown-timeout=45` | 优雅退出，等 in-flight 请求跑完 |
 | `--disable-log-requests` | 关逐请求日志，避免压测时 I/O 拖慢 |
 
+> **bench 还需要一个 env：`VLLM_SERVER_DEV_MODE=1`。** vLLM 0.34 把 `/reset_prefix_cache` 放在 dev mode 后面；不开的话 bench 每轮 reset 都是 **404**，上一轮的 cache 不清，arm 之间互相污染。`modelserver.yaml` 已加，**仅 lab 使用**，生产不要开。
+
 **vLLM 与 EPP 的对齐关系**（任何一项不一致，precise 都不报错，只会静默 miss）：
 
 | vLLM | EPP（`values-precise.yaml`） |
@@ -1379,7 +1381,15 @@ for name in $(kubectl get pods -n d4 -l app=vllm-d4 -o jsonpath='{.items[*].meta
 done
 ```
 
-期望：10 条请求里，大部分落在一个 Pod；该 Pod 的 `prefix_cache_hits_total / prefix_cache_queries_total` 明显高于另一个。如果两个 Pod 各 5 条、命中率接近 0：precise 没生效，回到 §5.6。
+期望：
+
+- 10 条请求通常是 **5/5 分到两个 Pod**——2 个 session，EPP 会把每个 session 粘在各自的 Pod 上，这不是轮询；
+- 两个 Pod 的 `prefix_cache_hits_total / prefix_cache_queries_total` 都明显 > 0（各自缓存了一个 session 的前缀）；
+- EPP 的 `llm_d_epp_prefix_cache_affinity_filter_decisions_total{outcome="sticky"}` **增加 8**（2 session × 4 个后续 turn），这是会话粘性的直接证据。
+
+如果 5/5 但两边命中率都接近 0，或 `sticky` 不增长：precise 没生效，回 §5.6。只有 1 个 session 时才会看到“大部分落在一个 Pod”。
+
+> 重跑前脚本会 POST `/reset_prefix_cache`；返回 404 说明 `VLLM_SERVER_DEV_MODE=1` 没开，cache 没清，结果不可比（见 §5.3）。
 
 ### 5.8 校准 `peakPrefillThroughput`
 
@@ -1580,7 +1590,8 @@ echo "$POD_URLS"
 跑一轮（以 precise 为例）：
 
 ```bash
-# precise arm：每轮前重启 EPP，清空 KV 索引（vLLM cache 由脚本 reset）
+# precise arm：每轮前重启 EPP，清空 KV 索引；vLLM cache 由脚本 POST /reset_prefix_cache
+# （需要 VLLM_SERVER_DEV_MODE=1；404 说明没清，结果不可比）
 kubectl rollout restart deploy/d4-router-epp -n d4
 kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
 
