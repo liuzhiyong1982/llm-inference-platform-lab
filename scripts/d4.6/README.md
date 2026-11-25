@@ -18,7 +18,7 @@
 ```bash
 export LAB=$(pwd)
 
-# 0. 2×L4 VM / k3s / GPU / 权重见主文档 §4
+# 0. 2×3090 VM / k3s / GPU / 权重见主文档 §4（2×L4 VM 不存在）
 kubectl create namespace d46 --dry-run=client -o yaml | kubectl apply -f -
 
 # 1. HBM-only
@@ -49,4 +49,4 @@ helm upgrade d46-router oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
 - CPU tier 在 `/dev/shm`，**计入 Pod memory limit**；2×16GiB + vLLM 需要 ≥96GB host。
 - Qwen3-8B KV ≈ 144KiB/token；16GiB / (64×144KiB) ≈ 1800 blocks。
 - `gpu-memory-utilization=0.60` 是故意的，让 HBM 先驱逐；生产不要照抄。
-- tiered 输了也是有效结论：L4 上 CPU→GPU 拉回可能比重算慢。
+- tiered 输了也是有效结论：3090 上 CPU→GPU 拉回可能比重算慢。

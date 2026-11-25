@@ -156,10 +156,10 @@ D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix ca
 
 D3（k3s + vLLM Deployment、冷启动、KEDA、驱逐）的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行；§7 冷启动、§8 KEDA/1→2、§9 驱逐均有实测；VM 已 Destroy）。
 
-D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按计划准备，**未执行**；4h、2×L4、llm-d 1.0 precise prefix routing vs Service round-robin；§1.4 + 附录 A 覆盖 llm-d 核心 feature，脚本见 `scripts/d4/`）。
+D4（llm-d 路由 + request-driven 0→1）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按计划准备，**未执行**；4h、2×3090 VM（Vast 无 L4 VM）、llm-d 1.0 precise prefix routing vs Service round-robin；§1.4 + 附录 A 覆盖 llm-d 核心 feature，脚本见 `scripts/d4/`；缩写全称见该文 §1.0.1）。
 
-D4.5（可选，Q2）：PD 分离 2P+2D，4×L4，6–8h，目标 ≤$8；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（未执行；先完成 D4 且余额 ≥ $8）。
+D4.5（可选，Q2）：PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；6–8h 超 $10，需缩到 5h 或跳过；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（未执行；先完成 D4 且余额 ≥ $10）。
 
-D4.6（可选，T1-C）：tiered KV cache，2×L4，3–4h，约 $3–4；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；和 D4.5 二选一先做）。
+D4.6（可选，T1-C）：tiered KV cache，2×3090 VM，3–4h，约 $3–5；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；和 D4.5 二选一先做）。
 
 技术栈调研与 D1–D5 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/Argo CD/GPU Operator/安全/OpenCost；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线。

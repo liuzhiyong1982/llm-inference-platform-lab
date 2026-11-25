@@ -358,25 +358,25 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 
 **冲刺周的唯一目标：一个 repo、核心 4 个数字 + 2 个对比、一张 llm-d 对比图、一次 10 分钟讲解。** 不是"学完什么"。
 
-预算：GPU 租用 ≈ $10–15（按秒计费，单卡 L4/A10；Day 4 临时开 2 卡约 1 小时）。Azure 侧配额为 0，不要等审批。
+预算：GPU 租用 ≈ $10–15（按秒计费，D1/D2 用单卡 L4 容器；D4 用 2×3090 VM 约 4–5h）。Azure 侧配额为 0，不要等审批。**Vast 没有 L4 VM，D4 不要按 2×L4 VM 租。**
 
 | 天 | 时长 | 干什么 | 当天必须落地 |
 |---|---|---|---|
 | **D1** | 4h | 按 `d1-vllm-baseline-runbook.md` 跑 baseline；短课当手册，时间不够就跳过[14] | 4 个 baseline JSON + README 表 + 一句话归因 |
 | **D2** | 3h | `max-num-seqs`、chunked prefill on/off、prefix caching 有/无（用 `--disable-prefix-caching` + `--random-prefix-len` 构造共享前缀）；AWQ vs FP16 + 质量门；读 KV cache / batching 那两节[15] | 一张对照表 + 一句话结论（吞吐 +x%，TTFT −y%，质量 Δ） |
 | **D3** | 3h | k3s + vLLM Deployment；**权重分发实测**：initContainer 现下 vs node-local 缓存，测冷启动秒数；KEDA 按 `vllm:num_requests_waiting` 扩缩 | 冷启动对比（秒）+ 扩容曲线；**B 线：GPU 平台交付链路 + 每副本成本** |
-| **D4** | 4h | **llm-d 日**：租 2×L4，按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字；**B 线：Gateway/InferencePool 运维图 + 路由故障表** |
+| **D4** | 4h | **llm-d 日**：租 2×3090 VM（L4 VM 不可得），按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字；**B 线：Gateway/InferencePool 运维图 + 路由故障表** |
 | **D5** | 3h | Kueue `ClusterQueue` 两团队配额[9] + Kyverno 强制 GPU workload 带 priorityClass / quota label；跑"抢卡"演示 | 两条被拒 manifest 日志；**B 线：配额/准入/审计说明** |
 | **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试；**B 线：500 字平台案例 + 2 条 B 线 bullet** |
 | **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单；**B 线：3 个本地 B 线 JD 映射** |
 
 > D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行：§7 冷启动、§8 KEDA/1→2、§9 驱逐；实付约 `$4.00`）；D3 直接用 Vast RTX VM（你已在上面跑过 k8s），租借命令见该文档 §5.0。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
 >
-> D4 的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按本行准备，**未执行**）：4h、2×L4、llm-d `v1.0.0` precise prefix-cache routing；主对比是 Service round-robin vs EPP，EPP random 作为控制组；2×L4 上模型改为 Qwen3-8B-AWQ、TP=1、2 副本，`peakPrefillThroughput` 需重测。文档 §1.4 + 附录 A 另给 llm-d 核心 feature 覆盖矩阵（PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout、API），D 档为概念/决策，不额外租卡。可执行 manifest/脚本在 `scripts/d4/`。
+> D4 的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md)（2026-11-24 已按本行准备，**未执行**）：4h、2×3090 VM、llm-d `v1.0.0` precise prefix-cache routing；主对比是 Service round-robin vs EPP，EPP random 作为控制组；2×3090 上模型改为 Qwen3-8B-AWQ、TP=1、2 副本，`peakPrefillThroughput` 需重测。文档 §1.4 + 附录 A 另给 llm-d 核心 feature 覆盖矩阵（PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout、API），D 档为概念/决策，不额外租卡。可执行 manifest/脚本在 `scripts/d4/`。**2026-11-25 复核：Vast 无 L4 VM（L4 只有容器，k3s 起不来），实际用 2×3090 VM；结果标 3090。** D4 系列的缩写全称见 [`d4-llm-d-learning.md`](./d4-llm-d-learning.md) §1.0.1。
 >
-> **可选 D4.5（Q2，不是 D4 的 4h 内）：** PD 分离 2P+2D，4×L4，6–8h，目标 ≤$8（硬上限 $10）；先完成 D4 且 Vast 余额 ≥ $8 再开。文档见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（**未执行**），manifest/脚本在 `scripts/d4.5/`。它回答“4 个完整副本 vs 2 prefill+2 decode，在 L4/TCP 上 PD 是否值得”，不保证 PD 赢。
+> **可选 D4.5（Q2，不是 D4 的 4h 内）：** PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；6–8h 超 $10，实际只能 5h（硬上限 $10）；先完成 D4 且 Vast 余额 ≥ $10 再开。文档见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（**未执行**），manifest/脚本在 `scripts/d4.5/`。它回答“4 个完整副本 vs 2 prefill+2 decode，在 4090/TCP 上 PD 是否值得”，不保证 PD 赢。
 >
-> **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**未执行**，2×L4，3–4h，约 $3–4）。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
+> **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**未执行**，2×3090 VM，3–4h，约 $3–5）。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
 
 ### D3 / D5 的 B 线讲法
 

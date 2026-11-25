@@ -70,6 +70,6 @@ python3 scripts/d4/plot_d4.py /results/direct-run1.json /results/precise-run1.js
 
 ## 注意
 
-- 所有命令都在 **Vast 租的 2×L4 VM** 上跑；不要碰 `uat-mobility-aks-01`。
+- 所有命令都在 **Vast 租的 2×24GB VM（Vast 无 L4 VM，实际 2×3090）** 上跑；不要碰 `uat-mobility-aks-01`。
 - vLLM flag 可能随小版本变化，先看主文档 §3.4 的 `--help` 预检。
 - precise 跑不通时用 `values-optimized.yaml`，结果里注明是 fallback。

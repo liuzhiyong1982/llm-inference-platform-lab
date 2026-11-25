@@ -1,14 +1,16 @@
-# D4 学习文档：llm-d 前缀感知路由（2×L4）
+# D4 学习文档：llm-d 前缀感知路由（2×24GB VM）
 
-> 状态：**planned（2026-11-24）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×L4、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP 的 P99、留下命中率数字和 B 线故障表**；同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD、wide EP、flow control、tiered/P2P、autoscaling、batch、rollout、API）。文档、manifest、benchmark 脚本已就绪，**尚未租 VM 执行**；所有“实测”表都是待填模板。
+> 状态：**planned（2026-11-24；硬件前提 2026-11-25 修正）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×24GB VM、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP（Endpoint Picker，端点选择器）的 P99（第 99 百分位）、留下命中率数字和 B 线故障表**；同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD（Prefill/Decode，预填充/解码）、wide EP（Expert Parallelism，专家并行）、flow control、tiered/P2P、autoscaling、batch、rollout、API）。文档、manifest、benchmark 脚本已就绪，**尚未租 VM 执行**；所有“实测”表都是待填模板。
 >
 > 计划位置：`ai-cloud-native-week-plan.md` 的 **D4（llm-d 日）** 与 **Q2（Gateway/路由）**；B 线学习表见该文件 §3，llm-d 四问见 §6。
 >
-> 性质：学习文档 + 可执行 lab。D1/D2 回答“单机多快”，D3 回答“放进 K8s 后启动/扩容/驱逐要多少秒”，D4 回答“**多副本时，把请求送到已经缓存了这段前缀的副本，P99 能好多少；这套路由组件挂了怎么办**”。
+> 性质：学习文档 + 可执行 lab。D1/D2 回答“单机多快”，D3 回答“放进 K8s（Kubernetes）后启动/扩容/驱逐要多少秒”，D4 回答“**多副本时，把请求送到已经缓存了这段前缀的副本，P99 能好多少；这套路由组件挂了怎么办**”。
 >
-> 硬约束：**不在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**。用 Vast.ai 租的 2×L4，on-demand；同机、同模型、同输入/输出长度、同 SLO，只改路由策略。
+> 硬约束：**不在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**。用 Vast.ai 租的 2×24GB VM（L4 VM 不可得，实际 2×3090），on-demand；同机、同模型、同输入/输出长度、同 SLO（Service Level Objective，服务等级目标），只改路由策略。
 >
-> 版本基线：llm-d `v1.0.0`、Gateway API Inference Extension `v1.6.2`、vLLM `v0.34.0`（以 `--help` 为准）、KEDA `2.21.1`（只用于 Lab 0）。
+> 版本基线：llm-d `v1.0.0`、Gateway API Inference Extension `v1.6.2`、vLLM `v0.34.0`（以 `--help` 为准）、KEDA（Kubernetes Event-driven Autoscaling） `2.21.1`（只用于 Lab 0）。
+>
+> **硬件前提修正（2026-11-25）：** 本文原写“2×24GB VM”，但 Vast 上 **没有 L4 VM**（`gpu_name=L4 vms_enabled=true` 返回 0）；L4 只有容器，k3s 起不来。D4 实际改用 **2×RTX 3090 VM**（备选 2×4090），仍是 24GB、TP（Tensor Parallelism，张量并行）=1、2 副本；结果标注 3090，不标 L4。详见 §3.1。
 
 ---
 
@@ -16,8 +18,8 @@
 
 1. **D4 的主菜是 llm-d，不是 Lab 0。** Lab 0（KEDA HTTP Add-on）只解决“0 副本时请求怎么进来”；llm-d 解决“多副本时按 prefix cache 怎么路由”。4h 不够就砍 Lab 0，保 Lab 1。
 2. **路由只在多副本时存在。** 1 个 vLLM 进程没有路由问题；D4 的收益完全建立在 D3 的 2 副本之上。
-3. **llm-d 1.0 的 precise routing 不是“猜前缀”。** vLLM 通过 ZMQ 上报 KV block 事件，EPP 建精确索引；每个请求先 tokenize/render，再查索引。需要 `--kv-events-config`、`/v1/*/render`、`--block-size=64` 与 `blockSizeTokens: 64` 对齐。
-4. **2×L4 跑不了 guide 默认配置。** guide 默认 Qwen3-32B、TP=2、2 副本 = 4×H100。我们改成 Qwen3-8B-AWQ、TP=1、2 副本 = 2×L4；模型名、`peakPrefillThroughput`、绝对数字都不能照抄。
+3. **llm-d 1.0 的 precise routing 不是“猜前缀”。** vLLM 通过 ZMQ 上报 KV（Key-Value，键值） block 事件，EPP 建精确索引；每个请求先 tokenize/render，再查索引。需要 `--kv-events-config`、`/v1/*/render`、`--block-size=64` 与 `blockSizeTokens: 64` 对齐。
+4. **2×24GB VM 跑不了 guide 默认配置。** guide 默认 Qwen3-32B、TP=2、2 副本 = 4×H100。我们改成 Qwen3-8B-AWQ（Activation-aware Weight Quantization，激活感知权重量化）、TP=1、2 副本 = 2×24GB VM；模型名、`peakPrefillThroughput`、绝对数字都不能照抄。
 5. **主对比是 Service round-robin vs EPP precise。** 可选 EPP random 作为控制组，隔离 Envoy/EPP 的固定开销；`direct` / `precise` 各跑 3 次，`random` 时间够就 3 次，取中位数。
 6. **EPP 单副本是有意为之。** precise 的 in-flight token 记账和 KV 索引是进程本地的；D4 不跑 active-active。生产 HA 需要共享状态/索引快照，先作为面试追问。
 7. **交付物不是“跑通了”。** 一张 P99 对比图、命中率、每 Pod 请求分布、故障表、成本；缺一项不算 D4 完成。
@@ -26,11 +28,78 @@
 
 ## 1. 按计划定义 D4
 
+### 1.0 什么是 Well-Lit Path（术语）
+
+**Well-Lit Path 是 llm-d 官方“把路灯铺好”的部署路径**：针对某种推理模式，官方已经选好拓扑、参数和验证步骤，并在真实硬件上跑通过的 **end-to-end 配方**。它不是教程、不是 API 文档，也不是“所有参数的解释”。
+
+三条 pillar：
+
+| Pillar | 回答什么问题 | 例子 |
+|---|---|---|
+| **Foundations** | 某个能力怎么开、开了之后系统长什么样 | optimized baseline、precise prefix-cache routing、tiered prefix cache、PD 分离、wide EP |
+| **Models** | 某个模型在某张卡上怎么跑到最好 | DeepSeek-V4 on GB200、GLM-5.2 on H200、Qwen3.5-397B on TPU |
+| **Operations** | 集群日常怎么运营 | autoscaling、rollout、flow control、multi-model、batch |
+
+一条 guide 必须包含：固定拓扑、可执行 manifest、Verify/Cleanup、**reference environment**（平台/卡/模型/引擎）、已知限制。成熟度分 Tier 0–5（Planned → Experimental → Deployable → Validated → Benchmarked → Proven）；**Tier 是绑在 reference environment 上的**，“H100 上 nightly 通过”不等于“L4/3090 上也能跑出同样数字”。
+
+对 D4 的含义：
+
+- 主实验跑 **Foundations / precise-prefix-cache-routing**；`optimized-baseline` 是 fallback/control；
+- D4.5 对应 `pd-disaggregation`，D4.6 对应 `tiered-prefix-cache`；
+- guide 的默认参考环境是 Qwen3-32B、TP=2、2 副本 = 4×H100；我们改成 Qwen3-8B-AWQ、TP=1、2 副本 = 2×24GB VM，所以 **`peakPrefillThroughput` 要重测，绝对数字只和同机 round-robin 比**；
+- Well-Lit Path 是“可复现的起点”，不是“可照抄的生产答案”；换模型/换卡后，硬件相关参数必须自己校准。
+
+### 1.0.1 缩略语表（D4 系列）
+
+> 正文第一次出现时已尽量给全称；这里集中列出，便于回查。通用词（GPU/CPU/API/HTTP/JSON/YAML）不展开。
+
+| 缩写 | 全称 | 中文/备注 |
+|---|---|---|
+| TTFT | Time to First Token | 首 token 延迟 |
+| TPOT | Time Per Output Token | 每输出 token 耗时 |
+| ITL | Inter-Token Latency | token 间延迟 |
+| SLO | Service Level Objective | 服务等级目标 |
+| EPP | Endpoint Picker | 端点选择器 |
+| KV | Key-Value | 键值（KV cache） |
+| PD / P/D | Prefill/Decode | 预填充/解码 |
+| HBM | High Bandwidth Memory | 高带宽显存 |
+| TP | Tensor Parallelism | 张量并行 |
+| PP | Pipeline Parallelism | 流水线并行 |
+| EP | Expert Parallelism | 专家并行 |
+| DP | Data Parallelism | 数据并行 |
+| MoE | Mixture of Experts | 混合专家 |
+| NIXL | NVIDIA Inference Xfer Library | NVIDIA 推理传输库 |
+| GAIE | Gateway API Inference Extension | Gateway API 推理扩展 |
+| CRD | Custom Resource Definition | 自定义资源定义 |
+| LWS | LeaderWorkerSet | K8s 多 Pod 组控制器 |
+| KEDA | Kubernetes Event-driven Autoscaling | 事件驱动自动扩缩 |
+| HPA | Horizontal Pod Autoscaler | 水平 Pod 自动扩缩器 |
+| PDB | Pod Disruption Budget | Pod 中断预算 |
+| AWQ | Activation-aware Weight Quantization | 激活感知权重量化 |
+| FP8 / FP16 | 8-bit / 16-bit Floating Point | 8/16 位浮点 |
+| GPTQ | GPT Quantization | GPT 量化 |
+| LoRA | Low-Rank Adaptation | 低秩适配 |
+| MIG | Multi-Instance GPU | 多实例 GPU |
+| DRA | Dynamic Resource Allocation | 动态资源分配 |
+| DCGM | Data Center GPU Manager | GPU 监控 |
+| OTel | OpenTelemetry | 可观测性框架 |
+| LLM | Large Language Model | 大语言模型 |
+| K8s | Kubernetes | 容器编排 |
+| RDMA | Remote Direct Memory Access | 远程直接内存访问 |
+| CNI | Container Network Interface | 容器网络接口 |
+| CSI | Container Storage Interface | 容器存储接口 |
+| E2E | End-to-End | 端到端 |
+| OOM | Out Of Memory | 内存耗尽 |
+| PCIe | Peripheral Component Interconnect Express | 高速外设互连 |
+| P50 / P95 / P99 | 50th / 95th / 99th percentile | 第 50/95/99 百分位 |
+| QoS | Quality of Service | 服务质量 |
+| RBAC | Role-Based Access Control | 基于角色的访问控制 |
+
 ### 1.1 计划里的 D4 要求
 
 | 计划要求 | 本文对应 | 产出 |
 |---|---|---|
-| 4h、2×L4 | §3、§10.5 | 时间盒 + 资源规划 |
+| 4h、2×24GB VM | §3、§10.5 | 时间盒 + 资源规划 |
 | 按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline） | §5 | 可执行步骤 + fallback |
 | 同一批“共享长前缀”的请求，对比普通 round-robin vs EPP 的 P99 | §6 | 4 个 arm（T0 optimized + T1 precise）、固定 workload、JSON |
 | 一张 P99 对比图 + 命中率数字 | §6.6、§6.8 | `d4-ttft.png` + hit rate 表 |
@@ -59,7 +128,7 @@ D4 不是从零开始，它直接用 D3 的集群和结论：
 | D3 的结果 | D4 怎么用 |
 |---|---|
 | 2 副本、每副本 1 GPU | 路由的前提；单副本没有 EPP 收益 |
-| 冷启动约 116s（HPA 决策→Ready） | D4 不重复测冷启动；EPP 0→1 仍受这个时间约束 |
+| 冷启动约 116s（HPA（Horizontal Pod Autoscaler，水平 Pod 自动扩缩器）决策→Ready） | D4 不重复测冷启动；EPP 0→1 仍受这个时间约束 |
 | `preStop 15s` + `--shutdown-timeout=45` + grace 120s | D4 的模型服务器沿用；滚动更新时在途请求可排空 |
 | KEDA 按队列扩缩 | Lab 0 的 0→1 入口；D4 主实验把 `minReplicaCount` 保持在 1 |
 | 单卡 1→2 Pending | D4 用 2 张卡，两个副本各 1 张；不测 Pending |
@@ -87,10 +156,10 @@ D4 的“cover”分四档，避免把“读过”说成“跑过”：
 | 6 | FailOpen / FailClose / 健康检查 | **H** | §7.3 |
 | 7 | Gateway Mode / HTTPRoute | **C** | §7.6 |
 | 8 | 多模型 / 多租户路由 | **D** | §7.2、§7.6、附录 A.4 |
-| 9 | PD 分离（prefill/decode pools + NIXL） | **D + D4.5** | §8 Q3、[`d4.5-pd-lab.md`](./d4.5-pd-lab.md) |
-| 10 | wide EP / MoE（DP/EP + DeepEP） | **D** | §8 Q4、附录 A.3 |
+| 9 | PD 分离（prefill/decode pools + NIXL；NIXL = NVIDIA Inference Xfer Library） | **D + D4.5** | §8 Q3、[`d4.5-pd-lab.md`](./d4.5-pd-lab.md) |
+| 10 | wide EP / MoE（Mixture of Experts，混合专家）；DP（Data Parallelism，数据并行）/ EP + DeepEP | **D** | §8 Q4、附录 A.3 |
 | 11 | flow control / fairness / priority / `InferenceObjective` | **D** + YAML | 附录 A.4 |
-| 12 | tiered prefix cache（HBM→CPU/FS） | **D + D4.6** | 附录 A.5、[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md) |
+| 12 | tiered prefix cache（HBM（High Bandwidth Memory，高带宽显存）→CPU/FS） | **D + D4.6** | 附录 A.5、[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md) |
 | 13 | P2P KV cache sharing（NIXL peer pull） | **D** | 附录 A.5 |
 | 14 | autoscaling（KEDA + EPP metrics） | **D**；Lab 0 的 KEDA 0→1 是 **H** | 附录 A.6、§4 |
 | 15 | batch / async serving | **D** | 附录 A.6 |
@@ -175,7 +244,7 @@ EPP 不可用 + FailOpen：
 
 | 组件 | 作用 | 挂了会怎样 |
 |---|---|---|
-| Envoy sidecar | 数据面；ext_proc 调 EPP；转发/流式响应 | Pod 不 Ready；Service 没有 endpoint |
+| Envoy（EPP Pod 的 sidecar） | 数据面；ext_proc 调 EPP；转发/流式响应 | Pod 不 Ready；Service 没有 endpoint |
 | EPP | 解析、tokenize、查索引、过滤/打分、选 Pod | FailOpen 时绕过 EPP；FailClose 时 503 |
 | `InferencePool` | 声明“哪些 Pod 是模型服务器、端口是多少、EPP 是谁” | EPP 没有 endpoint；路由不到 |
 | `token-producer` | 调 vLLM `/v1/*/render`，拿精确 token IDs | render 失败→无 cache 信息，仍可路由 |
@@ -183,6 +252,10 @@ EPP 不可用 + FailOpen：
 | `prefix-cache-affinity-filter` | 把前缀组留在 cache-warm Pod；过热时扩散 | 命中率下降；P99 变差 |
 | `token-load-scorer` | 选 in-flight token 最少的候选 | 负载不均；热点 |
 | vLLM | 推理、prefix caching、KV 事件、render 端点 | 请求失败/重试；EPP 摘除 endpoint |
+
+> **Envoy 是谁的 sidecar：** 在 standalone 模式，Envoy 是 **EPP Pod 的 sidecar**（同一个 Pod 里两个 container：EPP + Envoy），**不是 vLLM Pod 的 sidecar**；由 `llm-d-router-standalone` chart 显式渲染，**不是 webhook 自动注入**。Envoy 在 Pod 内通过 `localhost:9002` 调 EPP 的 ext_proc，再把请求转发到选中的 vLLM Pod:8000。
+>
+> Gateway Mode 下，Envoy 是 Gateway 的数据面（Envoy Gateway / Istio），EPP 独立部署；也不是注入到模型 Pod。只有你额外装 Istio 并开启 namespace injection，才会有 Istio 自己的 Envoy sidecar 被注入，那是另一件事，D4 不用。
 
 ---
 
@@ -192,16 +265,35 @@ EPP 不可用 + FailOpen：
 
 | 项 | 要求 | 说明 |
 |---|---|---|
-| GPU | **2×L4 24GB** | 两个副本各 1 张；和 D1/D2 同型号，便于解释 |
+| GPU | **2×24GB VM** | L4 VM 不可得；实际用 2×RTX 3090（备选 2×4090），每个副本 1 张 |
 | CPU / RAM | ≥16 vCPU / 64GB | 2×vLLM + EPP + Envoy + bench 客户端 |
 | 磁盘 | ≥130GB | 镜像 ~10GB + 权重 5.7GB + 结果/日志 |
-| 平台 | Vast.ai **on-demand VM** | 不要 interruptible；不要普通容器 |
-| 网络 | 同机、同 CNI | 客户端和 vLLM 同集群，避免公网变量 |
-| power limit | 记录 `nvidia-smi -q -d POWER` | L4 可能是 72W 或限功耗；和 D1 的 40W 不可直接比 |
+| 平台 | Vast.ai **on-demand VM** | 必须 `vms_enabled=true`；不要 interruptible；不要普通容器 |
+| 网络 | 同机、同 CNI（Container Network Interface，容器网络接口） | 客户端和 vLLM 同集群，避免公网变量 |
+| power limit | 记录 `nvidia-smi -q -d POWER` | 3090/4090 功耗远高于 L4 的 40W；绝对数字不能和 D1/D2 比 |
 
-> 如果只有 1 张 L4，D4 不成立：没有第二个副本就没有路由问题。至少 2 张；2×L4 足够。
+> 如果只有 1 张 24GB 卡，D4 不成立：没有第二个副本就没有路由问题。至少 2 张。
 >
-> **Vast 实况（2026-11-24）：** L4 VM 不一定有货；如果没有，**2×4090 VM 是可接受的 fallback**，但结果里必须写明显卡型号，不能标成 L4。2 卡 VM 的创建失败率比单卡高（D3 实测过 `created`/SSH 拒绝），优先 `verified`、`R ≥ 0.99`、`Net_down ≥ 500`、64GB RAM、130GB disk 的 host；创建后先 `nvidia-smi` 确认两张卡都在，再开始装 k3s。
+> **硬件前提复核（2026-11-25）：Vast 上没有 L4 VM。** `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，其中 8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，普通容器起不来。D3 在 2026-11-23 已记录过这个限制，D4 原计划漏了它。
+>
+> 当前可用的 2 卡 VM（2026-11-25 快照，库存会变）：
+>
+> | GPU | 地点 | $/h | R | RAM | Disk | 备注 |
+> |---|---|---|---|---|---|---|
+> | 2×3090 | UK | 0.935 | 0.994 | 251GB | 1076GB | **默认**；最稳 |
+> | 2×3090 | Quebec | 0.989 | 0.998 | 167GB | 341GB | 备选 |
+> | 2×4090 | Quebec | 0.935 | 0.945 | 125GB | 157GB | 更快，但只有一台、R<0.99 |
+> | 2×5090 | UK | 1.868 | 0.997 | 503GB | 2710GB | 32GB，没必要 |
+>
+> **默认选 2×3090 VM**：24GB、AWQ 8B 放得下、R≥0.994；结果里写 3090，不写 L4。2×4090 更快但创建风险高；2×5090 贵且过剩。预检：
+>
+> ```bash
+> vastai search offers 'gpu_name=L4 vms_enabled=true'                    # 期望 0
+> vastai search offers 'gpu_name=RTX_3090 num_gpus=2 vms_enabled=true' -o 'dph+'
+> vastai search offers 'gpu_name=RTX_4090 num_gpus=2 vms_enabled=true' -o 'dph+'
+> ```
+>
+> `vms_enabled=false` 的 2×24GB VM 再便宜也不能用；同一 GPU 的 VM 和容器 offer ID 不同。创建后先 `nvidia-smi` 确认两张卡都在，再装 k3s。
 
 ### 3.2 和 llm-d guide 默认配置的差异
 
@@ -210,14 +302,14 @@ EPP 不可用 + FailOpen：
 | 模型 | `Qwen/Qwen3-32B` | `Qwen/Qwen3-8B-AWQ` | 权重 5.7GB，24GB L4 放得下 |
 | TP | 2 | 1 | 每个副本 1 张卡 |
 | 副本 | 2 | 2 | 共 2 张卡 |
-| GPU | 4×H100 80GB | 2×L4 24GB | **绝对数字不可比** |
+| GPU | 4×H100 80GB | 2×3090 24GB | **绝对数字不可比** |
 | `modelName` | `Qwen/Qwen3-32B` | `qwen3-8b` | 必须等于 `--served-model-name` |
 | `peakPrefillThroughput` | 15926（H100/Qwen3-32B） | 用 calibration 重测 | 不重测就相当于关掉 saturation gate |
 | 请求长度 | guide 示例 ~2k 前缀 | 1100 words ≈ 1.5k tokens | 按 L4 KV 容量设计 |
 
 > 这张表是面试时要主动说的：**“我跑的是同一条 Well-Lit Path，但不是同一个参考配置；所以我的 P99 只和同机的 round-robin 比，不和 llm-d 公布的 H100 数字比，也不和 D1/D2 的 40W L4 比。”**
 >
-> 也正因为默认配置是 4×H100，**D4 不按 Quickstart 的默认 manifest 跑**（那会直接 Pending）；直接用 §5.3 的 2×L4 适配 manifest，把 2h 的默认部署时间省给主实验。Quickstart 只读它的请求路径和 CRD 安装顺序。
+> 也正因为默认配置是 4×H100，**D4 不按 Quickstart 的默认 manifest 跑**（那会直接 Pending）；直接用 §5.3 的 2×24GB VM 适配 manifest，把 2h 的默认部署时间省给主实验。Quickstart 只读它的请求路径和 CRD（Custom Resource Definition，自定义资源定义）安装顺序。
 
 ### 3.3 资源规划
 
@@ -237,7 +329,7 @@ EPP 不可用 + FailOpen：
 | NVIDIA driver | 记录 | `nvidia-smi`；`nvidia.com/gpu` allocatable=2 |
 | vLLM | `v0.34.0` | `vllm serve --help` 确认 `--enable-scale-out`、`--kv-events-config`、`--block-size` |
 | llm-d | `v1.0.0` | `helm show chart oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0` |
-| GAIE CRDs | `v1.6.2` | `kubectl get crd inferencepools.inference.networking.k8s.io` |
+| GAIE（Gateway API Inference Extension） CRDs | `v1.6.2` | `kubectl get crd inferencepools.inference.networking.k8s.io` |
 | KEDA | `2.21.1` | 仅 Lab 0 |
 | KEDA HTTP Add-on | `0.16.x` | 仅 Lab 0；`HTTPScaledObject` 已 deprecated |
 
@@ -253,7 +345,7 @@ kubectl run vllm-help --rm -i --restart=Never -n default \
 
 ### 3.5 预算
 
-2×L4 on-demand 约 `$0.55–0.70/h`（含 130GB 存储，按 Vast 实时报价为准）；4h 实验 + 1h 安装/排障 ≈ **`$3.0–3.5`**。D3 后余额约 `$14.81`，D4 后约 `$11.3`。记录实付，Destroy 前以 Vast 账单为准。
+2×3090 VM on-demand 约 `$0.93–0.99/h`（含 130GB 存储，2026-11-25 实测；2×4090 同价但 R 更低）；4h 实验 + 1h 安装/排障 ≈ **`$4.7–5.0`**。D3 后 credit 约 `$14.93`，D4 后约 `$10`。记录实付，Destroy 前以 Vast 账单为准。
 
 ---
 
@@ -466,7 +558,7 @@ kubectl get crd | grep -E 'interceptorroutes|httpscaledobjects'
 
 **为什么必须精确 token IDs？** vLLM 的 prefix cache 以 block 为单位；EPP 如果自己用另一套 tokenizer 或近似 hash，算出来的 block key 和 vLLM 的不一致，索引查不到，路由就退化成普通负载均衡。
 
-**为什么 P99 会变？** 单请求的 TTFT 可以粗略拆成：
+**为什么 P99 会变？** 单请求的 TTFT（Time to First Token，首 token 延迟）可以粗略拆成：
 
 ```text
 TTFT ≈ 排队时间 + prefill(prompt_tokens - cached_tokens) / prefill_throughput + 首 token 开销
@@ -476,7 +568,7 @@ EPP 把请求送到已经缓存了这段前缀的副本，等价于把 `cached_t
 
 ### 5.2 前置：k3s + GPU + 权重
 
-按 D3 §5.0–§5.5 租 2×L4 VM、装 NVIDIA toolkit、k3s、device plugin。搜 2 卡 VM：
+按 D3 §5.0–§5.5 租 2×3090 VM（Vast 无 L4 VM）、装 NVIDIA toolkit、k3s、device plugin。搜 2 卡 VM：
 
 ```bash
 # 严格 L4：加 gpu_name=L4；没有结果再去掉这一项（4090/3090 也可，但结果必须标注）
@@ -584,6 +676,8 @@ kubectl run render-check --rm -i --restart=Never -n d4 \
 kubectl get pods -n d4 -l app=vllm-d4 -o wide
 # Pod IP 的 5556/5559 应可从 EPP Pod 访问；单节点 k3s 默认没有 NetworkPolicy
 ```
+
+> **ZMQ（ZeroMQ）是什么：** 一个嵌入式异步消息库，不是 Kafka 那样的消息队列中间件。vLLM 在每个 KV block 分配/驱逐时，通过 **PUB 5556** 发事件；EPP 用 **SUB** 订阅，建“哪个副本有哪段前缀”的精确索引；**5559 是 replay**，EPP 重启后补历史。`PUB/SUB` 没有 ACK、没有持久化，所以必须监控 `active_subscribers`、`messages_received_total`，并保证 topic（`kv@podIP:port@model`）和 `block-size=64` 对齐。用 ZMQ 而不是 HTTP/gRPC，是因为事件频率高、需要一对多 fan-out、且不想引入 broker。
 
 ### 5.5 安装 GAIE CRD + llm-d router
 
@@ -820,9 +914,9 @@ helm upgrade d4-router \
 
 | 指标 | 定义 | 采集 |
 |---|---|---|
-| TTFT P50/P95/P99 | 请求发出→第一个内容 chunk | 客户端 `bench_prefix.py` |
-| TPOT P95 | `(end - first_token) / (completion_tokens - 1)` | 客户端 |
-| E2E P99 | 请求发出→最后一个 chunk | 客户端 |
+| TTFT P50（第 50 百分位）/P95/P99 | 请求发出→第一个内容 chunk | 客户端 `bench_prefix.py` |
+| TPOT（Time Per Output Token，每输出 token 耗时） P95（第 95 百分位） | `(end - first_token) / (completion_tokens - 1)` | 客户端 |
+| E2E（End-to-End，端到端） P99 | 请求发出→最后一个 chunk | 客户端 |
 | output tok/s | 总 completion tokens / wall time | 客户端 |
 | goodput | 满足 `TTFT ≤ 2000ms` 且 `TPOT ≤ 100ms` 的 req/s | 客户端 |
 | prefix hit rate | `Δvllm:prefix_cache_hits_total / Δvllm:prefix_cache_queries_total` | 每个 vLLM Pod 的 `/metrics` |
@@ -842,7 +936,7 @@ hit_rate = Δvllm:prefix_cache_hits_total / Δvllm:prefix_cache_queries_total
 
 ### 6.4 方法学（必须一起写）
 
-- **闭环**：16 并发，固定 128 条请求；不是开环固定 QPS。
+- **闭环**：16 并发，固定 128 条请求；不是开环固定 QPS（Queries Per Second，每秒查询数）。
 - **样本数**：128 请求/轮；`direct` / `precise` 各 3 轮；`optimized` 至少 1 轮（时间够 3 轮）；`random` 至少 1 轮（可砍）。
 - **warmup**：每轮前 4 条 `max_tokens=1` 的 warmup；脚本 warmup 后 reset prefix cache；precise arm 在启动脚本前重启 EPP，让索引从空开始。
 - **重复**：主对比 3 轮，顺序 `direct → optimized → precise`（或反过来）；如果 GPU 热节流明显，记录 `nvidia-smi` 的 clock/power。
@@ -1044,10 +1138,17 @@ Service d4-router-epp:80
 - **一个 `InferencePool` 对应一个模型**。不要把两个不同模型放进同一个 pool；EPP 的 `modelName` 和 tokenizer 是 per-pool 的。
 - **同 namespace**：`InferencePool` 的 selector 只匹配同一 namespace 的 Pod，跨 namespace 不能共享一个 pool；多租户就每个 namespace 自己建 pool/route。
 - **多模型**：每个模型一个 pool + 一个 HTTPRoute path/header；Gateway 按 path 分流。EPP 仍然只负责自己 pool 内的副本选择。
-- **多租户**：namespace + RBAC 做逻辑隔离；ResourceQuota 限 CPU/内存；NetworkPolicy 限制跨 namespace；每个租户自己的 pool/route；`InferenceObjective` 做优先级（如果启用 flow control）。
+- **多租户**：namespace + RBAC（Role-Based Access Control，基于角色的访问控制）做逻辑隔离；ResourceQuota 限 CPU/内存；NetworkPolicy 限制跨 namespace；每个租户自己的 pool/route；`InferenceObjective` 做优先级（如果启用 flow control）。
 - **不要**用“同一个 pool + 请求头里的 tenant”做硬隔离；请求头可以伪造，真正的隔离在 namespace/配额/网络策略。
 
 ### 7.3 路由故障表（至少跑前两项）
+
+> **FailOpen / FailClose 是什么：** 它们是“依赖组件（EPP）不可用时，数据面（Envoy）怎么办”的两种策略。
+>
+> - **FailOpen（失败时放行）**：ext_proc 调不通 EPP 时，Envoy 不阻断请求，按自己的负载均衡把请求发给后端（通常是 headless Service 里的某个 vLLM）。**可用性优先**，但丢掉 prefix/load 感知，可能打到冷副本或热点副本。
+> - **FailClose（失败时阻断）**：ext_proc 调不通 EPP 时，Envoy 直接返回 503/关闭请求。**路由正确性/控制优先**，但 EPP 成了硬依赖，可用性下降。
+>
+> 记法：**FailOpen = 失败时把路打开（继续放行）；FailClose = 失败时把路关掉（拒绝请求）**。类比门禁断电：FailOpen 是门自动打开，FailClose 是门自动锁死。
 
 | 故障 | 现象 | 检查 | 根因 | 处置 | 用户影响 |
 |---|---|---|---|---|---|
@@ -1172,7 +1273,7 @@ kubectl rollout restart deploy/d4-router-epp -n d4
 
 ### 7.4 容量与成本
 
-- **每副本成本**：2×L4 VM `$/h` ÷ 2 个副本；再加 EPP/Envoy 的 CPU 成本（可忽略，但不能说 0）。
+- **每副本成本**：2×3090 VM `$/h` ÷ 2 个副本；再加 EPP/Envoy 的 CPU 成本（可忽略，但不能说 0）。
 - **容量**：满足 SLO 的并发，不是 GPU util 100%。用 D1/D2 的方法：c=16 找拐点，c=32/64 看吞吐上限；D4 只跑 c=16。
 - **EPP 容量**：单副本 EPP 的 CPU 是路由 QPS 的上限；看 `llm_d_epp_plugin_duration_seconds` 和 Pod CPU。请求率上去后，EPP 可能先于 vLLM 成为瓶颈。
 - **prefix cache 容量**：32 个 1.5k-token 前缀约 7GB KV；L4 的 KV 不是无限大。session 数增加会触发驱逐，命中率下降。
@@ -1268,11 +1369,11 @@ A：MoE 模型的专家并行。单机放不下全部专家时，把专家切到
 
 | 项 | 单价 | 4h 成本 |
 |---|---|---|
-| 2×L4 VM + 130GB 存储 | 约 `$0.55–0.70/h` | 约 `$2.2–2.8` |
-| 安装/排障 +1h | 同上 | 约 `$0.6–0.7` |
-| 合计 | — | **约 `$3.0–3.5`** |
+| 2×3090 VM + 130GB 存储 | 约 `$0.93–0.99/h` | 约 `$3.7–4.0` |
+| 安装/排障 +1h | 同上 | 约 `$0.9–1.0` |
+| 合计 | — | **约 `$4.7–5.0`** |
 
-D3 后余额约 `$14.81`；D4 后约 `$11.3`。实付以 Vast 账单为准。
+D3 后 credit 约 `$14.93`；D4 后约 `$10`。实付以 Vast 账单为准。
 
 ### 10.2 清理
 
@@ -1301,7 +1402,7 @@ scp root@<host>:/results/* results/d4/
 
 ### 10.3 验收清单
 
-- [ ] 2×L4 VM，`nvidia.com/gpu` allocatable = 2；记录 driver / power limit；
+- [ ] 2×3090 VM，`nvidia.com/gpu` allocatable = 2；记录 driver / power limit；
 - [ ] 两个 vLLM Pod 各 1 GPU，`/v1/models` 返回 `qwen3-8b`；
 - [ ] `/v1/completions/render` 返回 `token_ids`（precise 路径）；
 - [ ] EPP `active_subscribers=2`，`messages_received_total` 增长；
@@ -1388,7 +1489,7 @@ results/d4/
 
 ### 10.6 B 线简历 bullet（执行后填，选 1–2 条）
 
-- 在 2×L4 上用 llm-d 1.0 / Gateway API Inference Extension 部署 precise prefix-cache routing：对比 Service round-robin，TTFT P99 从 `____ ms` 降到 `____ ms`（`__%`），加权 prefix hit rate 从 `__%` 升到 `__%`；用 EPP random 控制组分离路由算法与代理固定开销。
+- 在 2×3090 上用 llm-d 1.0 / Gateway API Inference Extension 部署 precise prefix-cache routing：对比 Service round-robin，TTFT P99 从 `____ ms` 降到 `____ ms`（`__%`），加权 prefix hit rate 从 `__%` 升到 `__%`；用 EPP random 控制组分离路由算法与代理固定开销。
 - 为 EPP / `InferencePool` 设计故障演练：EPP FailOpen/FailClose、render 404、KV events 丢失、后端不健康；记录检测指标（`active_subscribers`、`index_lookup_*`、`prefix_cache_hits/queries`）和处置顺序，明确单副本 EPP 的可用性边界。
 
 ---
@@ -1417,7 +1518,7 @@ results/d4/
 |---|---|
 | 模型 | `openai/gpt-oss-120b` |
 | 拓扑 | 1 个 prefill pod（TP=1）+ 1 个 decode pod（TP=4） |
-| GPU | **5 张**（最小完整 P/D 路径） |
+| GPU | **5 张**（最小完整 P/D（Prefill/Decode，预填充/解码）路径） |
 | 编排 | LeaderWorkerSet 的 `DisaggregatedSet`（`enableDisaggregatedSet=true`） |
 | KV 传输 | NIXL；TCP 能跑，生产推荐 RDMA/InfiniBand/RoCE |
 | 关键指标 | prefill `request_success_total`（以 `max_tokens=1` 跑）、decode `external_prefix_cache_hits_total`、EPP `llm_d_epp_disagg_decision_total` |
@@ -1428,7 +1529,7 @@ results/d4/
 |---|---|
 | prompt 很长（通常 4k–8k+） | prefill 占比高，拆池的收益才明显 |
 | 高并发、P:D 比例可独立扩缩 | prefill 和 decode 的最优配比不同，能分别加副本 |
-| KV 传输够快 | NVLink / RDMA / 同机高带宽；TCP 跨节点会吃掉收益 |
+| KV 传输够快 | NVLink / RDMA（Remote Direct Memory Access，远程直接内存访问）/ 同机高带宽；TCP 跨节点会吃掉收益 |
 | 有第二个 GPU 池 | 至少能让 prefill/decode 各自有副本 |
 
 **什么时候不划算：**
@@ -1442,12 +1543,12 @@ results/d4/
 
 - §8 Q3 给“什么时候不划算”的面试口径；
 - 本节给完整拓扑、指标和决策表；
-- **不跑**：guide 默认 5 GPU，2×L4 只能 1P1D；会破坏 D4 的“多副本 prefix routing”对照，且 gpt-oss-120b 放不下。
+- **不跑**：guide 默认 5 GPU，2×24GB VM 只能 1P1D；会破坏 D4 的“多副本 prefix routing”对照，且 gpt-oss-120b 放不下。
 
 **如果要真跑，单独排一个 lab（不是 D4 的 4h）：**
 
 ```text
-4×L4（2P + 2D，每池 2 副本、TP=1）
+4×24GB VM（4×4090，2P + 2D，每池 2 副本、TP=1）
   + LWS DisaggregatedSet
   + NIXL over TCP（L4 无 NVLink；这就是要量的问题）
   + Qwen3-8B-AWQ
@@ -1460,7 +1561,7 @@ results/d4/
   6–8h，约 $5–8
 ```
 
-> L4 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×L4 上硬跑 1P1D 更有价值。完整 runbook 见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)。
+> L4 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×24GB VM 上硬跑 1P1D 更有价值。完整 runbook 见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)。
 
 **面试一句话：** “PD 的收益来自 prefill 和 decode 的 resource profile 不同；没有长 prompt、高并发、快 KV 传输和第二个池，拆池只会增加复杂度和空闲。”
 
@@ -1468,11 +1569,11 @@ results/d4/
 
 **是什么：** 面向 MoE 的专家并行：单机放不下全部专家时，把专家切到多机/多卡，用 DP/EP + DeepEP 做 all-to-all，用 NIXL 搬 KV。llm-d 的默认 wide-EP guide 是 `DeepSeek-R1-0528`、32×H200、prefill DP16 + decode DP16、每角色 2 节点，要求 full-mesh RDMA。
 
-**何时用：** MoE 模型单机放不下、需要跨节点 EP、吞吐优先；**何时不用：** dense 8B、2×L4、没有 RDMA、低并发。
+**何时用：** MoE 模型单机放不下、需要跨节点 EP、吞吐优先；**何时不用：** dense 8B、2×24GB VM、没有 RDMA、低并发。
 
-**D4 怎么覆盖：** §8 Q4 + 本节；不跑。2×L4 连 dense 8B 的 EP 都不需要，更不用说 32×H200 的 DeepEP。
+**D4 怎么覆盖：** §8 Q4 + 本节；不跑。2×24GB VM 连 dense 8B 的 EP 都不需要，更不用说 32×H200 的 DeepEP。
 
-**面试一句话：** “TP 切层、PP 切阶段、EP 切专家；wide EP 解决 MoE 单机放不下，不是解决路由。”
+**面试一句话：** “TP 切层、PP（Pipeline Parallelism，流水线并行）切阶段、EP 切专家；wide EP 解决 MoE 单机放不下，不是解决路由。”
 
 ### 11.4 Flow control / fairness / 多租户
 
@@ -1514,13 +1615,13 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 **何时用：** 长共享前缀、多轮/agentic、HBM 压力大、CPU RAM 富余；**何时不用：** 短 prompt、缓存本来就能全放 HBM、CPU RAM 不够、没有快传输。
 
-**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×L4，96GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×L4 的 HBM 24GB + host RAM 有限，P2P 的默认模型也放不下。
+**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×24GB VM，96GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×3090 的 HBM 24GB + host RAM 有限，P2P 的默认模型也放不下。
 
 **面试一句话：** “tiered 是单 Pod 的 HBM→CPU/FS 扩展，P2P 是跨 Pod 从 peer 的 CPU tier 拉；两者都只在‘前缀复用 + HBM 不够’时才划算。”
 
 ### 11.6 Autoscaling / batch / async
 
-**Autoscaling：** llm-d 1.0 推荐 **KEDA + EPP metrics**：按 queue depth、pool saturation、token backlog、estimated latency vs SLO 扩模型服务器；KEDA 直接创建/拥有 HPA，不需要 Prometheus Adapter。scale-to-zero 支持，但 LLM 冷启动让同步 chat 基本不可用。WVA（Workload Variant Autoscaler）已 deprecated。
+**Autoscaling：** llm-d 1.0 推荐 **KEDA + EPP metrics**：按 queue depth、pool saturation、token backlog、estimated latency vs SLO 扩模型服务器；KEDA 直接创建/拥有 HPA，不需要 Prometheus Adapter。scale-to-zero 支持，但 LLM（Large Language Model，大语言模型）冷启动让同步 chat 基本不可用。WVA（Workload Variant Autoscaler）已 deprecated。
 
 **D4 怎么覆盖：** D3 + Lab 0 已经动手验证 KEDA 0→1 和队列信号；D4 主实验固定 c=16、最多 2 张卡，没有 scale-out 空间，所以不跑 llm-d autoscaling。
 
@@ -1530,9 +1631,9 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 ### 11.7 Rollouts / zero-downtime / 模型生命周期
 
-**是什么：** `DisaggregatedSet` 把 prefill/decode 两个角色作为一个版本滚动；LWS 管多 Pod 组；配合 `preStop`、drain、`maxUnavailable/maxSurge`、PDB 做零停机。模型版本用独立权重目录 + Deployment revision 回滚。
+**是什么：** `DisaggregatedSet` 把 prefill/decode 两个角色作为一个版本滚动；LWS（LeaderWorkerSet）管多 Pod 组；配合 `preStop`、drain、`maxUnavailable/maxSurge`、PDB（Pod Disruption Budget，Pod 中断预算）做零停机。模型版本用独立权重目录 + Deployment revision 回滚。
 
-**D4 怎么覆盖：** D3 Lab 4 已经动手量了 `preStop`/`--shutdown-timeout`/grace 的驱逐行为（H 档）；D4 只讲 llm-d 的 `DisaggregatedSet` 和 rollout 语义（D 档）。2×L4 没有空闲 GPU 做 surge，所以不跑 llm-d 零停机。
+**D4 怎么覆盖：** D3 Lab 4 已经动手量了 `preStop`/`--shutdown-timeout`/grace 的驱逐行为（H 档）；D4 只讲 llm-d 的 `DisaggregatedSet` 和 rollout 语义（D 档）。2×24GB VM 没有空闲 GPU 做 surge，所以不跑 llm-d 零停机。
 
 **面试一句话：** “零停机的必要条件是‘有地方起新副本’；2 张卡跑 2 副本时，滚动更新只能接受一个副本短暂不可用，或者加第 3 张卡。”
 
@@ -1540,7 +1641,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 - **EPP `/metrics`（9090）**：`llm_d_epp_request_total`、`llm_d_epp_plugin_duration_seconds`、`llm_d_epp_kv_cache_events_*`、`llm_d_epp_kv_cache_index_lookup_*`、`llm_d_epp_disagg_decision_total`、`llm_d_epp_prefix_indexer_*`；flow control 的 queue/fairness 指标以实际 `/metrics` 为准。
 - **vLLM `/metrics`**：`prefix_cache_hits/queries`、`num_requests_waiting`、`kv_cache_usage_perc`、TTFT/ITL、`external_prefix_cache_hits`（tiered/P2P/PD）。
-- **Tracing**：OTel collector + router `tracing.values.yaml`；span 覆盖 tokenize、index lookup；KV event tracing 默认关，避免事件量淹没请求 trace。
+- **Tracing**：OTel（OpenTelemetry） collector + router `tracing.values.yaml`；span 覆盖 tokenize、index lookup；KV event tracing 默认关，避免事件量淹没请求 trace。
 - **D4**：metrics 是 H 档；tracing 是 D 档（不装 collector）。
 
 **面试一句话：** “先看 EPP 的 routing 指标，再看 vLLM 的 queue/cache 指标；两边趋势不一致，通常是索引不完整或 render 失败。”
@@ -1557,7 +1658,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 - [ ] 能画出 `client → Envoy → EPP → InferencePool → vLLM` 的请求路径；
 - [ ] 能解释 precise vs optimized，以及 KV events/render/block size 的对齐；
 - [ ] 能解释 PD 的 5-GPU 默认拓扑、NIXL、何时不划算；
-- [ ] 能解释 wide EP 的 DP/EP/DeepEP，以及为什么 2×L4 不跑；
+- [ ] 能解释 wide EP 的 DP/EP/DeepEP，以及为什么 2×24GB VM 不跑；
 - [ ] 能解释 flow control 的 priority band/fairness/saturation，以及 `InferenceObjective`；
 - [ ] 能解释 tiered vs P2P，以及各自的关键指标；
 - [ ] 能解释 KEDA + EPP 的四种扩缩信号，以及为什么 CPU HPA 是错的；
@@ -1568,16 +1669,33 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 | feature | 最小可行拓扑 | 时间 | 预算 | 建议 |
 |---|---|---|---|---|
-| PD | 4×L4，2P + 2D，TP=1 | 6–8h | $5–8 | 已排：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；不要在 2×L4 上做 1P1D |
+| PD | 4×24GB VM（4×4090），2P + 2D，TP=1 | 5h（原 6–8h 超 $10） | $9–10 | 已排：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；4×L4 VM 不存在；不要在 2×24GB VM 上做 1P1D |
 | wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
-| flow control | 2×L4 + 两类客户端（premium/batch） | 3–4h | ~$3 | D5/Q2 扩展 |
-| tiered prefix cache | 2×L4，96GB RAM，CPU tier | 3–4h | ~$3 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
-| P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；L4 上默认模型放不下 |
-| autoscaling | 4×L4（2→4 副本） | 3h | ~$4 | Q2；D3 已有 0→1/1→2 基础 |
-| rollout / 零停机 | 3–4×L4（留 surge） | 2h | ~$2 | D3 §9 的扩展 |
-| multi-model Gateway | 4×L4（2 模型 × 2 副本） | 3–4h | ~$4 | Q2；需要 Gateway controller |
+| flow control | 2×24GB VM + 两类客户端（premium/batch） | 3–4h | ~$4 | D5/Q2 扩展 |
+| tiered prefix cache | 2×3090 VM，96GB+ RAM，CPU tier | 3–4h | ~$4 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
+| P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；24GB 卡上默认模型放不下 |
+| autoscaling | 4×24GB VM（2→4 副本） | 3h | ~$8 | Q2；D3 已有 0→1/1→2 基础 |
+| rollout / 零停机 | 3–4×24GB VM（留 surge） | 2h | ~$4 | D3 §9 的扩展 |
+| multi-model Gateway | 4×24GB VM（2 模型 × 2 副本） | 3–4h | ~$8 | Q2；需要 Gateway controller |
 
 > 这张表是“如果要动手”的成本，不是 D4 的 4h 计划。D4 的 4h 只做 routing/KV 主实验；其余先做到 D 档，面试够用，预算留给 Q2 的 PD/chargeback。
+
+### 11.12 本轮问答补充（2026-11-25）
+
+**Q1：llm-d 的 Well-Lit Path 到底是什么？**
+A：官方验证过的 end-to-end 部署配方，分 Foundations / Models / Operations 三条 pillar，成熟度 Tier 0–5；Tier 绑定 reference environment。D4 只跑 `precise-prefix-cache-routing`，`optimized-baseline` 作 fallback。详见 §1.0。
+
+**Q2：Vast 上能租到 2×L4 的 VM 吗？**
+A：**不能。** 2026-11-25 实测 `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，容器起不来。2 卡 VM 只有 RTX 3090/4090/5090：推荐 2×3090（UK $0.935/h、R=0.994、251GB RAM；Quebec $0.989/h、R=0.998、167GB RAM）；2×4090 只有 Quebec 一台（$0.935/h、R=0.945）。**“L4 容器”和“L4 VM”是两回事**，看 `vms_enabled`，不要拿容器 offer ID 建 VM。D4 实际用 2×3090 VM，结果标 3090；D4.5 的 4×L4 VM 同样不存在，4×4090 VM $1.87/h，6–8h 超 $10，需缩到 5h 或跳过。详见 §3.1。
+
+**Q3：ZMQ 是什么？为什么 precise routing 需要它？**
+A：ZeroMQ，嵌入式消息库；vLLM PUB 5556 发 KV block 事件，EPP SUB 建精确 prefix 索引，5559 replay 补历史；PUB/SUB 不可靠，所以要监控 `active_subscribers` 和 topic/block size。详见 §5.4。
+
+**Q4：Envoy 是谁的 sidecar，是自动注入的吗？**
+A：standalone 模式下 Envoy 是 **EPP Pod 的 sidecar**，不是 vLLM Pod 的 sidecar；由 `llm-d-router-standalone` chart 显式渲染（`router.proxy.mode: sidecar`，默认），**不是 webhook 自动注入**。Envoy 通过 `localhost:9002` 调 EPP 的 ext_proc，再把请求转发到选中的 vLLM Pod。Gateway Mode 下 Envoy 是 Gateway 的数据面，EPP 独立部署；只有额外装 Istio 并开启 namespace injection 才会有 Istio 自己的 Envoy sidecar，那是另一层。
+
+**Q5：FailOpen / FailClose 是什么意思？**
+A：EPP 不可用时数据面的两种策略。**FailOpen = 放行**：Envoy 的 ext_proc 失败后不阻断，按自己的 LB 把请求发给后端，可用性优先，但失去 prefix/load 感知，P99 可能升高。**FailClose = 阻断**：直接返回 503，路由控制优先，但 EPP 变成硬依赖。standalone 看 `router.proxy.failOpen`，Gateway Mode 看 `InferencePool.failureMode`；两者不要混。D4 用 `kill -STOP 1` 暂停 EPP 来测，不能直接删 Pod（会连 Envoy 一起删）。详见 §7.3。
 
 ---
 
