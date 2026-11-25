@@ -1397,6 +1397,17 @@ done
 
 `prefix-cache-affinity-filter` 用 `peakPrefillThroughput` 把 in-flight token 负载换算成预测 TTFT。guide 的 15926 是 H100/Qwen3-32B/TP=2 的值，2×3060 + Qwen3-4B-AWQ 上不能用；**必须在本机重测，不要照抄，也不要编一个数**。
 
+**`calibrate.sh` 做了什么**
+
+1. **预检**：确认 `envsubst` 和 Job 模板存在。
+2. **找 endpoint**：默认取 `${GUIDE_NAME}-epp` Service 的 ClusterIP 和名为 `http` 的端口，得到 `VLLM_ENDPOINT=http://<epp-ip>:80`；也可以用 `VLLM_ENDPOINT` 直接指向某个 vLLM Pod。
+3. **渲染并起 Job**：用 `envsubst` 填模板，`kubectl delete job` 清旧 Job，再 apply；Job 是 `python:3.11-slim`，脚本通过 ConfigMap 挂载。
+4. **Job 内部发 25 个请求**：5 个 warmup + 20 个测量；每个请求的 `prompt` 是**随机 token ID 数组**，长度正好 `CHUNK_SIZE`，`max_tokens=1`、stream。因为每次 prompt 都不同，vLLM 必然 cache miss，测到的是纯 prefill。
+5. **算中位数**：`R_peak = CHUNK_SIZE / median(TTFT)`，打印 `PEAK_PREFILL_THROUGHPUT=<R_peak>`；`TAU = R_peak × T_MAX_SECONDS` 只是 SLO 参考值，下游没人消费。
+6. **只测量，不改配置**：脚本不会写 values 文件，也不会 helm upgrade——数字要你手动写回，然后重启 EPP 才生效。
+
+> **口径**：默认走 EPP Service，TTFT 里含 tokenize、路由和排队；这是**部署口径**，不是单卡纯 prefill 峰值。要纯 vLLM，`VLLM_ENDPOINT=http://<pod-ip>:8000`。
+
 ```bash
 cd "${LAB}/llm-d"
 
@@ -1408,6 +1419,21 @@ guides/recipes/router/calibration/calibrate.sh
 ```
 
 `CHUNK_SIZE` 必须等于 vLLM 的 `--max-num-batched-tokens`（本 lab 是 4096）。脚本会打印 `peakPrefillThroughput=<value>`。注意：calibration 默认走 EPP Service，TTFT 含 tokenize/路由开销，是**部署口径**，不是纯 vLLM prefill 峰值；写进结果时说明这一点。如果要测纯 vLLM，设 `VLLM_ENDPOINT=http://<pod-ip>:8000` 指向单个 Pod。
+
+**本次实测（2026-11-25，2×3060 12GB + Qwen3-4B-AWQ）**
+
+| 项 | 值 |
+|---|---|
+| endpoint | EPP Service（当次 `10.43.26.10:80`） |
+| `MODEL_NAME` | `qwen3-4b` |
+| `CHUNK_SIZE` | 4096 |
+| warmup / measurements | 5 / 20 |
+| 中位 TTFT | **1.5413 s** |
+| **`peakPrefillThroughput`** | **2657 tokens/s** |
+| `TAU`（`T_MAX_SECONDS=18`） | 47835 |
+| Job 时长 | 50 s |
+
+> 2657 与 guide 的 15926 差约 6 倍，符合预期：guide 是 H100 80GB + Qwen3-32B + TP=2，本 lab 是 3060 12GB + 4B-AWQ + TP=1。这个值只在本机、本模型、本 `CHUNK_SIZE` 下有效；换卡/换模型/改 `--max-num-batched-tokens` 都要重测。已写回 `values-precise.yaml` 和 `values-optimized.yaml`。
 
 如果报 `envsubst: command not found`：
 
