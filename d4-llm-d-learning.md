@@ -2018,34 +2018,67 @@ awk '{c[$1]++; if ($2 > m) m=$2} END {for (k in c) printf "%s=%d ", k, c[k]; pri
 本次实测：
 
 ```text
-GET  /v1/models          200  0.022s
-POST /v1/completions ×20 400  0.022s（20/20）
+GET  /v1/models          200  0.017s
+POST /v1/completions ×20 400  0.027s（20/20，max）
 ```
 
 20 条都是 400，不是 200——这是 chart 的 fail-open 丢失 body，不是 EPP 没挂。
+
+**恢复 9002（做 SIGSTOP 前必须先做）**
+
+```bash
+nsenter -t "$NETNS_PID" -n iptables -D OUTPUT -p tcp --dport 9002 -j REJECT
+nsenter -t "$NETNS_PID" -n iptables -L OUTPUT -n | grep 9002 || echo "clean"
+
+curl -s -m 10 -o /dev/null -w "%{http_code} %{time_total}\n" \
+  -X POST http://127.0.0.1:18080/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-4b","prompt":"after cleanup","max_tokens":4,"temperature":0}'
+# 期望 200
+```
+
+> **如果 SIGSTOP 得到 400 而不是超时，说明 REJECT 规则还在。** Envoy 仍然看到 connection refused，直接走 fail-open，你测到的还是 body 丢失，不是“卡住”。必须先删规则、确认 POST 回到 200，再做 SIGSTOP。
 
 **对照：SIGSTOP 卡住 EPP**
 
 ```bash
 EPP_HOST_PID=$(ps -eo pid,args | awk '/[e]pp --pool-name d4-router/{print $1; exit}')
+echo "before=$(ps -o stat= -p "$EPP_HOST_PID" | tr -d ' ')"
+
 kill -STOP "$EPP_HOST_PID"
+echo "stopped=$(ps -o stat= -p "$EPP_HOST_PID" | tr -d ' ')"   # 期望 Tsl
+
 curl -s -m 15 -o /dev/null -w "%{http_code} %{time_total}\n" \
   -X POST http://127.0.0.1:18080/v1/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3-4b","prompt":"hang test","max_tokens":4,"temperature":0}'
+
 kill -CONT "$EPP_HOST_PID"
+echo "resumed=$(ps -o stat= -p "$EPP_HOST_PID" | tr -d ' ')"   # 期望 Ssl
+
+curl -s -m 10 -o /dev/null -w "%{http_code} %{time_total}\n" \
+  -X POST http://127.0.0.1:18080/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-4b","prompt":"after cont","max_tokens":4,"temperature":0}'
 ```
 
-预期 `000 15.0`（curl 超时），不是 200/503。**必须在 30s 内 `-CONT`**，否则 liveness（3×10s）会重启容器。
+本次实测：
 
-**恢复**
+```text
+before   Ssl
+stopped  Tsl
+curl     000  15.001s
+resumed  Ssl
+curl     200  0.11s
+```
+
+**必须在 30s 内 `-CONT`**，否则 liveness（3×10s）会重启容器。
 
 ```bash
-nsenter -t "$NETNS_PID" -n iptables -D OUTPUT -p tcp --dport 9002 -j REJECT
 kill $PF 2>/dev/null
 ```
 
-> 忘了删规则，路由会一直走 fallback；删掉规则或重启 Pod 即可恢复。
+> 忘了删 REJECT 规则，路由会一直走 fallback（POST 400）；删掉规则或重启 Pod 即可恢复。
 
 **FailClose 测试**
 
