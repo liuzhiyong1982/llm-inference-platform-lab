@@ -301,6 +301,23 @@ EPP 不可用 + FailOpen：
 
 ### 3.1.1 从零安装环境（每台新 VM 独立）
 
+**最快路径（推荐）**
+
+在本地仓库根目录，把脚本传到 VM 并执行：
+
+```bash
+scp -i ~/.ssh/<key> -P <port> scripts/d4/bootstrap-vm.sh root@<host>:/root/
+ssh -i ~/.ssh/<key> -p <port> root@<host> 'bash /root/bootstrap-vm.sh'
+```
+
+脚本会自动：先停 `unattended-upgrades` / `apt-daily`，再等 apt/dpkg lock，装 NVIDIA toolkit、k3s、device plugin、Helm，最后建 `d4` namespace 并跑 2 卡 `gpu-smoke`。日志在 `/var/log/d4-bootstrap.log`，版本记录写到 `~/d4-versions.txt`。
+
+> 如果 `nvidia-smi` 报 `Driver/library version mismatch`，脚本会 **exit 2** 并提示先 reboot；按提示 reboot 后重跑同一条命令。不要 kill 进程、不要删 lock、不要让脚本自动 reboot。
+
+> **不要先手工 `apt-get install` 再跑脚本。** 脚本会在任何 apt 之前停自动升级；顺序反了会再次遇到 dpkg lock / driver mismatch。
+
+**手工步骤（脚本失败或需要理解细节时再看）**
+
 > **D1–D4 每天独立**：不要假设 D3 的 k3s 集群、namespace、镜像缓存、device plugin 还在。下面在**新 VM** 上从零执行；命令基线是 `d3-k8s-vllm-learning.md` §5.1–§5.5，D4 只把卡型/namespace 换成 **2×3060 12GB / `d4`**。装完再回 §5.2 下载权重。
 
 **1）preflight：确认是 VM、两张卡都在**
@@ -321,22 +338,54 @@ stat -fc %T /sys/fs/cgroup       # 期望 cgroup2fs
 **2）tmux：防 SSH 断线**
 
 ```bash
-# 镜像没带 tmux 时先补装；后面所有长命令都在这个 session 里跑
-command -v tmux >/dev/null || { sudo apt-get update; sudo apt-get install -y tmux; }
+command -v tmux >/dev/null || echo "tmux 未安装：先做第 3 步停自动升级，再 sudo apt-get install -y tmux"
 tmux new -s d4
 # 断线后重连：tmux attach -t d4；暂时离开：Ctrl-b 然后 d
 ```
 
-**3）先关自动升级，再装基础包**
+> 镜像没带 tmux 时**不要先 `apt-get install`**：先做第 3 步的“停自动升级”，再 `sudo apt-get install -y tmux`，然后回来 `tmux new -s d4`。
+
+**tmux 速查**：tmux 是终端复用器，命令跑在 VM 的会话里，SSH 断了不会停。
+
+```bash
+tmux new -s d4
+# 跑安装/长命令；SSH 断了重连后：
+tmux ls
+tmux attach -t d4
+```
+
+detach：`Ctrl-b` 松手，再按 `d`；会话继续在后台跑。
+
+| 按键 | 作用 |
+|---|---|
+| `Ctrl-b d` | detach（离开但不停） |
+| `Ctrl-b c` | 新建窗口 |
+| `Ctrl-b 0/1` | 切到第 0/1 个窗口 |
+| `Ctrl-b n/p` | 下一个/上一个窗口 |
+| `Ctrl-b %` | 左右分屏 |
+| `Ctrl-b "` | 上下分屏 |
+| `Ctrl-b o` | 分屏间切换 |
+| `Ctrl-b ?` | 查看所有快捷键 |
+
+- `tmux new -s d4` 报 duplicate session → 用 `tmux attach -t d4`。
+- Vast 可能自动 attach `ssh_tmux`；`echo $TMUX` 非空说明已在 tmux 里；`tmux ls` 看会话。
+- 不要 `tmux kill-server`（会杀掉所有会话，包括正在跑的安装）。
+- tmux **不跨 VM reboot**；k3s/vLLM 这类长期服务用 systemd，不靠 tmux。
+- 结束会话：确认里面没跑东西后 `tmux kill-session -t d4`。
+- `unattended-upgrade` 是 systemd 服务，不在 tmux 里；等锁释放、reboot 后，装 toolkit/k3s 时再把命令放进 tmux。
+
+**3）先关自动升级，再装基础包（顺序不能反）**
 
 Vast 的 Ubuntu VM 带自动升级 timer，可能把 NVIDIA 用户态驱动升到与内核模块不匹配；D3 已踩过。**在第一次 `apt-get install` 之前就关掉**：
 
 ```bash
 systemctl list-timers --all | grep -E 'apt|unattended' || true
-sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-sudo systemctl disable --now unattended-upgrades.service 2>/dev/null || true
-sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-sudo systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+for u in unattended-upgrades.service apt-daily.service apt-daily-upgrade.service \
+         apt-daily.timer apt-daily-upgrade.timer; do
+  sudo systemctl stop "$u" 2>/dev/null || true
+  sudo systemctl disable "$u" 2>/dev/null || true
+  sudo systemctl mask "$u" 2>/dev/null || true
+done
 ```
 
 如果已经遇到 `Could not get lock /var/lib/dpkg/lock-frontend ... unattended-upgr`：**不要删 lock 文件**。先看进程，等它结束：
