@@ -50,10 +50,22 @@ for r in 1 2 3; do bash scripts/d4.6/run_arm.sh tiered vllm-tiered "$r"; done
 python3 scripts/d4.6/analyze.py
 ```
 
+## 依赖与出图
+
+- `run_arm.sh`：bash、`kubectl`、`envsubst`、`curl`；EPP metrics 需要主文档 §5.1 的 RBAC。
+- `analyze.py`：Python 3，只读 JSON/文本。
+- `plot_d46.py`：需要 matplotlib。没有就建临时 venv：
+
+```bash
+python3 -m venv /tmp/plotvenv
+/tmp/plotvenv/bin/pip install matplotlib
+/tmp/plotvenv/bin/python scripts/d4.6/plot_d46.py
+```
+
 ## 注意
 
 - **reset 必须 `?reset_external=true`**：默认 `/reset_prefix_cache` 只清 HBM，不清 CPU tier；否则第 2、3 轮吃上一轮缓存，P99 会假性变好。`bench_prefix.py` 已固定带上。
-- **c=4，不是 c=8**：0.60 下 HBM KV 只有 3.6GiB，8×4k 活跃 KV ≈4.6GiB 会 preempt；c=4 实测 preemption 0。
+- **c=4，不是 c=8**：0.60 下 HBM KV 只有 3.6GiB，8×4k 活跃 KV ≈4.6GiB 会超出容量（可能排队/抢占；本 lab 未跑 c=8）；c=4 实测 preemption 0。
 - **EPP `/metrics` 要 RBAC**：`d46-metrics-reader` + `system:auth-delegator`，见主文档 §5.1。
 - **`lruCapacityPerServer` 单位是 block**：16GiB / 9MiB ≈ 1800；`blockSizeTokens` 必须等于 vLLM `--block-size`。
 - **`/dev/shm` 高水位不降**不代表 reset 失败；看 `external_prefix_cache_hits_total` 是否还涨。

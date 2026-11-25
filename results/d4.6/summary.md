@@ -20,7 +20,7 @@
 | Workload | 32 sessions × 4 turns，prefix 3000 words（prompt P50 3658 tokens），suffix 80 words，max_tokens 128，c=4，seed 42，warmup 4 |
 | 每轮 | 128 请求，16,384 output tokens |
 
-**为什么 c=4 而不是文档原计划的 c=8：** 0.60 下 HBM KV 只有 3.6GiB，8 个 4k-token 请求的活跃 KV ≈ 4.6GiB，必然触发 vLLM preemption，混入“抢占”而不仅是“offload”。c=4 的活跃 KV ≈ 2.3GiB，实测 `num_preemptions_total=0`。
+**为什么 c=4 而不是文档原计划的 c=8：** 0.60 下 HBM KV 只有 3.6GiB，8 个 4k-token 请求的活跃 KV ≈ 4.6GiB，会超出 3.6GiB HBM 容量，可能排队/抢占，混入“抢占”而不仅是“offload”。本 lab 不跑 c=8；c=4 的活跃 KV ≈ 2.3GiB，实测 `num_preemptions_total=0`。
 
 ## 2. 总体结果（3 轮，c=4）
 
