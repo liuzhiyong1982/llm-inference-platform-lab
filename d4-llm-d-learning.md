@@ -327,20 +327,33 @@ tmux new -s d4
 # 断线后重连：tmux attach -t d4；暂时离开：Ctrl-b 然后 d
 ```
 
-**3）基础包（Ubuntu 22.04）**
+**3）先关自动升级，再装基础包**
+
+Vast 的 Ubuntu VM 带自动升级 timer，可能把 NVIDIA 用户态驱动升到与内核模块不匹配；D3 已踩过。**在第一次 `apt-get install` 之前就关掉**：
+
+```bash
+systemctl list-timers --all | grep -E 'apt|unattended' || true
+sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+sudo systemctl disable --now unattended-upgrades.service 2>/dev/null || true
+sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+sudo systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+```
+
+如果已经遇到 `Could not get lock /var/lib/dpkg/lock-frontend ... unattended-upgr`：**不要删 lock 文件**。先看进程，等它结束：
+
+```bash
+ps -fp "$(sudo fuser /var/lib/dpkg/lock-frontend 2>/dev/null | awk '{print $1}')" 2>/dev/null || true
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+  echo "waiting for dpkg lock"; sleep 5
+done
+sudo dpkg --configure -a
+```
+
+然后装基础包：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y curl ca-certificates jq git gnupg lsb-release tmux pciutils
-```
-
-Vast 的 Ubuntu VM 带自动升级 timer，可能把 NVIDIA 用户态驱动升到与内核模块不匹配；D3 已踩过。先关掉：
-
-```bash
-systemctl list-timers --all | grep -E 'apt|unattended' || true
-sudo systemctl disable --now unattended-upgrades.service 2>/dev/null || true
-sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-sudo systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 ```
 
 **4）NVIDIA container toolkit（先于 k3s）**
