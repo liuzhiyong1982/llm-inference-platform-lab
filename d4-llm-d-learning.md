@@ -956,6 +956,8 @@ sudo mkdir -p /results
 sudo chmod 777 /results
 ```
 
+> **以上「下载权重 / 预拉镜像 / 建结果目录」已内置在 `scripts/d4/bootstrap-vm.sh` 的 12–14 步**：正常只需跑一次脚本，不用手工重复。`SKIP_MODEL_DOWNLOAD=1`、`SKIP_VLLM_PULL=1` 可分别跳过；`MODEL_ID` / `MODEL_DIR` / `VLLM_IMAGE` / `RESULTS_DIR` 可覆盖默认值。手工执行时按本节命令。
+
 ### 5.3 部署两个 vLLM 副本
 
 ```bash

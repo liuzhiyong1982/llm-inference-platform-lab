@@ -28,11 +28,11 @@ ssh -i ~/.ssh/<key> -p <port> root@<host> 'bash /root/bootstrap-vm.sh'
 
 前置：**root**、**Ubuntu 22.04**、**systemd + cgroup v2**、**2 张 GPU 的 VM**（不是普通容器）。
 
-脚本会：先停 `unattended-upgrades` / `apt-daily`，再等 apt/dpkg lock，装 NVIDIA container toolkit、k3s、device plugin、Helm，建 `d4` namespace 并跑 2 卡 `gpu-smoke`，最后写 `~/d4-versions.txt`。不装/不换 NVIDIA driver，不跑 vLLM/bench，不自动 reboot。
+脚本会：先停 `unattended-upgrades` / `apt-daily`，再等 apt/dpkg lock，装 NVIDIA container toolkit、k3s、device plugin、Helm，建 `d4` namespace 并跑 2 卡 `gpu-smoke`；然后预拉 `vllm/vllm-openai:v0.34.0`、下载 `Qwen/Qwen3-4B-AWQ` 到 `/models/Qwen3-4B-AWQ`、建 `/results`；最后写 `~/d4-versions.txt`。不装/不换 NVIDIA driver，不启动 vLLM、不跑 bench，不自动 reboot。
 
 - 日志：`/var/log/d4-bootstrap.log`。
 - 失败先看日志；`nvidia-smi` 报 `Driver/library version mismatch` 时脚本 **exit 2**，先 **reboot** 再重跑，不要 kill 进程或删 lock。
-- 可选 env：`EXPECTED_GPUS`（默认 2）、`EXPECTED_GPU_NAME`（默认空，任意 NVIDIA 卡）、`NAMESPACE`、`K3S_VERSION`、`DEVICE_PLUGIN_VERSION`、`CUDA_SMOKE_IMAGE`、`LOG_FILE`、`APT_LOCK_TIMEOUT`（`bash bootstrap-vm.sh --help` 有完整列表）。
+- 可选 env：`EXPECTED_GPUS`（默认 2）、`EXPECTED_GPU_NAME`（默认空，任意 NVIDIA 卡）、`NAMESPACE`、`K3S_VERSION`、`DEVICE_PLUGIN_VERSION`、`CUDA_SMOKE_IMAGE`、`LOG_FILE`、`APT_LOCK_TIMEOUT`；模型/镜像相关：`MODEL_ID`（默认 `Qwen/Qwen3-4B-AWQ`）、`MODEL_DIR`（默认 `/models/<repo>`）、`VLLM_IMAGE`（默认 `docker.io/vllm/vllm-openai:v0.34.0`）、`RESULTS_DIR`（默认 `/results`）、`SKIP_MODEL_DOWNLOAD=1`、`SKIP_VLLM_PULL=1`、`HF_TOKEN`（`bash bootstrap-vm.sh --help` 有完整列表）。
 
 ```bash
 # 1 卡实验
@@ -43,6 +43,12 @@ sudo EXPECTED_GPUS=4 NAMESPACE=d45 bash bootstrap-vm.sh
 
 # 只接受 3060；不写 EXPECTED_GPU_NAME 则任意 NVIDIA 卡
 sudo EXPECTED_GPUS=2 EXPECTED_GPU_NAME='RTX 3060' bash bootstrap-vm.sh
+
+# 只装环境：跳过镜像预拉和权重下载
+sudo SKIP_VLLM_PULL=1 SKIP_MODEL_DOWNLOAD=1 bash bootstrap-vm.sh
+
+# 换模型（MODEL_DIR 默认是 /models/<repo 名>）
+sudo MODEL_ID=Qwen/Qwen3-8B-AWQ bash bootstrap-vm.sh
 ```
 - **不要先手工 `apt-get install` 再跑脚本**：脚本会在任何 apt 之前停自动升级；顺序反了会再次遇到 lock/driver mismatch。
 

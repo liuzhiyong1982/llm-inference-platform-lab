@@ -5,7 +5,7 @@
 #   - 每天实验独立；不假设上一次的 k3s / namespace / device plugin / 镜像缓存还在。
 #   - 必须在任何 apt-get 之前停掉 unattended-upgrades / apt-daily，否则 dpkg lock
 #     和 NVIDIA 用户态驱动升级会让 nvidia-smi 报 driver/library mismatch。
-#   - 只装环境，不下载权重、不跑 vLLM/bench、不碰共享 UAT 集群。
+#   - 装环境 + 预拉 vLLM 镜像 + 下载权重 + 建结果目录；不启动 vLLM、不跑 bench、不碰共享 UAT 集群。
 #
 # 用法：
 #   sudo bash bootstrap-vm.sh
@@ -23,6 +23,13 @@ EXPECTED_GPUS="${EXPECTED_GPUS:-2}"
 EXPECTED_GPU_NAME="${EXPECTED_GPU_NAME:-}"
 LOG_FILE="${LOG_FILE:-/var/log/d4-bootstrap.log}"
 APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-900}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-4B-AWQ}"
+MODEL_DIR="${MODEL_DIR:-}"
+VLLM_IMAGE="${VLLM_IMAGE:-docker.io/vllm/vllm-openai:v0.34.0}"
+RESULTS_DIR="${RESULTS_DIR:-/results}"
+SKIP_MODEL_DOWNLOAD="${SKIP_MODEL_DOWNLOAD:-0}"
+SKIP_VLLM_PULL="${SKIP_VLLM_PULL:-0}"
+HF_TOKEN="${HF_TOKEN:-}"
 
 CURRENT_STEP="init"
 
@@ -44,6 +51,14 @@ Environment overrides:
   CUDA_SMOKE_IMAGE       GPU smoke-test image (default: nvidia/cuda:12.4.1-base-ubuntu22.04)
   LOG_FILE               bootstrap log path (default: /var/log/d4-bootstrap.log)
   APT_LOCK_TIMEOUT       max seconds to wait for apt/dpkg locks (default: 900)
+  MODEL_ID               Hugging Face repo to download (default: Qwen/Qwen3-4B-AWQ)
+  MODEL_DIR              weights directory (default: /models/<repo name>)
+  VLLM_IMAGE             image to pre-pull into k3s containerd
+                         (default: docker.io/vllm/vllm-openai:v0.34.0)
+  RESULTS_DIR            host directory for bench results (default: /results)
+  SKIP_MODEL_DOWNLOAD    set 1 to skip the weights download (default: 0)
+  SKIP_VLLM_PULL         set 1 to skip the image pre-pull (default: 0)
+  HF_TOKEN               optional Hugging Face token for gated repos (default: empty)
 
 Examples:
   sudo bash bootstrap-vm.sh
@@ -63,9 +78,12 @@ What it does:
   9. install NVIDIA device plugin, patch runtimeClassName, ensure RuntimeClass/nvidia
  10. install Helm if absent
  11. create namespace, check nvidia.com/gpu=EXPECTED_GPUS, run an EXPECTED_GPUS-GPU gpu-smoke Pod
- 12. write ~/d4-versions.txt and print next steps
+ 12. pre-pull VLLM_IMAGE into k3s containerd (skippable with SKIP_VLLM_PULL=1)
+ 13. download MODEL_ID to MODEL_DIR and verify no symlinks (skippable with SKIP_MODEL_DOWNLOAD=1)
+ 14. create RESULTS_DIR
+ 15. write ~/d4-versions.txt and print next steps
 
-It does NOT install/upgrade the NVIDIA driver, run vLLM/bench, or reboot the VM.
+It does NOT install/upgrade the NVIDIA driver, start vLLM, run benchmarks, or reboot the VM.
 EOF
 }
 
@@ -197,7 +215,7 @@ log "GPU lab VM bootstrap start (pid $$, log $LOG_FILE)"
 # ---------------------------------------------------------------------------
 # 1. preflight
 # ---------------------------------------------------------------------------
-step "1/12 preflight"
+step "1/15 preflight"
 
 if [[ "$(ps -p 1 -o comm=)" != "systemd" ]]; then
   die "PID 1 不是 systemd（拿到的是普通容器？）" \
@@ -228,7 +246,7 @@ log "ram: $(free -g | awk 'NR==2 {print $2 " GiB"}')"
 # ---------------------------------------------------------------------------
 # 2. stop auto-upgrades BEFORE any apt-get
 # ---------------------------------------------------------------------------
-step "2/12 停自动升级（在任何 apt-get 之前）"
+step "2/15 停自动升级（在任何 apt-get 之前）"
 
 auto_units=(
   unattended-upgrades.service
@@ -260,7 +278,7 @@ log "自动升级已停用（未删除任何 lock，未 kill 进程）"
 # ---------------------------------------------------------------------------
 # 3. wait for apt/dpkg locks
 # ---------------------------------------------------------------------------
-step "3/12 等 apt/dpkg lock"
+step "3/15 等 apt/dpkg lock"
 
 apt_locks=(
   /var/lib/dpkg/lock-frontend
@@ -302,7 +320,7 @@ done
 # ---------------------------------------------------------------------------
 # 4. GPU preflight + base packages
 # ---------------------------------------------------------------------------
-step "4/12 GPU preflight (${EXPECTED_GPUS} GPU) + 基础包"
+step "4/15 GPU preflight (${EXPECTED_GPUS} GPU) + 基础包"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   die "nvidia-smi 不存在" \
@@ -372,7 +390,7 @@ fi
 # ---------------------------------------------------------------------------
 # 5. NVIDIA container toolkit
 # ---------------------------------------------------------------------------
-step "5/12 NVIDIA container toolkit"
+step "5/15 NVIDIA container toolkit"
 
 if command -v nvidia-ctk >/dev/null 2>&1 \
   && command -v nvidia-container-runtime >/dev/null 2>&1; then
@@ -402,7 +420,7 @@ log "nvidia-container-runtime: $(command -v nvidia-container-runtime)"
 # ---------------------------------------------------------------------------
 # 6. standalone containerd (if present)
 # ---------------------------------------------------------------------------
-step "6/12 containerd runtime"
+step "6/15 containerd runtime"
 
 if systemctl cat containerd.service >/dev/null 2>&1; then
   log "发现独立 containerd.service，配置 nvidia runtime"
@@ -420,7 +438,7 @@ fi
 # ---------------------------------------------------------------------------
 # 7. k3s
 # ---------------------------------------------------------------------------
-step "7/12 k3s"
+step "7/15 k3s"
 
 if command -v k3s >/dev/null 2>&1; then
   installed_k3s="$(k3s --version | head -1)"
@@ -461,7 +479,7 @@ log "node Ready"
 # ---------------------------------------------------------------------------
 # 8. verify k3s containerd has nvidia runtime
 # ---------------------------------------------------------------------------
-step "8/12 验证 k3s containerd nvidia runtime"
+step "8/15 验证 k3s containerd nvidia runtime"
 
 if ! grep -q nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml; then
   log "k3s containerd config 没有 nvidia；重启 k3s 后再查"
@@ -482,7 +500,7 @@ log "k3s containerd config contains nvidia"
 # ---------------------------------------------------------------------------
 # 9. NVIDIA device plugin + RuntimeClass
 # ---------------------------------------------------------------------------
-step "9/12 NVIDIA device plugin"
+step "9/15 NVIDIA device plugin"
 
 device_plugin_tag="$DEVICE_PLUGIN_VERSION"
 if [[ "$device_plugin_tag" != v* ]]; then
@@ -511,7 +529,7 @@ log "device plugin Ready"
 # ---------------------------------------------------------------------------
 # 10. Helm
 # ---------------------------------------------------------------------------
-step "10/12 Helm"
+step "10/15 Helm"
 
 if command -v helm >/dev/null 2>&1; then
   log "helm 已安装: $(helm version --short)"
@@ -524,7 +542,7 @@ helm version --short
 # ---------------------------------------------------------------------------
 # 11. namespace + GPU smoke test
 # ---------------------------------------------------------------------------
-step "11/12 namespace + GPU smoke test"
+step "11/15 namespace + GPU smoke test"
 
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
@@ -580,9 +598,85 @@ fi
 log "gpu-smoke 看到 ${EXPECTED_GPUS} 张 GPU"
 
 # ---------------------------------------------------------------------------
-# 12. version record
+# 12. pre-pull the vLLM image
 # ---------------------------------------------------------------------------
-step "12/12 版本与功耗记录"
+step "12/15 预拉 vLLM 镜像"
+
+if [[ "$SKIP_VLLM_PULL" == "1" ]]; then
+  log "SKIP_VLLM_PULL=1，跳过镜像预拉"
+elif k3s ctr images ls -q | grep -Fxq "$VLLM_IMAGE"; then
+  log "镜像已存在，跳过: $VLLM_IMAGE"
+else
+  avail_gb="$(df -BG --output=avail /var/lib | tail -1 | tr -dc '0-9')"
+  if (( avail_gb < 15 )); then
+    die "/var/lib 只剩 ${avail_gb}G，vLLM 镜像约需 10G" \
+      "清理磁盘或换更大 disk 的 VM，再重跑"
+  fi
+  log "拉取 $VLLM_IMAGE（约 10GB，几分钟）"
+  k3s ctr images pull "$VLLM_IMAGE"
+  log "镜像已拉取: $VLLM_IMAGE"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. download model weights
+# ---------------------------------------------------------------------------
+step "13/15 下载模型权重"
+
+if [[ -z "$MODEL_DIR" ]]; then
+  MODEL_DIR="/models/${MODEL_ID##*/}"
+fi
+
+if [[ "$SKIP_MODEL_DOWNLOAD" == "1" ]]; then
+  log "SKIP_MODEL_DOWNLOAD=1，跳过权重下载"
+elif [[ -f "$MODEL_DIR/config.json" ]] \
+  && compgen -G "$MODEL_DIR/*.safetensors" >/dev/null 2>&1; then
+  log "权重已存在，跳过: $MODEL_DIR ($(du -sh "$MODEL_DIR" | cut -f1))"
+else
+  mkdir -p "$MODEL_DIR"
+  avail_gb="$(df -BG --output=avail "$MODEL_DIR" | tail -1 | tr -dc '0-9')"
+  if (( avail_gb < 10 )); then
+    die "$MODEL_DIR 所在分区只剩 ${avail_gb}G" \
+      "4B-AWQ 约 2.7GB，但建议至少留 10G 给镜像和结果"
+  fi
+
+  log "安装/更新 huggingface_hub"
+  python3 -m pip install -q -U "huggingface_hub[hf_transfer]" \
+    || python3 -m pip install -q -U huggingface_hub
+
+  log "下载 $MODEL_ID -> $MODEL_DIR"
+  HF_TOKEN="$HF_TOKEN" python3 - "$MODEL_ID" "$MODEL_DIR" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+
+repo_id, local_dir = sys.argv[1], sys.argv[2]
+snapshot_download(repo_id=repo_id, local_dir=local_dir, max_workers=8)
+PY
+
+  symlinks="$(find "$MODEL_DIR" -type l | head -20 || true)"
+  if [[ -n "$symlinks" ]]; then
+    die "权重目录里有 symlink，Pod 只挂 /models 时会断链: $symlinks" \
+      "删掉 $MODEL_DIR 后重跑；不要用指向 HF cache 的 symlink"
+  fi
+  [[ -f "$MODEL_DIR/config.json" ]] \
+    || die "缺少 config.json: $MODEL_DIR" "下载不完整，删掉目录后重跑"
+  compgen -G "$MODEL_DIR/*.safetensors" >/dev/null 2>&1 \
+    || die "缺少 *.safetensors: $MODEL_DIR" "下载不完整，删掉目录后重跑"
+  log "权重完成: $MODEL_DIR ($(du -sh "$MODEL_DIR" | cut -f1))"
+fi
+
+# ---------------------------------------------------------------------------
+# 14. results directory
+# ---------------------------------------------------------------------------
+step "14/15 结果目录"
+
+mkdir -p "$RESULTS_DIR"
+chmod 777 "$RESULTS_DIR"
+log "$RESULTS_DIR 已就绪；VM 销毁前 scp 回本地并 push"
+
+# ---------------------------------------------------------------------------
+# 15. version record
+# ---------------------------------------------------------------------------
+step "15/15 版本与功耗记录"
 
 VERSION_FILE="/root/d4-versions.txt"
 cuda_version="$(nvidia-smi | grep -oE 'CUDA Version: [0-9.]+' | head -1 || true)"
@@ -600,12 +694,22 @@ cuda_version="$(nvidia-smi | grep -oE 'CUDA Version: [0-9.]+' | head -1 || true)
   echo "gpu:"
   nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,power.limit --format=csv,noheader
   echo "cuda: ${cuda_version:-unknown}"
+  if k3s ctr images ls -q | grep -Fxq "$VLLM_IMAGE"; then
+    echo "vllm_image: $VLLM_IMAGE (present)"
+  else
+    echo "vllm_image: $VLLM_IMAGE (absent)"
+  fi
+  if [[ -d "$MODEL_DIR" ]]; then
+    echo "model_dir: $MODEL_DIR ($(du -sh "$MODEL_DIR" | cut -f1))"
+  else
+    echo "model_dir: $MODEL_DIR (absent)"
+  fi
+  echo "results_dir: $RESULTS_DIR"
 } | tee "$VERSION_FILE"
 
 log "版本记录: $VERSION_FILE"
 
 log "bootstrap OK"
 log "下一步："
-log "  1) 按 d4-llm-d-learning.md §5.2 下载 Qwen/Qwen3-4B-AWQ 到 /models/Qwen3-4B-AWQ"
-log "  2) 在仓库根目录：kubectl apply -n ${NAMESPACE} -f scripts/d4/modelserver.yaml"
-log "  3) 按 d4-llm-d-learning.md §5.3–§5.8 继续（router / calibration / bench）"
+log "  1) 在仓库根目录：kubectl apply -n ${NAMESPACE} -f scripts/d4/modelserver.yaml"
+log "  2) 按 d4-llm-d-learning.md §5.3–§5.8 继续（router / calibration / bench）"
