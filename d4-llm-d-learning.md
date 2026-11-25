@@ -888,6 +888,18 @@ kubectl get crd | grep -E 'interceptorroutes|httpscaledobjects'
 
 > 所以差别是**信息保真度**，不是功能多少：optimized 的失败模式是「**猜错**」（驱逐、旁路请求、分词差异），precise 的失败模式是「**没收到/对不齐**」（事件断流、索引为空、`block-size` 不匹配）。precise 更准，但和 vLLM 强耦合、故障面更大——§6.7 要求用 P99 和命中率证明它值这个复杂度，赢不了 optimized 就说明成本没换来收益。
 
+**两种模式各自需要哪些 vLLM flag**
+
+| vLLM flag | optimized | precise | 作用 |
+|---|---|---|---|
+| `--enable-prefix-caching` | 要 | 要 | 打开自动前缀缓存；没有它，路由到哪都没有缓存可命中 |
+| `--served-model-name` | 要 | 要 | 请求的 `model`、EPP 的 `modelName`、KV topic 三者对齐 |
+| `--enable-scale-out` | 不要 | **要** | 注册 `/v1/*/render`，EPP 用引擎 tokenizer 拿 token IDs |
+| `--kv-events-config` | 不要 | **要** | ZMQ PUB 上报 block 分配/驱逐（5556），replay 在 5559 |
+| `--block-size=64` | 不要 | **要** | 和 EPP 的 `blockSizeTokens` 对齐，否则永远 miss |
+
+> `optimized` 只要 EPP + 普通 OpenAI 接口；`precise` 多出的这三行，就是“llm-d 与 vLLM 的 KV 状态面交互”。每个 flag 的完整作用、失败表现和对齐关系见 §5.3。
+
 **为什么必须精确 token IDs？** vLLM 的 prefix cache 以 block 为单位；EPP 如果自己用另一套 tokenizer 或近似 hash，算出来的 block key 和 vLLM 的不一致，索引查不到，路由就退化成普通负载均衡。
 
 **为什么 P99 会变？** 单请求的 TTFT（Time to First Token，首 token 延迟）可以粗略拆成：
