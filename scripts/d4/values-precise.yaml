@@ -93,7 +93,7 @@ router:
               # 2×3060 12GB + Qwen3-4B-AWQ 必须用 calibration Job 重测后替换（§5.8）。
               # 不重测时这个值偏高，相当于把 saturation override 关掉：
               # 路由仍然按 prefix 命中走，但不会在副本过热时主动扩散。
-              peakPrefillThroughput: 15926
+              peakPrefillThroughput: 2657   # 2026-11-25 实测：2×3060/4B，CHUNK_SIZE=4096，经 EPP 的部署口径
 
           - type: token-load-scorer
 

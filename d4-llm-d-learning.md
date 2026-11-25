@@ -998,6 +998,8 @@ kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\
 ```
 
 > **VM 上的固定布局（本 lab 约定）**：`/root/lab/{scripts,llm-d,notes}`，`export LAB=/root/lab`（已写入 `/etc/environment`、`/etc/profile.d/lab.sh` 和 `~/.bashrc`；**已有的 shell 要手动 `export LAB=/root/lab` 或重登**）；`models -> /models`、`results -> /results`。新 VM 按这个建目录，不要把 `llm-d`、`scripts` 散在 `/root` 下。**`LAB` 必须同时包含 `scripts/` 和 `llm-d/`**，否则 §5.5 的 `guides/recipes/...` 会报 `no such file or directory`。
+>
+> 如果 `$LAB` 仍为空：**你在 tmux 里**。tmux server 会保留启动时的旧环境，不读 `/etc/environment`；`tmux setenv -g LAB /root/lab` 只对新 pane 生效，当前 pane 仍需 `export LAB=/root/lab`（或 `Ctrl-b c` 开新窗口）。
 
 下载权重到宿主机（两个 Pod 共享，不要每个 Pod 各下一次）：
 
