@@ -881,6 +881,13 @@ kubectl get crd | grep -E 'interceptorroutes|httpscaledobjects'
 | 典型失败 | 估计不准、命中率低 | 索引空、render 404、block size 不匹配 |
 | 适用 | fallback、快速验证 | D4 主实验 |
 
+**一句话定位：optimized 是「推断」，precise 是「观测」。**
+
+- optimized：EPP 只根据自己路由过的请求和前缀 hash，推断副本「大概」缓存了什么；和 vLLM 之间只有数据面交互，**没有 KV 状态面**。
+- precise：vLLM 通过 ZMQ 把 KV block 的分配/驱逐推给 EPP，EPP 再用引擎的 `/render` 对齐 token IDs，得到和引擎一致的实时索引。
+
+> 所以差别是**信息保真度**，不是功能多少：optimized 的失败模式是「**猜错**」（驱逐、旁路请求、分词差异），precise 的失败模式是「**没收到/对不齐**」（事件断流、索引为空、`block-size` 不匹配）。precise 更准，但和 vLLM 强耦合、故障面更大——§6.7 要求用 P99 和命中率证明它值这个复杂度，赢不了 optimized 就说明成本没换来收益。
+
 **为什么必须精确 token IDs？** vLLM 的 prefix cache 以 block 为单位；EPP 如果自己用另一套 tokenizer 或近似 hash，算出来的 block key 和 vLLM 的不一致，索引查不到，路由就退化成普通负载均衡。
 
 **为什么 P99 会变？** 单请求的 TTFT（Time to First Token，首 token 延迟）可以粗略拆成：
