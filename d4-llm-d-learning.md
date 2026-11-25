@@ -355,6 +355,18 @@ kubectl get deploy -n d4 d4-router-epp \
 > - **GAIE**：在 Gateway API 之上加 `InferencePool` + EPP 协议；
 > - **llm-d**：整套推理平台（router / model server / PD / tiered cache），其中 router 实现了 GAIE 的 EPP。
 
+**llm-d 有 operator 吗？** 上游 v1.0.0 **没有**。llm-d 走的是「Helm chart + well-lit path」的模块化路线；官方文档明确说，想要「单个 CRD 驱动整套部署」的用户应该用 **KServe 的 `LLMInferenceService`**。operator 形态只存在于依赖和下游：
+
+| 形态 | 谁提供 | 管什么 |
+|---|---|---|
+| LWS + `DisaggregatedSet` controller | `kubernetes-sigs/lws` | 多机 Pod 组；PD 的 prefill/decode 作为一个版本整体滚动 |
+| KEDA operator | KEDA | 按队列/饱和/token backlog 扩缩 |
+| `LLMInferenceService` | KServe | 一个 CR 建出 vLLM + EPP + InferencePool |
+| Red Hat AI Inference operator | Red Hat（下游产品） | 平台级 meta-operator，统管 KServe/llm-d/网关的版本与升级 |
+| `InferenceScheduler` operator | 社区（非官方） | 单 CR 建 vLLM/Service/pool/Gateway |
+
+> D4 用 Helm 就够：单模型、静态拓扑，加 operator 只会多一层抽象。真正需要 operator 的场景是「多租户、每个模型自动生成一套 pool + EPP」——那是 KServe 或下游平台要解决的问题。
+
 ---
 
 ## 3. 环境、版本、预算
