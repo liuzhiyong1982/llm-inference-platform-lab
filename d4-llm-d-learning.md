@@ -1538,6 +1538,19 @@ helm upgrade d4-router \
 - **T0 参考**：`optimized` 至少 1 轮，时间够 3 轮；回答“市场默认的 approx baseline 和 precise 差多少”。
 - **控制组**：`random` 至少 1 轮，时间不够可砍；它只用来判断“P99 改善是不是 EPP/Envoy 的固定开销”。
 
+**为什么按 `direct → random → optimized → precise` 依次切**
+
+四个 arm 是逐层加变量的嵌套对照，每一跳只多一个东西：
+
+| 对比 | 只多出什么 | 回答什么问题 |
+|---|---|---|
+| `direct` → `random` | Envoy + EPP + tokenize/索引查询 | 代理的固定开销（proxy tax）是多少 |
+| `random` → `optimized` | 近似前缀亲和（不看 KV 精确性） | 「前缀路由」本身值多少 |
+| `optimized` → `precise` | KV events 精确索引 + render 对齐 | 精确比市场默认多赚多少 |
+| `direct` → `precise` | 全部 | headline 总收益 |
+
+顺序不能反：没有 `random`，`direct vs precise` 的差异里混着代理开销；没有 `optimized`，`precise vs random` 无法回答「比市场默认好多少」。切换只改 EPP 插件（helm values），vLLM 副本、workload、并发、seed 全不变。
+
 ### 6.2 Workload
 
 固定一批“共享长前缀”的请求：
