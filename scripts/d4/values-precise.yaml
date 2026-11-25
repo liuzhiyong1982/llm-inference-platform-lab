@@ -9,8 +9,8 @@
 #
 # 本文件假设：
 #   - 模型服务器 Pod 带 llm-d.ai/guide=d4-prefix-routing
-#   - 模型是 qwen3-8b（--served-model-name），vLLM 开了 --enable-scale-out
-#   - 两个副本各 1×L4，block-size=64
+#   - 模型是 qwen3-4b（--served-model-name），vLLM 开了 --enable-scale-out
+#   - 两个副本各 1×RTX 3060 12GB，block-size=64
 router:
   inferencePool:
     failureMode: FailOpen   # EPP 不可用时 Envoy 继续按 headless Service 负载均衡
@@ -55,7 +55,7 @@ router:
             parameters:
               # 必须等于 vLLM 的 --served-model-name；不一致时 render 会被拒绝，
               # 请求仍然 200，但路由会退化成“没有 cache 信息”。
-              modelName: qwen3-8b
+              modelName: qwen3-4b
               vllm:
                 endpointDiscovery:
                   attemptTimeout: 2s
@@ -90,7 +90,7 @@ router:
             parameters:
               prefixMatchInfoProducerName: precise-prefix-cache-producer
               # 15926 是 llm-d guide 的 H100 80GB / Qwen3-32B / TP=2 参考值。
-              # L4 + Qwen3-8B-AWQ 必须用 calibration Job 重测后替换（§5.8）。
+              # 2×3060 12GB + Qwen3-4B-AWQ 必须用 calibration Job 重测后替换（§5.8）。
               # 不重测时这个值偏高，相当于把 saturation override 关掉：
               # 路由仍然按 prefix 命中走，但不会在副本过热时主动扩散。
               peakPrefillThroughput: 15926

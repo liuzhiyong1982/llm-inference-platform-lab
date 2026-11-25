@@ -1,4 +1,4 @@
-# D4.6 HBM-only 控制组：和 tiered 同样的 2×L4 / 模型 / gpu-memory-utilization，
+# D4.6 HBM-only 控制组：和 tiered 同样的 2×RTX 3060 12GB / 模型 / gpu-memory-utilization，
 # 只是不挂 OffloadingConnector，不启用 CPU tier。
 #
 # 用法：
@@ -27,7 +27,7 @@ spec:
       labels:
         app: vllm-hbm
         llm-d.ai/guide: tiered-prefix-cache
-        llm-d.ai/model: qwen3-8b
+        llm-d.ai/model: qwen3-4b
     spec:
       runtimeClassName: nvidia
       terminationGracePeriodSeconds: 120
@@ -37,11 +37,11 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["vllm", "serve"]
           args:
-            - "/models/Qwen3-8B-AWQ"
-            - "--served-model-name=qwen3-8b"
+            - "/models/Qwen3-4B-AWQ"
+            - "--served-model-name=qwen3-4b"
             - "--max-model-len=8192"
             - "--gpu-memory-utilization=0.60"
-            - "--max-num-seqs=64"
+            - "--max-num-seqs=16"
             - "--max-num-batched-tokens=4096"
             - "--block-size=64"
             - "--enable-prefix-caching"

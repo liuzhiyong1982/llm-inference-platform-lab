@@ -10,7 +10,7 @@ Run it inside the vLLM image (aiohttp is already installed):
 
   python3 bench_prefix.py \
     --url http://d4-router-epp/v1/completions \
-    --model qwen3-8b \
+    --model qwen3-4b \
     --sessions 32 --turns 4 \
     --prefix-words 1100 --suffix-words 80 \
     --max-tokens 128 --concurrency 16 \
@@ -371,7 +371,7 @@ async def main_async(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True, help="OpenAI-compatible completions URL")
-    parser.add_argument("--model", default="qwen3-8b")
+    parser.add_argument("--model", default="qwen3-4b")
     parser.add_argument("--sessions", type=int, default=32)
     parser.add_argument("--turns", type=int, default=4)
     parser.add_argument("--prefix-words", type=int, default=1100)

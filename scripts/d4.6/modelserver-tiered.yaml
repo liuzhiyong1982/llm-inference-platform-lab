@@ -1,19 +1,19 @@
-# D4.6 tiered-KV 实验组：2 个 vLLM 副本，每个 1×L4，HBM + 16GiB CPU tier。
+# D4.6 tiered-KV 实验组：2 个 vLLM 副本，每个 1×RTX 3060 12GB，HBM + 16GiB CPU tier。
 #
 # 基于 llm-d v1.0.0 的 tiered-prefix-cache guide：
 #   guides/tiered-prefix-cache/modelserver/gpu/vllm/native/cpu/base/patch-vllm.yaml
 # 改动：
-#   - Qwen3-32B / TP=2 / 300GiB -> Qwen3-8B-AWQ / TP=1 / 16GiB
+#   - Qwen3-32B / TP=2 / 300GiB -> Qwen3-4B-AWQ / TP=1 / 16GiB
 #   - gpu-memory-utilization=0.60，故意把 HBM KV 压小，让 16GiB CPU tier
-#     大于 HBM KV，才有机会观察“驱逐后从 CPU 拉回”
-#   - 本地权重 /models/Qwen3-8B-AWQ
+#     有足够余量接住驱逐，才有机会观察“驱逐后从 CPU 拉回”
+#   - 本地权重 /models/Qwen3-4B-AWQ
 #
 # 用法：
 #   kubectl create namespace d46 --dry-run=client -o yaml | kubectl apply -f -
 #   kubectl apply -n d46 -f scripts/d4.6/modelserver-tiered.yaml
 #
-# 注意：CPU tier 放在 /dev/shm，计入 Pod memory limit；2×16GiB + vLLM RSS
-# 需要 ≥96GB host RAM，64GB 会很紧。
+# 注意：CPU tier 放在 /dev/shm，计入 Pod memory limit；本次 host 252GB RAM，
+# 2×16GiB CPU tier + vLLM RSS 余量充足。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,7 +36,7 @@ spec:
       labels:
         app: vllm-tiered
         llm-d.ai/guide: tiered-prefix-cache
-        llm-d.ai/model: qwen3-8b
+        llm-d.ai/model: qwen3-4b
     spec:
       runtimeClassName: nvidia
       terminationGracePeriodSeconds: 120
@@ -46,11 +46,11 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["vllm", "serve"]
           args:
-            - "/models/Qwen3-8B-AWQ"
-            - "--served-model-name=qwen3-8b"
+            - "/models/Qwen3-4B-AWQ"
+            - "--served-model-name=qwen3-4b"
             - "--max-model-len=8192"
             - "--gpu-memory-utilization=0.60"
-            - "--max-num-seqs=64"
+            - "--max-num-seqs=16"
             - "--max-num-batched-tokens=4096"
             - "--block-size=64"
             - "--enable-prefix-caching"

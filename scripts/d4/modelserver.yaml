@@ -1,8 +1,8 @@
-# D4 Lab 1：两个 vLLM 副本，每个 1×L4，供 llm-d EPP 做 prefix-cache 路由。
+# D4 Lab 1：两个 vLLM 副本，每个 1×RTX 3060 12GB，供 llm-d EPP 做 prefix-cache 路由。
 #
 # 前置：
 #   - k3s 已装好，nvidia.com/gpu allocatable = 2
-#   - 权重已下载到宿主机 /models/Qwen3-8B-AWQ
+#   - 权重已下载到宿主机 /models/Qwen3-4B-AWQ
 #   - RuntimeClass nvidia 已存在（D3 §5.4）
 #
 # 用法：
@@ -34,7 +34,7 @@ spec:
       labels:
         app: vllm-d4
         llm-d.ai/guide: d4-prefix-routing
-        llm-d.ai/model: qwen3-8b
+        llm-d.ai/model: qwen3-4b
         llm-d.ai/role: decode
     spec:
       runtimeClassName: nvidia
@@ -45,17 +45,17 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["vllm", "serve"]
           args:
-            - "/models/Qwen3-8B-AWQ"
-            - "--served-model-name=qwen3-8b"
+            - "/models/Qwen3-4B-AWQ"
+            - "--served-model-name=qwen3-4b"
             - "--max-model-len=8192"
             - "--gpu-memory-utilization=0.90"
-            - "--max-num-seqs=64"
+            - "--max-num-seqs=16"
             - "--max-num-batched-tokens=4096"
             - "--block-size=64"
             - "--enable-prefix-caching"
             - "--enable-scale-out"
             - "--kv-events-config"
-            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","replay_endpoint":"$(KV_EVENTS_REPLAY_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@qwen3-8b"}'
+            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","replay_endpoint":"$(KV_EVENTS_REPLAY_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@qwen3-4b"}'
             - "--shutdown-timeout=45"
             - "--disable-log-requests"
           env:

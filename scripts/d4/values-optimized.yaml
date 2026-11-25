@@ -52,7 +52,7 @@ router:
           - type: inflight-load-producer
           - type: prefix-cache-affinity-filter
             parameters:
-              # 同 precise：guide 默认值是 H100/Qwen3-32B 的，L4 要重测。
+              # 同 precise：guide 默认值是 H100/Qwen3-32B 的，2×3060 + 4B 要重测。
               peakPrefillThroughput: 15926
           - type: token-load-scorer
         schedulingProfiles:

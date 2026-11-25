@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 |---|---|
-| `modelserver.yaml` | 2 个 vLLM 副本（每个 1×L4）+ 普通 Service `vllm-direct` |
+| `modelserver.yaml` | 2 个 vLLM 副本（每个 1×RTX 3060 12GB）+ 普通 Service `vllm-direct` |
 | `values-precise.yaml` | llm-d standalone + precise prefix-cache routing |
 | `values-random.yaml` | 同一条 Envoy/EPP 路径 + `random-picker`（控制组） |
 | `values-optimized.yaml` | fallback：optimized baseline（近似 prefix cache） |
@@ -20,8 +20,9 @@
 ```bash
 # 0. 在 llm-inference-platform-lab 根目录
 export LAB=$(pwd)
+# 新 VM 从零装 k3s / GPU runtime / device plugin / Helm：见主文档 §3.1.1
 
-# 1. 模型服务器（前置：k3s + NVIDIA device plugin + /models/Qwen3-8B-AWQ）
+# 1. 模型服务器（前置：k3s + NVIDIA device plugin + /models/Qwen3-4B-AWQ）
 kubectl create namespace d4 --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -n d4 -f scripts/d4/modelserver.yaml
 kubectl wait --for=condition=Ready pod -l app=vllm-d4 -n d4 --timeout=900s
@@ -70,6 +71,6 @@ python3 scripts/d4/plot_d4.py /results/direct-run1.json /results/precise-run1.js
 
 ## 注意
 
-- 所有命令都在 **Vast 租的 2×24GB VM（Vast 无 L4 VM，实际 2×3090）** 上跑；不要碰 `uat-mobility-aks-01`。
+- 所有命令都在 **Vast 租的 2×RTX 3060 12GB VM（instance 62540497，Vast 无 L4 VM）** 上跑；不要碰 `uat-mobility-aks-01`。
 - vLLM flag 可能随小版本变化，先看主文档 §3.4 的 `--help` 预检。
 - precise 跑不通时用 `values-optimized.yaml`，结果里注明是 fallback。

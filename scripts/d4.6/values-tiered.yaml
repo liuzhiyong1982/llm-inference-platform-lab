@@ -53,7 +53,7 @@ router:
             parameters:
               autoTune: false
               # 16GiB / (64 * 144KiB) ≈ 1820；取 1800。
-              # Qwen3-8B KV ≈ 144KiB/token，64-token block ≈ 9MiB。
+              # Qwen3-4B KV ≈ 144KiB/token，64-token block ≈ 9MiB（与 8B 同 KV 几何）。
               lruCapacityPerServer: 1800
           - type: queue-scorer
           - type: kv-cache-utilization-scorer

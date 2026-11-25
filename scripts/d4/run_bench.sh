@@ -6,7 +6,7 @@ set -euo pipefail
 args=(
   python3 -u /scripts/bench_prefix.py
   --url "${URL}"
-  --model "${MODEL:-qwen3-8b}"
+  --model "${MODEL:-qwen3-4b}"
   --sessions "${SESSIONS:-32}"
   --turns "${TURNS:-4}"
   --prefix-words "${PREFIX_WORDS:-1100}"

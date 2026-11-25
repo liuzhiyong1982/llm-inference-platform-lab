@@ -1,16 +1,16 @@
-# D4 学习文档：llm-d 前缀感知路由（2×24GB VM）
+# D4 学习文档：llm-d 前缀感知路由（2×RTX 3060 12GB + Qwen3-4B-AWQ）
 
-> 状态：**planned（2026-11-24；硬件前提 2026-11-25 修正）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×24GB VM、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP（Endpoint Picker，端点选择器）的 P99（第 99 百分位）、留下命中率数字和 B 线故障表**；同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD（Prefill/Decode，预填充/解码）、wide EP（Expert Parallelism，专家并行）、flow control、tiered/P2P、autoscaling、batch、rollout、API）。文档、manifest、benchmark 脚本已就绪，**尚未租 VM 执行**；所有“实测”表都是待填模板。
+> 状态：**planned，硬件已就位（2026-11-24 起草；2026-11-25 按实际实例修正）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×RTX 3060 12GB VM（instance 62540497）、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP（Endpoint Picker，端点选择器）的 P99（第 99 百分位）、留下命中率数字和 B 线故障表**；同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD（Prefill/Decode，预填充/解码）、wide EP（Expert Parallelism，专家并行）、flow control、tiered/P2P、autoscaling、batch、rollout、API）。实例已租（`actual_status=running`，2026-11-25 已可 SSH 登录），文档、manifest、benchmark 脚本已就绪，**尚未跑实验**；所有“实测”表都是待填模板。
 >
 > 计划位置：`ai-cloud-native-week-plan.md` 的 **D4（llm-d 日）** 与 **Q2（Gateway/路由）**；B 线学习表见该文件 §3，llm-d 四问见 §6。
 >
 > 性质：学习文档 + 可执行 lab。D1/D2 回答“单机多快”，D3 回答“放进 K8s（Kubernetes）后启动/扩容/驱逐要多少秒”，D4 回答“**多副本时，把请求送到已经缓存了这段前缀的副本，P99 能好多少；这套路由组件挂了怎么办**”。
 >
-> 硬约束：**不在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**。用 Vast.ai 租的 2×24GB VM（L4 VM 不可得，实际 2×3090），on-demand；同机、同模型、同输入/输出长度、同 SLO（Service Level Objective，服务等级目标），只改路由策略。
+> 硬约束：**不在共享 UAT 集群 `uat-mobility-aks-01` 上做实验**。用 Vast.ai 租的 **2×RTX 3060 12GB VM（instance 62540497）**，on-demand；同机、同模型、同输入/输出长度、同 SLO（Service Level Objective，服务等级目标），只改路由策略。
 >
 > 版本基线：llm-d `v1.0.0`、Gateway API Inference Extension `v1.6.2`、vLLM `v0.34.0`（以 `--help` 为准）、KEDA（Kubernetes Event-driven Autoscaling） `2.21.1`（只用于 Lab 0）。
 >
-> **硬件前提修正（2026-11-25）：** 本文原写“2×24GB VM”，但 Vast 上 **没有 L4 VM**（`gpu_name=L4 vms_enabled=true` 返回 0）；L4 只有容器，k3s 起不来。D4 实际改用 **2×RTX 3090 VM**（备选 2×4090），仍是 24GB、TP（Tensor Parallelism，张量并行）=1、2 副本；结果标注 3090，不标 L4。详见 §3.1。
+> **硬件前提修正（2026-11-25）：** 本文原写“2×24GB VM”。Vast 上 **没有 L4 VM**（`gpu_name=L4 vms_enabled=true` 返回 0）；L4 只有容器，k3s 起不来。**本次实际租的是 2×RTX 3060 12GB VM（instance 62540497，UK，`$0.26148/h` 含 130GB disk）**：每卡 12GB、TP（Tensor Parallelism，张量并行）=1、2 副本；2×3090 只是备选。模型相应从 Qwen3-8B-AWQ 改为 **Qwen3-4B-AWQ**（served name `qwen3-4b`）。结果标注 2×3060 12GB，不标 L4/3090。详见 §3.1。
 
 ---
 
@@ -19,7 +19,7 @@
 1. **D4 的主菜是 llm-d，不是 Lab 0。** Lab 0（KEDA HTTP Add-on）只解决“0 副本时请求怎么进来”；llm-d 解决“多副本时按 prefix cache 怎么路由”。4h 不够就砍 Lab 0，保 Lab 1。
 2. **路由只在多副本时存在。** 1 个 vLLM 进程没有路由问题；D4 的收益完全建立在 D3 的 2 副本之上。
 3. **llm-d 1.0 的 precise routing 不是“猜前缀”。** vLLM 通过 ZMQ 上报 KV（Key-Value，键值） block 事件，EPP 建精确索引；每个请求先 tokenize/render，再查索引。需要 `--kv-events-config`、`/v1/*/render`、`--block-size=64` 与 `blockSizeTokens: 64` 对齐。
-4. **2×24GB VM 跑不了 guide 默认配置。** guide 默认 Qwen3-32B、TP=2、2 副本 = 4×H100。我们改成 Qwen3-8B-AWQ（Activation-aware Weight Quantization，激活感知权重量化）、TP=1、2 副本 = 2×24GB VM；模型名、`peakPrefillThroughput`、绝对数字都不能照抄。
+4. **2×3060 12GB 跑不了 guide 默认配置。** guide 默认 Qwen3-32B、TP=2、2 副本 = 4×H100。我们改成 Qwen3-4B-AWQ（Activation-aware Weight Quantization，激活感知权重量化）、TP=1、2 副本 = 2×RTX 3060 12GB；模型名、`peakPrefillThroughput`、绝对数字都不能照抄。
 5. **主对比是 Service round-robin vs EPP precise。** 可选 EPP random 作为控制组，隔离 Envoy/EPP 的固定开销；`direct` / `precise` 各跑 3 次，`random` 时间够就 3 次，取中位数。
 6. **EPP 单副本是有意为之。** precise 的 in-flight token 记账和 KV 索引是进程本地的；D4 不跑 active-active。生产 HA 需要共享状态/索引快照，先作为面试追问。
 7. **交付物不是“跑通了”。** 一张 P99 对比图、命中率、每 Pod 请求分布、故障表、成本；缺一项不算 D4 完成。
@@ -40,13 +40,13 @@
 | **Models** | 某个模型在某张卡上怎么跑到最好 | DeepSeek-V4 on GB200、GLM-5.2 on H200、Qwen3.5-397B on TPU |
 | **Operations** | 集群日常怎么运营 | autoscaling、rollout、flow control、multi-model、batch |
 
-一条 guide 必须包含：固定拓扑、可执行 manifest、Verify/Cleanup、**reference environment**（平台/卡/模型/引擎）、已知限制。成熟度分 Tier 0–5（Planned → Experimental → Deployable → Validated → Benchmarked → Proven）；**Tier 是绑在 reference environment 上的**，“H100 上 nightly 通过”不等于“L4/3090 上也能跑出同样数字”。
+一条 guide 必须包含：固定拓扑、可执行 manifest、Verify/Cleanup、**reference environment**（平台/卡/模型/引擎）、已知限制。成熟度分 Tier 0–5（Planned → Experimental → Deployable → Validated → Benchmarked → Proven）；**Tier 是绑在 reference environment 上的**，“H100 上 nightly 通过”不等于“L4/3060 上也能跑出同样数字”。
 
 对 D4 的含义：
 
 - 主实验跑 **Foundations / precise-prefix-cache-routing**；`optimized-baseline` 是 fallback/control；
 - D4.5 对应 `pd-disaggregation`，D4.6 对应 `tiered-prefix-cache`；
-- guide 的默认参考环境是 Qwen3-32B、TP=2、2 副本 = 4×H100；我们改成 Qwen3-8B-AWQ、TP=1、2 副本 = 2×24GB VM，所以 **`peakPrefillThroughput` 要重测，绝对数字只和同机 round-robin 比**；
+- guide 的默认参考环境是 Qwen3-32B、TP=2、2 副本 = 4×H100；我们改成 Qwen3-4B-AWQ、TP=1、2 副本 = 2×3060 12GB，所以 **`peakPrefillThroughput` 要重测，绝对数字只和同机 round-robin 比**；
 - Well-Lit Path 是“可复现的起点”，不是“可照抄的生产答案”；换模型/换卡后，硬件相关参数必须自己校准。
 
 ### 1.0.1 缩略语表（D4 系列）
@@ -99,7 +99,7 @@
 
 | 计划要求 | 本文对应 | 产出 |
 |---|---|---|
-| 4h、2×24GB VM | §3、§10.5 | 时间盒 + 资源规划 |
+| 4h、2×3060 12GB VM | §3、§10.5 | 时间盒 + 资源规划 |
 | 按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline） | §5 | 可执行步骤 + fallback |
 | 同一批“共享长前缀”的请求，对比普通 round-robin vs EPP 的 P99 | §6 | 4 个 arm（T0 optimized + T1 precise）、固定 workload、JSON |
 | 一张 P99 对比图 + 命中率数字 | §6.6、§6.8 | `d4-ttft.png` + hit rate 表 |
@@ -186,8 +186,8 @@ D4 的“cover”分四档，避免把“读过”说成“跑过”：
 | **T0** | optimized baseline（approx prefix + token load） | **D4 第 4 个 arm** | 4h 内 | 1–3 轮 JSON；和 precise 对比 |
 | **T0** | EPP / `InferencePool` / Gateway API Inference Extension | **D4 主实验 + §7** | 4h 内 | 运维图 + 故障表 |
 | **T1** | precise prefix-cache routing | **D4 主实验** | 4h 内 | P99 + hit rate |
-| **T1** | PD 分离 | **D4.5** | 6–8h / ≤$8 | PD 2P+2D vs colocated 4 副本 |
-| **T1** | tiered KV cache / offload | **D4.6** | 3–4h / ~$3 | tiered vs HBM-only；`kv_offload_*` 证据 |
+| **T1** | PD 分离 | **D4.5** | 本次 skipped/blocked | 4×3060 VM 不存在；2×3060 只有 2 卡；4×4090 5h 为可选项 |
+| **T1** | tiered KV cache / offload | **D4.6** | 4–5h / ~$1.0–1.3 | tiered vs HBM-only；`kv_offload_*` 证据 |
 
 > **为什么 T1 不都塞进 D4 的 4h：** T0 是“装一个 router 就能量”的入口；T1 的 PD 要第二个池 + NIXL，tiered 要 CPU tier + 额外内存。它们各自是独立拓扑/资源实验，塞进 4h 会把 D4 的“只改路由”变量弄脏。D4 的 4h 只做 T0 + T1-A；T1-B/C 单独排，但属于同一个学习计划。
 
@@ -263,53 +263,239 @@ EPP 不可用 + FailOpen：
 
 ### 3.1 机器规格
 
-| 项 | 要求 | 说明 |
+| 项 | 实际值 | 说明 |
 |---|---|---|
-| GPU | **2×24GB VM** | L4 VM 不可得；实际用 2×RTX 3090（备选 2×4090），每个副本 1 张 |
-| CPU / RAM | ≥16 vCPU / 64GB | 2×vLLM + EPP + Envoy + bench 客户端 |
-| 磁盘 | ≥130GB | 镜像 ~10GB + 权重 5.7GB + 结果/日志 |
+| 实例 | Vast **62540497** | UK；`actual_status=running`，已可 SSH 登录；登录后先 `nvidia-smi` |
+| GPU | **2×RTX 3060 12GB** | 每个副本 1 张，TP=1；只有 2 张卡，不能做 2P+2D |
+| GPU 功耗 | 170W/卡 | 记录 `nvidia-smi -q -d POWER`；绝对数字不能和 D1/D2 的 40W L4 比 |
+| CPU / RAM | 40 vCPU（effective）/ 257,779 MiB ≈ 252GB | 2×vLLM + EPP + Envoy + bench 客户端足够 |
+| 磁盘 | 130GB | 镜像 ~10GB + 4B 权重 ~2.7GB + 结果/日志 |
+| 价格 | **`$0.26148/h`**（含 130GB disk） | on-demand，按秒计费 |
+| 镜像 / 驱动 | `docker.io/vastai/kvm:cuda-12.9.1-auto`；host driver 580.95.05，CUDA max 13.0 | `nvidia-smi` 确认两张卡都在 |
+| SSH | `ssh3.vast.ai:16434` | 端口以 Vast 控制台为准 |
 | 平台 | Vast.ai **on-demand VM** | 必须 `vms_enabled=true`；不要 interruptible；不要普通容器 |
 | 网络 | 同机、同 CNI（Container Network Interface，容器网络接口） | 客户端和 vLLM 同集群，避免公网变量 |
-| power limit | 记录 `nvidia-smi -q -d POWER` | 3090/4090 功耗远高于 L4 的 40W；绝对数字不能和 D1/D2 比 |
 
-> 如果只有 1 张 24GB 卡，D4 不成立：没有第二个副本就没有路由问题。至少 2 张。
+> 如果只有 1 张卡，D4 不成立：没有第二个副本就没有路由问题。至少 2 张。
 >
 > **硬件前提复核（2026-11-25）：Vast 上没有 L4 VM。** `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，其中 8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，普通容器起不来。D3 在 2026-11-23 已记录过这个限制，D4 原计划漏了它。
 >
-> 当前可用的 2 卡 VM（2026-11-25 快照，库存会变）：
+> **本次实际租到 2×RTX 3060 12GB（instance 62540497）**：12GB/卡、TP=1、2 副本；4B-AWQ 权重约 2.7GB，放得下，且单价只有 3090 的约 28%。2 卡 VM 的备选（2026-11-25 快照，库存会变）：
 >
-> | GPU | 地点 | $/h | R | RAM | Disk | 备注 |
-> |---|---|---|---|---|---|---|
-> | 2×3090 | UK | 0.935 | 0.994 | 251GB | 1076GB | **默认**；最稳 |
-> | 2×3090 | Quebec | 0.989 | 0.998 | 167GB | 341GB | 备选 |
-> | 2×4090 | Quebec | 0.935 | 0.945 | 125GB | 157GB | 更快，但只有一台、R<0.99 |
-> | 2×5090 | UK | 1.868 | 0.997 | 503GB | 2710GB | 32GB，没必要 |
+> | GPU | 地点 | $/h | RAM | 备注 |
+> |---|---|---|---|---|
+> | 2×3060 12GB | UK | 0.26148 | 252GB | **本次实际租用（62540497）** |
+> | 2×3090 | UK | 0.935 | 251GB | 备选；24GB 显存，8B 也能跑 |
+> | 2×4090 | Quebec | 0.935 | 125GB | 备选；更快，但 R<0.99 |
+> | 2×5090 | UK | 1.868 | 503GB | 32GB，没必要 |
 >
-> **默认选 2×3090 VM**：24GB、AWQ 8B 放得下、R≥0.994；结果里写 3090，不写 L4。2×4090 更快但创建风险高；2×5090 贵且过剩。预检：
+> 2×3090 只是备选：如果 62540497 起不来或要重租，再按下面的命令搜；结果必须把卡型改成 3090，不能和本次 3060 的数字混在一起。预检：
 >
 > ```bash
-> vastai search offers 'gpu_name=L4 vms_enabled=true'                    # 期望 0
-> vastai search offers 'gpu_name=RTX_3090 num_gpus=2 vms_enabled=true' -o 'dph+'
-> vastai search offers 'gpu_name=RTX_4090 num_gpus=2 vms_enabled=true' -o 'dph+'
+> vastai search offers 'gpu_name=L4 vms_enabled=true'                     # 期望 0
+> vastai search offers 'gpu_name=RTX_3060 num_gpus=2 vms_enabled=true' -o 'dph+'
+> vastai search offers 'gpu_name=RTX_3090 num_gpus=2 vms_enabled=true' -o 'dph+'   # 备选
 > ```
 >
-> `vms_enabled=false` 的 2×24GB VM 再便宜也不能用；同一 GPU 的 VM 和容器 offer ID 不同。创建后先 `nvidia-smi` 确认两张卡都在，再装 k3s。
+> `vms_enabled=false` 的 VM 再便宜也不能用；同一 GPU 的 VM 和容器 offer ID 不同。创建后先 `nvidia-smi` 确认两张卡都在，再装 k3s。62540497 的镜像是 `docker.io/vastai/kvm:cuda-12.9.1-auto`（VM，不是容器）。
+
+### 3.1.1 从零安装环境（每台新 VM 独立）
+
+> **D1–D4 每天独立**：不要假设 D3 的 k3s 集群、namespace、镜像缓存、device plugin 还在。下面在**新 VM** 上从零执行；命令基线是 `d3-k8s-vllm-learning.md` §5.1–§5.5，D4 只把卡型/namespace 换成 **2×3060 12GB / `d4`**。装完再回 §5.2 下载权重。
+
+**1）preflight：确认是 VM、两张卡都在**
+
+```bash
+ps -p 1 -o comm=                 # 必须是 systemd；不是就说明拿到的是容器，停止，重建 VM
+nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,power.limit \
+  --format=csv,noheader
+# 期望两行：RTX 3060 / 12288 MiB / 170 W 左右
+df -h /                          # 期望 >=130GB
+free -g                          # 期望 ~252GB
+lsb_release -ds                  # Ubuntu 22.04.x LTS；没有该命令就 cat /etc/os-release
+stat -fc %T /sys/fs/cgroup       # 期望 cgroup2fs
+```
+
+`ps -p 1` 不是 `systemd`、或 `nvidia-smi` 看不到两张 3060：不要继续装，先回 §3.1 换/重建 VM。不要为了“修好”一个容器实例去装 k3s。
+
+**2）tmux：防 SSH 断线**
+
+```bash
+# 镜像没带 tmux 时先补装；后面所有长命令都在这个 session 里跑
+command -v tmux >/dev/null || { sudo apt-get update; sudo apt-get install -y tmux; }
+tmux new -s d4
+# 断线后重连：tmux attach -t d4；暂时离开：Ctrl-b 然后 d
+```
+
+**3）基础包（Ubuntu 22.04）**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates jq git gnupg lsb-release tmux pciutils
+```
+
+Vast 的 Ubuntu VM 带自动升级 timer，可能把 NVIDIA 用户态驱动升到与内核模块不匹配；D3 已踩过。先关掉：
+
+```bash
+systemctl list-timers --all | grep -E 'apt|unattended' || true
+sudo systemctl disable --now unattended-upgrades.service 2>/dev/null || true
+sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+sudo systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+```
+
+**4）NVIDIA container toolkit（先于 k3s）**
+
+```bash
+# 目的：装 nvidia-container-runtime；k3s 启动时会探测 PATH 里的它
+sudo apt-get install -y curl ca-certificates gnupg
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  sudo gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+
+nvidia-ctk --version
+which nvidia-container-runtime
+```
+
+给宿主机 containerd 配 nvidia runtime（如果这台 VM 有独立 containerd）：
+
+```bash
+if systemctl cat containerd.service >/dev/null 2>&1; then
+  sudo nvidia-ctk runtime configure --runtime=containerd
+  sudo systemctl restart containerd
+else
+  echo "no standalone containerd; k3s will detect nvidia-container-runtime on start"
+fi
+```
+
+> **k3s 用的是 embedded containerd，不读 `/etc/containerd/config.toml`。** 不要为了这一步另装一个 containerd 和 k3s 抢状态；k3s 首次启动会根据 `nvidia-container-runtime` 自动渲染 `/var/lib/rancher/k3s/agent/etc/containerd/config.toml`。第 5 步会验证 `grep nvidia`。
+
+**5）k3s（版本与 D3 一致）**
+
+```bash
+curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=v1.37.2+k3s1 sh -s - --write-kubeconfig-mode 644
+
+sudo systemctl status k3s --no-pager
+sudo k3s kubectl get nodes -o wide
+
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown "$USER" ~/.kube/config
+kubectl get nodes
+
+# 目的：确认 k3s 的 containerd 配置里出现 nvidia
+grep -n nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+```
+
+如果 `grep` 没有输出：确认 `which nvidia-container-runtime` 在 `/usr/bin` 或 `/usr/local/bin`，再 `sudo systemctl restart k3s`；仍不行看 `journalctl -u k3s -n 100`。
+
+**6）NVIDIA device plugin + `RuntimeClass/nvidia`**
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.18.0/deployments/static/nvidia-device-plugin.yml
+
+# static manifest 不带 runtimeClassName；不 patch，device plugin 可能看不到 GPU
+kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type merge \
+  -p '{"spec":{"template":{"spec":{"runtimeClassName":"nvidia"}}}}'
+kubectl -n kube-system rollout status ds/nvidia-device-plugin-daemonset --timeout=180s
+
+kubectl get runtimeclass nvidia
+```
+
+如果 `RuntimeClass/nvidia` 不存在（k3s 没探测到），手动补：
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+EOF
+```
+
+**7）Helm（D4 的 router 用 `helm upgrade --install`）**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version --short
+```
+
+**8）namespace + GPU smoke test（2 张卡）**
+
+```bash
+kubectl create namespace d4 --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\n"}'
+# 期望 2
+
+kubectl run gpu-smoke -n d4 --restart=Never \
+  --image=nvidia/cuda:12.4.1-base-ubuntu22.04 \
+  --overrides='{"apiVersion":"v1","spec":{"runtimeClassName":"nvidia","containers":[{"name":"gpu-smoke","image":"nvidia/cuda:12.4.1-base-ubuntu22.04","command":["nvidia-smi"],"resources":{"limits":{"nvidia.com/gpu":2}}}]}}'
+
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-smoke -n d4 --timeout=180s
+kubectl logs -n d4 gpu-smoke
+kubectl delete pod -n d4 gpu-smoke
+```
+
+`kubectl logs` 里必须出现两张 **RTX 3060 12GB**；只出现一张说明 `nvidia.com/gpu` 或 device plugin 只暴露了 1 张，回第 6 步。
+
+**9）版本与功耗记录**
+
+```bash
+{
+  echo "== date"; date -Is
+  echo "== k3s"; k3s --version
+  echo "== kubectl"; kubectl version --client
+  echo "== helm"; helm version --short
+  echo "== ctk"; nvidia-ctk --version
+  echo "== gpu"; nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,power.limit \
+    --format=csv,noheader
+  echo "== gpu-summary"; nvidia-smi | sed -n '1,4p'
+} | tee ~/d4-versions.txt
+```
+
+**验证清单（缺一项不进入 §5.2）：**
+
+- [ ] `kubectl get nodes` 为 `Ready`；
+- [ ] `kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}'` 返回 `2`；
+- [ ] `gpu-smoke` 的 `nvidia-smi` 输出两张 RTX 3060 12GB；
+- [ ] `gpu-smoke` Pod 已删除；
+- [ ] `~/d4-versions.txt` 记录了 k3s / driver / CUDA / helm / kubectl / power limit。
+
+**常见失败排查：**
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `nvidia-smi: command not found` | 镜像没带 driver，或根本不是 GPU VM | `lspci` 看有没有 NVIDIA 设备；没有 GPU 就重建 VM，不要盲装数据中心的 driver |
+| `nvidia-smi` 报 `Driver/library version mismatch` | apt 把用户态驱动升级了，内核模块还是旧版 | 重启 VM 让新模块加载；确认 `nvidia-smi` 正常后再继续，并检查自动升级 timer 已关 |
+| k3s 起来但 `grep nvidia` 无输出 | toolkit 装在 k3s 之后，或 runtime 不在 PATH | `which nvidia-container-runtime`；`sudo systemctl restart k3s`；看 `journalctl -u k3s -n 100` |
+| device plugin Pod 不 Ready | 没 patch `runtimeClassName`，或镜像拉取失败 | `kubectl -n kube-system describe pod -l name=nvidia-device-plugin-ds`；补 patch 后重启 DS |
+| `RuntimeClass/nvidia` 不存在 | k3s 首次启动没探测到 nvidia runtime | 按第 6 步手动创建；`handler` 必须是 `nvidia` |
+| k3s 根本起不来 / `ps -p 1` 不是 systemd | 拿到的是普通容器，不是 VM | 停止；回 §3.1 用 `vms_enabled=true` 的 VM 重建，不要在容器里硬装 |
+| `allocatable nvidia.com/gpu` 为 0 或空 | device plugin 没注册成功 | 看 DS 日志是否有 `Registered device plugin`；确认 patch 生效；等几秒再查 |
+| `kubectl` 连不上 / node NotReady | kubeconfig 没拷、k3s 服务失败、磁盘满 | `systemctl status k3s`；`journalctl -u k3s`；`df -h /` |
+
+> 这一节只装环境，不跑 vLLM/bench。装完 `nvidia.com/gpu=2`、`RuntimeClass/nvidia`、`helm` 都验证过，再进 §5.2 下载 `Qwen/Qwen3-4B-AWQ`。
 
 ### 3.2 和 llm-d guide 默认配置的差异
 
 | 项 | guide 默认 | D4 | 影响 |
 |---|---|---|---|
-| 模型 | `Qwen/Qwen3-32B` | `Qwen/Qwen3-8B-AWQ` | 权重 5.7GB，24GB L4 放得下 |
-| TP | 2 | 1 | 每个副本 1 张卡 |
+| 模型 | `Qwen/Qwen3-32B` | `Qwen/Qwen3-4B-AWQ` | 权重约 2.7GB（4-bit），12GB 卡放得下；KV 几何与 8B 相同 |
+| TP | 2 | 1 | 每个副本 1 张 3060 |
 | 副本 | 2 | 2 | 共 2 张卡 |
-| GPU | 4×H100 80GB | 2×3090 24GB | **绝对数字不可比** |
-| `modelName` | `Qwen/Qwen3-32B` | `qwen3-8b` | 必须等于 `--served-model-name` |
+| GPU | 4×H100 80GB | 2×RTX 3060 12GB | **绝对数字不可比** |
+| `modelName` | `Qwen/Qwen3-32B` | `qwen3-4b` | 必须等于 `--served-model-name` |
 | `peakPrefillThroughput` | 15926（H100/Qwen3-32B） | 用 calibration 重测 | 不重测就相当于关掉 saturation gate |
-| 请求长度 | guide 示例 ~2k 前缀 | 1100 words ≈ 1.5k tokens | 按 L4 KV 容量设计 |
+| 请求长度 | guide 示例 ~2k 前缀 | 1100 words ≈ 1.5k tokens | 按 3060 12GB 的 KV 预算设计；32 个前缀合计约 6.8GB，接近单卡 KV 容量，正好制造 cache 竞争 |
 
 > 这张表是面试时要主动说的：**“我跑的是同一条 Well-Lit Path，但不是同一个参考配置；所以我的 P99 只和同机的 round-robin 比，不和 llm-d 公布的 H100 数字比，也不和 D1/D2 的 40W L4 比。”**
 >
-> 也正因为默认配置是 4×H100，**D4 不按 Quickstart 的默认 manifest 跑**（那会直接 Pending）；直接用 §5.3 的 2×24GB VM 适配 manifest，把 2h 的默认部署时间省给主实验。Quickstart 只读它的请求路径和 CRD（Custom Resource Definition，自定义资源定义）安装顺序。
+> 也正因为默认配置是 4×H100，**D4 不按 Quickstart 的默认 manifest 跑**（那会直接 Pending）；直接用 §5.3 的 2×3060 适配 manifest，把 2h 的默认部署时间省给主实验。Quickstart 只读它的请求路径和 CRD（Custom Resource Definition，自定义资源定义）安装顺序。
 
 ### 3.3 资源规划
 
@@ -319,7 +505,7 @@ EPP 不可用 + FailOpen：
 | EPP | 2 CPU / 4Gi | 8Gi | 单副本 |
 | Envoy | 1 CPU / 1Gi | 2Gi | sidecar |
 | bench 客户端 | 2 CPU / 4Gi | 4 CPU / 8Gi | 不用 GPU |
-| 合计 requests | ~13 CPU / ~41Gi | — | 16 vCPU / 64GB 够 |
+| 合计 requests | ~13 CPU / ~41Gi | — | 40 vCPU / 252GB 够 |
 
 ### 3.4 版本矩阵与预检
 
@@ -345,7 +531,7 @@ kubectl run vllm-help --rm -i --restart=Never -n default \
 
 ### 3.5 预算
 
-2×3090 VM on-demand 约 `$0.93–0.99/h`（含 130GB 存储，2026-11-25 实测；2×4090 同价但 R 更低）；4h 实验 + 1h 安装/排障 ≈ **`$4.7–5.0`**。D3 后 credit 约 `$14.93`，D4 后约 `$10`。记录实付，Destroy 前以 Vast 账单为准。
+2×3060 12GB VM on-demand 为 **`$0.26148/h`**（含 130GB disk，2026-11-25 实例 62540497 的实际单价）；4h 实验 + 1h 安装/排障 ≈ **`$1.31`**。D3 后 credit 约 `$14.93`，D4 后约 `$13.6`。记录实付，Destroy 前以 Vast 账单为准。
 
 ---
 
@@ -353,7 +539,7 @@ kubectl run vllm-help --rm -i --restart=Never -n default \
 
 > **4h 不够时先砍这一节。** 它不是 D4 的主菜；它回答的是“0 副本时请求怎么进来”。如果你已经做过 D3 §8.7 的 scale-to-zero 负结果，Lab 0 只是把失败变成可用的 0→1。
 >
-> 这一节默认你还在 **D3 的集群**上，Deployment 叫 `vllm-qwen3-8b`；如果你直接开 D4 新 VM，先跳过这一节，或把名字换成 D4 的 `vllm-d4`。
+> **D4 在独立 VM 上默认跳过这一节。** Lab 0 是 D3 的 0→1 延续，命令里的 `vllm-qwen3-8b` 是 D3 集群的 Deployment；只有你明确复用 D3 集群时才看它。新 VM 直接从 §5 的 Lab 1 开始，不要为了 Lab 0 去装 KEDA HTTP Add-on。
 
 ### 4.1 它回答什么
 
@@ -568,16 +754,16 @@ EPP 把请求送到已经缓存了这段前缀的副本，等价于把 `cached_t
 
 ### 5.2 前置：k3s + GPU + 权重
 
-按 D3 §5.0–§5.5 租 2×3090 VM（Vast 无 L4 VM）、装 NVIDIA toolkit、k3s、device plugin。搜 2 卡 VM：
+本次实例 **62540497 已经是 2×RTX 3060 12GB VM**（`actual_status=running`，已可 SSH 登录），不用重新创建；登录后按 **§3.1.1** 从零装 NVIDIA toolkit、k3s、device plugin。如果实例起不来、要重租，搜 2 卡 3060 VM：
 
 ```bash
-# 严格 L4：加 gpu_name=L4；没有结果再去掉这一项（4090/3090 也可，但结果必须标注）
+# 本次卡型是 RTX 3060 12GB；L4 VM 不存在（gpu_name=L4 vms_enabled=true 返回 0），不要浪费时间。
 vastai search offers -n \
-  'num_gpus=2 gpu_name=L4 gpu_ram>=24 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=130 inet_down>=500 reliability>=0.99 cpu_ram>=64' \
+  'num_gpus=2 gpu_name=RTX_3060 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=130 inet_down>=500 cpu_ram>=64' \
   -o 'dph' --storage 130 --limit 15
 ```
 
-**创建必须走 D3 §5.0 的 API + `"vm": true`**；`vastai create instance` 的 CLI payload 不带 `vm` 字段，可能起成普通容器（SSH 拒绝、k3s 起不来）。拿到 offer ID 后复用 D3 §5.0 的 `curl PUT /asks/<OFFER_ID>/`，把 `disk` 设为 130、`label` 改成 `d4-llmd`。
+**重租时必须走 D3 §5.0 的 API + `"vm": true`**；`vastai create instance` 的 CLI payload 不带 `vm` 字段，可能起成普通容器（SSH 拒绝、k3s 起不来）。拿到 offer ID 后复用 D3 §5.0 的 `curl PUT /asks/<OFFER_ID>/`，把 `disk` 设为 130、`label` 改成 `d4-llmd`。62540497 的镜像是 `docker.io/vastai/kvm:cuda-12.9.1-auto`，已经是 VM。
 
 以下命令都在 lab 仓库根目录执行：
 
@@ -595,14 +781,21 @@ kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\
 
 ```bash
 sudo mkdir -p /models
-HF_HOME=/workspace/hf huggingface-cli download Qwen/Qwen3-8B-AWQ \
-  --local-dir /models/Qwen3-8B-AWQ
+sudo apt-get install -y python3-pip
+sudo python3 -m pip install -U huggingface_hub
+
+sudo python3 - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download("Qwen/Qwen3-4B-AWQ", local_dir="/models/Qwen3-4B-AWQ")
+PY
 
 # 关键：确认没有指向 /workspace/hf 的 symlink；Pod 只挂 /models，symlink 会断
-find /models/Qwen3-8B-AWQ -type l | head
+find /models/Qwen3-4B-AWQ -type l | head
 # 如果输出非空，重新下载为实体文件，或把 /workspace/hf 一起挂进 Pod
-ls /models/Qwen3-8B-AWQ | head
+ls /models/Qwen3-4B-AWQ | head
 ```
+
+4B-AWQ 权重约 2.7GB；下载和 Pod 启动都比 8B 快，但仍要先确认 `config.json` 和 `model.safetensors` 完整。
 
 预拉镜像（可选，减少 Pod 启动时间）：
 
@@ -645,7 +838,7 @@ kubectl run curl-models --rm -i --restart=Never -n d4 \
   curl -sS http://vllm-direct:8000/v1/models
 ```
 
-期望返回 `qwen3-8b`。
+期望返回 `qwen3-4b`。
 
 ### 5.4 验证 render 与 KV events
 
@@ -662,7 +855,7 @@ kubectl run render-check --rm -i --restart=Never -n d4 \
       echo "== $ip"
       curl -sS -X POST "http://$ip:8000/v1/completions/render" \
         -H "Content-Type: application/json" \
-        -d "{\"model\":\"qwen3-8b\",\"prompt\":\"render check\",\"max_tokens\":1}" \
+        -d "{\"model\":\"qwen3-4b\",\"prompt\":\"render check\",\"max_tokens\":1}" \
         | head -c 400
       echo
     done'
@@ -705,7 +898,7 @@ helm upgrade --install d4-router \
   -f "${LAB}/scripts/d4/values-precise.yaml"
 ```
 
-> `values-precise.yaml` 里的 `modelServers.matchLabels` 必须匹配模型服务器 Pod 的 `llm-d.ai/guide=d4-prefix-routing`；`targetPorts` 必须是 8000；`modelName` 必须是 `qwen3-8b`。
+> `values-precise.yaml` 里的 `modelServers.matchLabels` 必须匹配模型服务器 Pod 的 `llm-d.ai/guide=d4-prefix-routing`；`targetPorts` 必须是 8000；`modelName` 必须是 `qwen3-4b`。
 
 检查：
 
@@ -800,14 +993,14 @@ done
 
 ### 5.8 校准 `peakPrefillThroughput`
 
-`prefix-cache-affinity-filter` 用 `peakPrefillThroughput` 把 in-flight token 负载换算成预测 TTFT。guide 的 15926 是 H100/Qwen3-32B/TP=2 的值，L4 上不能用。
+`prefix-cache-affinity-filter` 用 `peakPrefillThroughput` 把 in-flight token 负载换算成预测 TTFT。guide 的 15926 是 H100/Qwen3-32B/TP=2 的值，2×3060 + Qwen3-4B-AWQ 上不能用；**必须在本机重测，不要照抄，也不要编一个数**。
 
 ```bash
 cd "${LAB}/llm-d"
 
 GUIDE_NAME=d4-router \
 NAMESPACE=d4 \
-MODEL_NAME=qwen3-8b \
+MODEL_NAME=qwen3-4b \
 CHUNK_SIZE=4096 \
 guides/recipes/router/calibration/calibrate.sh
 ```
@@ -898,13 +1091,15 @@ helm upgrade d4-router \
 |---|---|---|
 | sessions | 32 | 32 个不同长前缀，制造 cache 竞争 |
 | turns | 4 | 每个 session 4 轮，共 128 请求 |
-| prefix words | 1100 | 约 1.5k tokens；32 个前缀约 7GB KV，L4 放得下 |
+| prefix words | 1100 | 约 1.5k tokens；32 个前缀合计约 6.8GB KV，接近单张 3060 在 0.90 下的 KV 预算 |
 | suffix words | 80 | 每轮新增约 100 tokens，模拟多轮对话 |
 | max tokens | 128 | 固定输出长度；`ignore_eos=true` |
-| concurrency | 16 | 闭环；足以制造排队，又不会把 L4 打到完全过载 |
+| concurrency | 16 | 闭环；足以制造排队，又不会把 3060 打到完全过载 |
 | seed | 42 | 请求顺序固定，四个 arm 相同 |
 
 请求顺序：每个 turn 内把 32 个 session 打乱；同一 session 的连续 turn 被其他 session 隔开。这样 random 路由会在 turn 之间丢失 session 的 prefix，而 precise 可以保持。
+
+> **3060 的 cache 竞争是设计出来的：** 32 个 session 的 KV 合计约 6.8GB。若 precise 把 32 个 session 全压到同一个副本，会逼近该卡在 `gpu-memory-utilization=0.90` 下的 KV 预算（4B 权重约 2.7GB，剩下约 7GB 给 KV/activation）；`prefix-cache-affinity-filter` 的 saturation gate 应该把一部分 session 扩散到第二个副本。这正是 §5.8 要校准 `peakPrefillThroughput` 的原因。如果两个副本预热后都能全命中，说明 cache 压力不够，可把 `max-model-len` 或 `gpu-memory-utilization` 调小（并在结果里注明）。
 
 > 对话历史里的 assistant 回复是**固定文本**，不是模型真实输出。这样四个 arm 的 prompt 完全一致，避免自回归内容把变量引进来；代价是它不完全等同真实多轮 chat，但足以测路由对 prefix cache 的影响。
 
@@ -1037,7 +1232,7 @@ python3 scripts/d4/plot_d4.py \
 
 **一句话归因模板**：
 
-> 在同一对 L4、同一模型、同一 128 条共享前缀请求下，市场默认的 optimized baseline（approx prefix + token load）TTFT P99 是 `____ ms`，precise 是 `____ ms`（`__%`），direct 是 `____ ms`；precise 的加权 prefix hit rate 从 optimized 的 `__%` 升到 `__%`。代价是 EPP `____ ms` 的固定开销（用 random arm 对比），以及 single-EPP 的可用性风险。
+> 在同一对 RTX 3060 12GB、同一 Qwen3-4B-AWQ、同一 128 条共享前缀请求下，市场默认的 optimized baseline（approx prefix + token load）TTFT P99 是 `____ ms`，precise 是 `____ ms`（`__%`），direct 是 `____ ms`；precise 的加权 prefix hit rate 从 optimized 的 `__%` 升到 `__%`。代价是 EPP `____ ms` 的固定开销（用 random arm 对比），以及 single-EPP 的可用性风险。
 
 ### 6.7 怎么判读
 
@@ -1055,7 +1250,7 @@ python3 scripts/d4/plot_d4.py \
 2. 看 `/v1/completions/render` 是否 200 且有 `token_ids`；没有就是 precise 没生效。
 3. 看 `blockSizeTokens` 是否等于 `--block-size`；不等就全 miss。
 4. 看 workload 是否真的共享前缀：32 个 session 的前缀必须不同、同一 session 的 turn 必须复用；如果每条 prompt 都不同，路由没有可用的前缀。
-5. 看 KV cache 是否大到“两个 Pod 都能缓存所有 32 个前缀”：如果 L4 的 KV 足够大，random 也会在预热后全命中，差异会被稀释。可以增加到 64 个 session，或缩短 `max-model-len`/`gpu-memory-utilization` 让 cache 更紧张。
+5. 看 KV cache 是否大到“两个 Pod 都能缓存所有 32 个前缀”：如果两张 3060 的 KV 足够大，random 也会在预热后全命中，差异会被稀释。可以增加到 64 个 session，或缩短 `max-model-len`/`gpu-memory-utilization` 让 cache 更紧张。
 
 **如果 precise 更差**：
 
@@ -1273,14 +1468,14 @@ kubectl rollout restart deploy/d4-router-epp -n d4
 
 ### 7.4 容量与成本
 
-- **每副本成本**：2×3090 VM `$/h` ÷ 2 个副本；再加 EPP/Envoy 的 CPU 成本（可忽略，但不能说 0）。
+- **每副本成本**：2×3060 VM `$0.26148/h` ÷ 2 个副本 ≈ `$0.13/h/副本`；再加 EPP/Envoy 的 CPU 成本（可忽略，但不能说 0）。
 - **容量**：满足 SLO 的并发，不是 GPU util 100%。用 D1/D2 的方法：c=16 找拐点，c=32/64 看吞吐上限；D4 只跑 c=16。
 - **EPP 容量**：单副本 EPP 的 CPU 是路由 QPS 的上限；看 `llm_d_epp_plugin_duration_seconds` 和 Pod CPU。请求率上去后，EPP 可能先于 vLLM 成为瓶颈。
-- **prefix cache 容量**：32 个 1.5k-token 前缀约 7GB KV；L4 的 KV 不是无限大。session 数增加会触发驱逐，命中率下降。
+- **prefix cache 容量**：32 个 1.5k-token 前缀约 6.8GB KV；单张 3060 的 KV 预算约 7GB，session 数增加会触发驱逐，命中率下降。
 
 ### 7.5 升级与回滚
 
-- **模型版本**：权重按版本目录存放（`/models/Qwen3-8B-AWQ-v1`、`-v2`），Deployment 用 `MODEL_PATH` 指向版本；回滚 = 改路径 + `kubectl rollout undo`。不要在运行中的目录上覆盖权重。
+- **模型版本**：权重按版本目录存放（`/models/Qwen3-4B-AWQ-v1`、`-v2`），Deployment 用 `MODEL_PATH` 指向版本；回滚 = 改路径 + `kubectl rollout undo`。不要在运行中的目录上覆盖权重。
 - **路由配置**：EPP 的 `EndpointPickerConfig` 不是 CRD，改 ConfigMap 后必须重启 EPP；`helm upgrade` 后补 `kubectl rollout restart`。
 - **滚动更新**：`maxSurge: 0`、`maxUnavailable: 1`（2 副本时一次只动一个）；`preStop 15s` + `--shutdown-timeout=45` + grace 120s，沿用 D3 Lab 4 的结论。
 - **回滚验证**：`kubectl rollout undo deploy/vllm-d4`；确认两个 Pod 都 Ready、`/v1/models` 正常、EPP subscribers 回到 2。
@@ -1347,7 +1542,7 @@ A：MoE 模型的专家并行。单机放不下全部专家时，把专家切到
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `render` 404 | `--enable-scale-out` 没开；vLLM 版本没有该端点 | 看 §3.4 `--help`；走 optimized fallback |
-| EPP 日志 `token-producer` 失败 | `modelName` 与 `--served-model-name` 不一致 | 改成 `qwen3-8b`；重启 EPP |
+| EPP 日志 `token-producer` 失败 | `modelName` 与 `--served-model-name` 不一致 | 改成 `qwen3-4b`；重启 EPP |
 | `active_subscribers=0/1` | 5556/5559 没开、topic 不匹配、NetworkPolicy | 查 `--kv-events-config`、端口、topic |
 | hit rate ~0 | `blockSizeTokens` 与 `--block-size` 不一致 | 统一 64；重启 vLLM/EPP |
 | 两个 Pod 各 50% | precise 没生效，或 workload 没有共享前缀 | 看 render/索引；改 workload |
@@ -1367,13 +1562,13 @@ A：MoE 模型的专家并行。单机放不下全部专家时，把专家切到
 
 ### 10.1 成本
 
-| 项 | 单价 | 4h 成本 |
+| 项 | 单价 | 5h 成本 |
 |---|---|---|
-| 2×3090 VM + 130GB 存储 | 约 `$0.93–0.99/h` | 约 `$3.7–4.0` |
-| 安装/排障 +1h | 同上 | 约 `$0.9–1.0` |
-| 合计 | — | **约 `$4.7–5.0`** |
+| 2×3060 12GB VM + 130GB 存储 | `$0.26148/h` | 约 `$1.31` |
+| 安装/排障 +1h | 同上 | 已含在 5h 内 |
+| 合计 | — | **约 `$1.31`** |
 
-D3 后 credit 约 `$14.93`；D4 后约 `$10`。实付以 Vast 账单为准。
+D3 后 credit 约 `$14.93`；D4 后约 `$13.6`。实付以 Vast 账单为准。
 
 ### 10.2 清理
 
@@ -1402,8 +1597,8 @@ scp root@<host>:/results/* results/d4/
 
 ### 10.3 验收清单
 
-- [ ] 2×3090 VM，`nvidia.com/gpu` allocatable = 2；记录 driver / power limit；
-- [ ] 两个 vLLM Pod 各 1 GPU，`/v1/models` 返回 `qwen3-8b`；
+- [ ] 2×3060 12GB VM（instance 62540497），`nvidia.com/gpu` allocatable = 2；记录 driver / power limit；
+- [ ] 两个 vLLM Pod 各 1 GPU，`/v1/models` 返回 `qwen3-4b`；
 - [ ] `/v1/completions/render` 返回 `token_ids`（precise 路径）；
 - [ ] EPP `active_subscribers=2`，`messages_received_total` 增长；
 - [ ] `InferencePool` + EPP + Envoy Ready；`d4-router-epp:80` 可访问；
@@ -1489,7 +1684,7 @@ results/d4/
 
 ### 10.6 B 线简历 bullet（执行后填，选 1–2 条）
 
-- 在 2×3090 上用 llm-d 1.0 / Gateway API Inference Extension 部署 precise prefix-cache routing：对比 Service round-robin，TTFT P99 从 `____ ms` 降到 `____ ms`（`__%`），加权 prefix hit rate 从 `__%` 升到 `__%`；用 EPP random 控制组分离路由算法与代理固定开销。
+- 在 2×RTX 3060 12GB 上用 llm-d 1.0 / Gateway API Inference Extension 部署 precise prefix-cache routing：对比 Service round-robin，TTFT P99 从 `____ ms` 降到 `____ ms`（`__%`），加权 prefix hit rate 从 `__%` 升到 `__%`；用 EPP random 控制组分离路由算法与代理固定开销。
 - 为 EPP / `InferencePool` 设计故障演练：EPP FailOpen/FailClose、render 404、KV events 丢失、后端不健康；记录检测指标（`active_subscribers`、`index_lookup_*`、`prefix_cache_hits/queries`）和处置顺序，明确单副本 EPP 的可用性边界。
 
 ---
@@ -1543,14 +1738,14 @@ results/d4/
 
 - §8 Q3 给“什么时候不划算”的面试口径；
 - 本节给完整拓扑、指标和决策表；
-- **不跑**：guide 默认 5 GPU，2×24GB VM 只能 1P1D；会破坏 D4 的“多副本 prefix routing”对照，且 gpt-oss-120b 放不下。
+- **不跑**：guide 默认 5 GPU；本次 62540497 只有 **2 张 RTX 3060 12GB**，连 2P+2D 的 4 张卡都不够，只能 1P1D；1P1D 没有池内路由/HA，会破坏 D4 的“多副本 prefix routing”对照，且 gpt-oss-120b 放不下。
 
 **如果要真跑，单独排一个 lab（不是 D4 的 4h）：**
 
 ```text
 4×24GB VM（4×4090，2P + 2D，每池 2 副本、TP=1）
   + LWS DisaggregatedSet
-  + NIXL over TCP（L4 无 NVLink；这就是要量的问题）
+  + NIXL over TCP（4090 无 NVLink；这就是要量的问题）
   + Qwen3-8B-AWQ
 对比：
   colocated 4 副本 vs PD 2P+2D
@@ -1558,10 +1753,10 @@ results/d4/
 记录：
   TTFT、TPOT、goodput、KV transfer bytes/s、每 1M token 成本
 预算：
-  6–8h，约 $5–8
+  5h，约 $9.3（6h 起 $11.2，超 $10 上限）
 ```
 
-> L4 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×24GB VM 上硬跑 1P1D 更有价值。完整 runbook 见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)。
+> 4090/TCP 上 PD 很可能不划算；把这个“不划算”量出来，比在 2×3060 上硬跑 1P1D 更有价值。**本次 62540497 是 2×3060，不能跑 2P+2D；4×3060 VM 在 Vast 不存在**，所以 D4.5 当前 marked **skipped/blocked**，只保留 4×4090 5h 作为可选方案。完整 runbook 见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)。
 
 **面试一句话：** “PD 的收益来自 prefill 和 decode 的 resource profile 不同；没有长 prompt、高并发、快 KV 传输和第二个池，拆池只会增加复杂度和空闲。”
 
@@ -1569,9 +1764,9 @@ results/d4/
 
 **是什么：** 面向 MoE 的专家并行：单机放不下全部专家时，把专家切到多机/多卡，用 DP/EP + DeepEP 做 all-to-all，用 NIXL 搬 KV。llm-d 的默认 wide-EP guide 是 `DeepSeek-R1-0528`、32×H200、prefill DP16 + decode DP16、每角色 2 节点，要求 full-mesh RDMA。
 
-**何时用：** MoE 模型单机放不下、需要跨节点 EP、吞吐优先；**何时不用：** dense 8B、2×24GB VM、没有 RDMA、低并发。
+**何时用：** MoE 模型单机放不下、需要跨节点 EP、吞吐优先；**何时不用：** dense 4B、2×3060 12GB、没有 RDMA、低并发。
 
-**D4 怎么覆盖：** §8 Q4 + 本节；不跑。2×24GB VM 连 dense 8B 的 EP 都不需要，更不用说 32×H200 的 DeepEP。
+**D4 怎么覆盖：** §8 Q4 + 本节；不跑。2×3060 连 dense 4B 的 EP 都不需要，更不用说 32×H200 的 DeepEP。
 
 **面试一句话：** “TP 切层、PP（Pipeline Parallelism，流水线并行）切阶段、EP 切专家；wide EP 解决 MoE 单机放不下，不是解决路由。”
 
@@ -1615,7 +1810,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 **何时用：** 长共享前缀、多轮/agentic、HBM 压力大、CPU RAM 富余；**何时不用：** 短 prompt、缓存本来就能全放 HBM、CPU RAM 不够、没有快传输。
 
-**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×24GB VM，96GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×3090 的 HBM 24GB + host RAM 有限，P2P 的默认模型也放不下。
+**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×3060 12GB，252GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×3060 的 HBM 只有 12GB/卡，P2P 的默认 gpt-oss-120b 放不下，且没有 NVLink。
 
 **面试一句话：** “tiered 是单 Pod 的 HBM→CPU/FS 扩展，P2P 是跨 Pod 从 peer 的 CPU tier 拉；两者都只在‘前缀复用 + HBM 不够’时才划算。”
 
@@ -1633,7 +1828,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 **是什么：** `DisaggregatedSet` 把 prefill/decode 两个角色作为一个版本滚动；LWS（LeaderWorkerSet）管多 Pod 组；配合 `preStop`、drain、`maxUnavailable/maxSurge`、PDB（Pod Disruption Budget，Pod 中断预算）做零停机。模型版本用独立权重目录 + Deployment revision 回滚。
 
-**D4 怎么覆盖：** D3 Lab 4 已经动手量了 `preStop`/`--shutdown-timeout`/grace 的驱逐行为（H 档）；D4 只讲 llm-d 的 `DisaggregatedSet` 和 rollout 语义（D 档）。2×24GB VM 没有空闲 GPU 做 surge，所以不跑 llm-d 零停机。
+**D4 怎么覆盖：** D3 Lab 4 已经动手量了 `preStop`/`--shutdown-timeout`/grace 的驱逐行为（H 档）；D4 只讲 llm-d 的 `DisaggregatedSet` 和 rollout 语义（D 档）。2×3060 没有空闲 GPU 做 surge，所以不跑 llm-d 零停机。
 
 **面试一句话：** “零停机的必要条件是‘有地方起新副本’；2 张卡跑 2 副本时，滚动更新只能接受一个副本短暂不可用，或者加第 3 张卡。”
 
@@ -1658,7 +1853,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 - [ ] 能画出 `client → Envoy → EPP → InferencePool → vLLM` 的请求路径；
 - [ ] 能解释 precise vs optimized，以及 KV events/render/block size 的对齐；
 - [ ] 能解释 PD 的 5-GPU 默认拓扑、NIXL、何时不划算；
-- [ ] 能解释 wide EP 的 DP/EP/DeepEP，以及为什么 2×24GB VM 不跑；
+- [ ] 能解释 wide EP 的 DP/EP/DeepEP，以及为什么 2×3060 12GB 不跑；
 - [ ] 能解释 flow control 的 priority band/fairness/saturation，以及 `InferenceObjective`；
 - [ ] 能解释 tiered vs P2P，以及各自的关键指标；
 - [ ] 能解释 KEDA + EPP 的四种扩缩信号，以及为什么 CPU HPA 是错的；
@@ -1669,16 +1864,16 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 | feature | 最小可行拓扑 | 时间 | 预算 | 建议 |
 |---|---|---|---|---|
-| PD | 4×24GB VM（4×4090），2P + 2D，TP=1 | 5h（原 6–8h 超 $10） | $9–10 | 已排：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；4×L4 VM 不存在；不要在 2×24GB VM 上做 1P1D |
+| PD | 4×24GB VM（4×4090），2P + 2D，TP=1 | 5h（6h 起超 $10） | ~$9.3 | **本次 skipped/blocked**：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；62540497 是 2×3060，不能 2P+2D；4×3060 VM 不存在；4×4090 5h 保留为可选 |
 | wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
-| flow control | 2×24GB VM + 两类客户端（premium/batch） | 3–4h | ~$4 | D5/Q2 扩展 |
-| tiered prefix cache | 2×3090 VM，96GB+ RAM，CPU tier | 3–4h | ~$4 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
+| flow control | 2×3060 12GB（现成实例）+ 两类客户端（premium/batch） | 3–4h | ~$1.0 | D5/Q2 扩展；不用另租卡 |
+| tiered prefix cache | 2×3060 12GB，252GB RAM，CPU tier 16GiB | 4–5h | ~$1.0–1.3 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
 | P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；24GB 卡上默认模型放不下 |
 | autoscaling | 4×24GB VM（2→4 副本） | 3h | ~$8 | Q2；D3 已有 0→1/1→2 基础 |
 | rollout / 零停机 | 3–4×24GB VM（留 surge） | 2h | ~$4 | D3 §9 的扩展 |
 | multi-model Gateway | 4×24GB VM（2 模型 × 2 副本） | 3–4h | ~$8 | Q2；需要 Gateway controller |
 
-> 这张表是“如果要动手”的成本，不是 D4 的 4h 计划。D4 的 4h 只做 routing/KV 主实验；其余先做到 D 档，面试够用，预算留给 Q2 的 PD/chargeback。
+> 这张表是“如果要动手”的成本，不是 D4 的 4h 计划。D4 的 4h 只做 routing/KV 主实验；其余先做到 D 档，面试够用，预算留给 Q2 的 PD/chargeback。**本次已租 2×3060 12GB（instance 62540497，`$0.26148/h`）；D4 和 D4.6 都在这台机器上做，2×3090 只是备选。**
 
 ### 11.12 本轮问答补充（2026-11-25）
 
@@ -1686,7 +1881,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 A：官方验证过的 end-to-end 部署配方，分 Foundations / Models / Operations 三条 pillar，成熟度 Tier 0–5；Tier 绑定 reference environment。D4 只跑 `precise-prefix-cache-routing`，`optimized-baseline` 作 fallback。详见 §1.0。
 
 **Q2：Vast 上能租到 2×L4 的 VM 吗？**
-A：**不能。** 2026-11-25 实测 `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，容器起不来。2 卡 VM 只有 RTX 3090/4090/5090：推荐 2×3090（UK $0.935/h、R=0.994、251GB RAM；Quebec $0.989/h、R=0.998、167GB RAM）；2×4090 只有 Quebec 一台（$0.935/h、R=0.945）。**“L4 容器”和“L4 VM”是两回事**，看 `vms_enabled`，不要拿容器 offer ID 建 VM。D4 实际用 2×3090 VM，结果标 3090；D4.5 的 4×L4 VM 同样不存在，4×4090 VM $1.87/h，6–8h 超 $10，需缩到 5h 或跳过。详见 §3.1。
+A：**不能。** 2026-11-25 实测 `gpu_name=L4 vms_enabled=true` 返回 0；L4 只有容器实例（14 个，8 个多卡：6×2 + 2×4，$0.50–1.87/h），而 k3s 需要 VM/systemd，容器起不来。2 卡 VM 当时只有 RTX 3090/4090/5090；**本次实际租的是 2×RTX 3060 12GB（instance 62540497，UK，`$0.26148/h` 含 130GB disk，40 vCPU / 252GB RAM）**，2×3090（UK $0.935/h、251GB RAM）只是备选。**“L4 容器”和“L4 VM”是两回事**，看 `vms_enabled`，不要拿容器 offer ID 建 VM。D4 用 2×3060 + Qwen3-4B-AWQ，结果标 3060；D4.5 的 4×L4 VM 同样不存在，**本次 2×3060 只有 2 卡、不能 2P+2D，D4.5 标记 skipped/blocked**，4×4090 5h（约 $9.3）保留为可选。详见 §3.1。
 
 **Q3：ZMQ 是什么？为什么 precise routing 需要它？**
 A：ZeroMQ，嵌入式消息库；vLLM PUB 5556 发 KV block 事件，EPP SUB 建精确 prefix 索引，5559 replay 补历史；PUB/SUB 不可靠，所以要监控 `active_subscribers` 和 topic/block size。详见 §5.4。
