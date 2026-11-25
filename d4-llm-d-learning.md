@@ -1201,6 +1201,31 @@ helm upgrade d4-router \
 
 它用 `approx-prefix-cache-producer`，不需要 `--enable-scale-out` 和 KV events；仍然能对比 round-robin vs EPP 的 P99 和命中率，只是“前缀位置”是估计的。结果里必须写清楚是 **optimized baseline，不是 precise**。
 
+**optimized 的最小依赖**
+
+| 组件 | 需要？ | 说明 |
+|---|---|---|
+| EPP | 要 | 路由决策本体：approx prefix + token load + saturation gate |
+| `InferencePool`（GAIE CRD） | 要 | EPP 找后端的契约 |
+| Envoy（standalone sidecar） | 要 | ext_proc 调用方，没有它 EPP 收不到请求 |
+| Gateway API / Gateway controller | 不要 | standalone 模式不用 |
+| `--enable-scale-out` + ZMQ 5556/5559 | 不要 | 那是 precise 的 KV 事件通道 |
+| vLLM `/v1/*/render` | 不要 | approx 用 EPP 自己的 tokenizer |
+| `block-size=64` 对齐 | 不要 | 同上，precise 才需要 |
+
+> optimized 少掉的正是 D4 最容易翻车的部分：KV events、render、block size 对齐。precise 跑不通时，它至少还能证明「EPP 比 round-robin 好」。
+
+**不装 llm-d 自己实现？**
+
+| 方案 | 覆盖 prefix | 覆盖 load | 缺什么 |
+|---|---|---|---|
+| Envoy/NGINX consistent hash（按前 N 个 token 哈希） | 部分 | 否 | cached_tokens 估计、saturation gate |
+| 自己写 router | 看实现 | 看实现 | tokenize、索引、健康检查、ext_proc 都要自己做 |
+| vLLM `--data-parallel-size` 内部 LB | **否** | 是（队列） | 前缀完全没覆盖，本质是 round-robin 变体 |
+| llm-d optimized | 是（近似） | 是（token 级） | — |
+
+> 自己写出来的是「另一个 router」，不是 optimized baseline：EPP 的固定开销、tokenize 路径、saturation 逻辑都不同，数字不能和 precise 直接比，§6.7 的归因会失效。而 optimized 只是换一个 `values-optimized.yaml`（一次 `helm upgrade`），DIY 的成本远高于此。
+
 > **公平性：** `optimized` 和 `precise` 要用同一个 `peakPrefillThroughput`。如果你在 §5.8 校准了 precise，把 `${LAB}/scripts/d4/values-optimized.yaml` 也改成同一个值；否则 T0 vs T1 的差异会混入 saturation gate 的差异。
 
 如果模型服务器本身就是因为 `--enable-scale-out` / `--kv-events-config` 起不来，先把 `scripts/d4/modelserver.yaml` 里的这两段删掉，再 `kubectl apply`；optimized baseline 不需要它们。
