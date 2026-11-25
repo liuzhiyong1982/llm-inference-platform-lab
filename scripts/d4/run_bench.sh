@@ -16,7 +16,7 @@ args=(
   --seed "${SEED:-42}"
   --warmup "${WARMUP:-0}"
   --pod-urls "${POD_URLS:-}"
-  --output "/results/${ARM}-run${RUN}.json"
+  --output "${OUTPUT_DIR:-/results}/${ARM}-run${RUN}.json"
 )
 
 if [[ "${FORCE_CLOSE:-0}" == "1" ]]; then

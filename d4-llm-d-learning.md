@@ -1,6 +1,6 @@
 # D4 学习文档：llm-d 前缀感知路由（2×RTX 3060 12GB + Qwen3-4B-AWQ）
 
-> 状态：**planned，硬件已就位（2026-11-24 起草；2026-11-25 按实际实例修正）**。本文按 `ai-cloud-native-week-plan.md` 的 D4 行准备：**4h、2×RTX 3060 12GB VM（instance 62540497）、跑一条 llm-d Well-Lit Path、对比 round-robin vs EPP（Endpoint Picker，端点选择器）的 P99（第 99 百分位）、留下命中率数字和 B 线故障表**；同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD（Prefill/Decode，预填充/解码）、wide EP（Expert Parallelism，专家并行）、flow control、tiered/P2P、autoscaling、batch、rollout、API）。实例已租（`actual_status=running`，2026-11-25 已可 SSH 登录），文档、manifest、benchmark 脚本已就绪，**尚未跑实验**；所有“实测”表都是待填模板。
+> 状态：**executed（2026-11-25）**。2×RTX 3060 12GB VM（instance 62540497）、llm-d `v1.0.0`、Qwen3-4B-AWQ、2 副本 TP=1；`direct` / `optimized` / `precise` 各 3 轮、`random` 1 轮，全部 `errors=0`。主结果：TTFT P99 direct 4475ms → optimized 3459ms（−22.7%）→ precise 3969ms；成本 4.54h ≈ $1.19。D4.6（tiered KV）随后在同一台 VM 上执行，见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)。本文同时用 §1.4 + 附录 A 覆盖 llm-d 核心 feature（PD（Prefill/Decode，预填充/解码）、wide EP（Expert Parallelism，专家并行）、flow control、tiered/P2P、autoscaling、batch、rollout、API）。
 >
 > 计划位置：`ai-cloud-native-week-plan.md` 的 **D4（llm-d 日）** 与 **Q2（Gateway/路由）**；B 线学习表见该文件 §3，llm-d 四问见 §6。
 >
@@ -243,7 +243,7 @@ D4 的“cover”分四档，避免把“读过”说成“跑过”：
 | **T0** | EPP / `InferencePool` / Gateway API Inference Extension | **D4 主实验 + §7** | 4h 内 | 运维图 + 故障表 |
 | **T1** | precise prefix-cache routing | **D4 主实验** | 4h 内 | P99 + hit rate |
 | **T1** | PD 分离 | **D4.5** | 本次 skipped/blocked | 4×3060 VM 不存在；2×3060 只有 2 卡；4×4090 5h 为可选项 |
-| **T1** | tiered KV cache / offload | **D4.6** | 4–5h / ~$1.0–1.3 | tiered vs HBM-only；`kv_offload_*` 证据 |
+| **T1** | tiered KV cache / offload | **D4.6** | 已执行 1.1h / ~$0.29 | tiered vs HBM-only；store 28GiB/轮、load 31GiB/轮、CPU hit 51–53%、P50 −77%、goodput +36% |
 
 > **为什么 T1 不都塞进 D4 的 4h：** T0 是“装一个 router 就能量”的入口；T1 的 PD 要第二个池 + NIXL，tiered 要 CPU tier + 额外内存。它们各自是独立拓扑/资源实验，塞进 4h 会把 D4 的“只改路由”变量弄脏。D4 的 4h 只做 T0 + T1-A；T1-B/C 单独排，但属于同一个学习计划。
 
@@ -1097,6 +1097,8 @@ precise 路由不是“开个 EPP 就行”，它依赖 vLLM 暴露三样东西�
 | `--disable-log-requests` | 关逐请求日志，避免压测时 I/O 拖慢 |
 
 > **bench 还需要一个 env：`VLLM_SERVER_DEV_MODE=1`。** vLLM 0.34 把 `/reset_prefix_cache` 放在 dev mode 后面；不开的话 bench 每轮 reset 都是 **404**，上一轮的 cache 不清，arm 之间互相污染。`modelserver.yaml` 已加，**仅 lab 使用**，生产不要开。
+>
+> D4.6 起 `bench_prefix.py` 统一请求 `/reset_prefix_cache?reset_external=true`（清 connector 管理的 CPU tier）；D4 没有 connector，该参数是 no-op，不影响 D4 结果。
 
 **vLLM 与 EPP 的对齐关系**（任何一项不一致，precise 都不报错，只会静默 miss）：
 
@@ -2284,7 +2286,7 @@ scp root@<host>:/results/* results/d4/
 - [ ] §1.4 的 19 项核心 feature 至少到 D 档；
 - [ ] 附录 A 的 PD/wide EP/flow control/tiered/P2P/autoscaling/batch/rollout/API 每项能讲 1 分钟；
 - [x] `results/d4/` 提交 + push；成本 `$1.19` 记录；
-- [ ] VM Destroy（D4.6 未决定，当前仍 running）。
+- [x] D4.6 完成；VM Destroy（2026-11-25，结果已 scp + commit）。
 
 ### 10.4 结果目录
 
@@ -2481,7 +2483,7 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 
 **何时用：** 长共享前缀、多轮/agentic、HBM 压力大、CPU RAM 富余；**何时不用：** 短 prompt、缓存本来就能全放 HBM、CPU RAM 不够、没有快传输。
 
-**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×3060 12GB，98GB RAM，CPU tier 16GiB），跑 tiered vs HBM-only；P2P 是 D 档，不在 D4.6 范围。2×3060 的 HBM 只有 12GB/卡，P2P 的默认 gpt-oss-120b 放不下，且没有 NVLink。
+**D4 怎么覆盖：** precise HBM 索引是 H 档；tiered 另排 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（2×3060 12GB，98GB RAM，CPU tier 16GiB），**2026-11-25 已执行**：P50 1434→336ms（−77%）、goodput +36%、整体 P99 不变（冷启动主导）；P2P 是 D 档，不在 D4.6 范围。2×3060 的 HBM 只有 12GB/卡，P2P 的默认 gpt-oss-120b 放不下，且没有 NVLink。
 
 **面试一句话：** “tiered 是单 Pod 的 HBM→CPU/FS 扩展，P2P 是跨 Pod 从 peer 的 CPU tier 拉；两者都只在‘前缀复用 + HBM 不够’时才划算。”
 
@@ -2538,13 +2540,13 @@ llm_d_epp_prefix_indexer_size / hit_ratio（按 plugin_name 分 tier）
 | PD | 4×24GB VM（4×4090），2P + 2D，TP=1 | 5h（6h 起超 $10） | ~$9.3 | **本次 skipped/blocked**：[`d4.5-pd-lab.md`](./d4.5-pd-lab.md)；62540497 是 2×3060，不能 2P+2D；4×3060 VM 不存在；4×4090 5h 保留为可选 |
 | wide EP | 32×H200 + RDMA | — | — | 只读；个人预算不现实 |
 | flow control | 2×3060 12GB（现成实例）+ 两类客户端（premium/batch） | 3–4h | ~$1.0 | D5/Q2 扩展；不用另租卡 |
-| tiered prefix cache | 2×3060 12GB，98GB RAM，CPU tier 16GiB | 4–5h | ~$1.0–1.3 | 已排：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；先量 HBM 命中率 |
+| tiered prefix cache | 2×3060 12GB，98GB RAM，CPU tier 16GiB | 1.1h | ~$0.29 | **已执行**：[`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)；HBM 命中 6% → CPU hit 52%，P50 −77%，P99 不变 |
 | P2P KV sharing | 2×H100/H200，NIXL | — | — | 只读；24GB 卡上默认模型放不下 |
 | autoscaling | 4×24GB VM（2→4 副本） | 3h | ~$8 | Q2；D3 已有 0→1/1→2 基础 |
 | rollout / 零停机 | 3–4×24GB VM（留 surge） | 2h | ~$4 | D3 §9 的扩展 |
 | multi-model Gateway | 4×24GB VM（2 模型 × 2 副本） | 3–4h | ~$8 | Q2；需要 Gateway controller |
 
-> 这张表是“如果要动手”的成本，不是 D4 的 4h 计划。D4 的 4h 只做 routing/KV 主实验；其余先做到 D 档，面试够用，预算留给 Q2 的 PD/chargeback。**本次已租 2×3060 12GB（instance 62540497，`$0.26148/h`）；D4 和 D4.6 都在这台机器上做，2×3090 只是备选。**
+> 这张表是“如果要动手”的成本，不是 D4 的 4h 计划。D4 的 4h 只做 routing/KV 主实验；其余先做到 D 档，面试够用，预算留给 Q2 的 PD/chargeback。**本次曾租 2×3060 12GB（instance 62540497，`$0.26148/h`）；D4 和 D4.6 都在这台机器上做，2×3090 只是备选；D4.6 完成后已 Destroy。**
 
 ### 11.12 本轮问答补充（2026-11-25）
 

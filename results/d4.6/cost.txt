@@ -1,0 +1,12 @@
+D4.6 cost record (UTC 2026-11-25)
+
+Instance: Vast.ai 62540497, 2x RTX 3060 12GB, $0.2615/h
+nvidia-smi driver: 580.178.04, power limit 170W
+VM age at 21:53 UTC: 6.33h (uptime 379.75 min)
+Instance total: 6.33h x $0.2615/h = ~$1.66
+D4.6 window: 20:49-21:55 UTC (~1.1h) = ~$0.29 incremental
+Assumed starting balance $15.00 -> remaining ~$13.34
+
+D4 (earlier on the same instance): 4.54h, $1.19 recorded in results/d4/summary.md.
+The gap between D4's 4.54h and the instance's 6.33h is the D4 FailOpen/debug
+tail after the D4 summary plus D4.6.

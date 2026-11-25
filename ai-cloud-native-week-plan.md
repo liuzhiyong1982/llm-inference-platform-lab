@@ -358,7 +358,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 
 **冲刺周的唯一目标：一个 repo、核心 4 个数字 + 2 个对比、一张 llm-d 对比图、一次 10 分钟讲解。** 不是"学完什么"。
 
-预算：GPU 租用 ≈ $10–15（按秒计费，D1/D2 用单卡 L4 容器；D4 用 2×3060 12GB VM，`$0.2615/h`，约 5h）。Azure 侧配额为 0，不要等审批。**Vast 没有 L4 VM，D4 不要按 2×L4 VM 租。**
+预算：GPU 租用 ≈ $10–15（按秒计费，D1/D2 用单卡 L4 容器；D4 用 2×3060 12GB VM，`$0.2615/h`，D4 + D4.6 约 6.3h / ~$1.66）。Azure 侧配额为 0，不要等审批。**Vast 没有 L4 VM，D4 不要按 2×L4 VM 租。**
 
 | 天 | 时长 | 干什么 | 当天必须落地 |
 |---|---|---|---|
@@ -376,7 +376,7 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 >
 > **可选 D4.5（Q2，不是 D4 的 4h 内）：** PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；**本次 instance 62540497 是 2×3060 12GB，只有 2 张卡、不能 2P+2D；4×3060 VM 不存在，D4.5 标记 skipped/blocked**；4×4090 5h（约 $9.3，硬上限 $10）保留为可选，以后余额和需求都够再决定。文档见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（**本次不执行**），manifest/脚本在 `scripts/d4.5/`。它回答“4 个完整副本 vs 2 prefill+2 decode，在 4090/TCP 上 PD 是否值得”，不保证 PD 赢。
 >
-> **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5（本次 skipped/blocked）；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**未执行**，2×3060 12GB + Qwen3-4B-AWQ，4–5h，约 $1.0–1.3）。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
+> **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5（本次 skipped/blocked）；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**2026-11-25 已执行**，2×3060 12GB + Qwen3-4B-AWQ，16GiB CPU tier，3+3 轮，增量 ~$0.29）：P50 **1434→336ms（−77%）**、goodput **0.81→1.10 req/s（+36%）**、整体 P99 不变（冷启动主导），复用请求 P50 **1444→289ms（−80%）**。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
 
 ### D3 / D5 的 B 线讲法
 

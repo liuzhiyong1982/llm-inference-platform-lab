@@ -63,6 +63,9 @@ spec:
               value: "1"
             - name: DO_NOT_TRACK
               value: "1"
+            # 让 /reset_prefix_cache 可用；它会清空 HBM 前缀缓存 + CPU tier。
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
           ports:
             - name: http
               containerPort: 8000

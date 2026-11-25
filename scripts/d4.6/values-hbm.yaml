@@ -45,6 +45,9 @@ router:
               prefixMatchInfoProducerName: gpu-prefix-cache-producer
           - type: approx-prefix-cache-producer
             name: gpu-prefix-cache-producer
+            parameters:
+              # 必须和 vLLM --block-size 一致，否则哈希边界不同、lookup 静默 miss。
+              blockSizeTokens: 64
           - type: queue-scorer
           - type: kv-cache-utilization-scorer
           - type: prefix-cache-scorer

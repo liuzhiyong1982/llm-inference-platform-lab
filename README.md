@@ -170,6 +170,24 @@ llm-d precise prefix-cache routing：2×RTX 3060 12GB、Qwen3-4B-AWQ、2 副本 
 
 **成本**：Vast 计费 4.54h × `$0.26148/h` ≈ **$1.19**。
 
+## D4.6 结果（2026-11-25）
+
+llm-d tiered KV cache：2×RTX 3060 12GB、Qwen3-4B-AWQ、2 副本、每副本 **16GiB CPU tier**（vLLM `OffloadingConnector`）、32 session × 4 turn、c=4。完整 setup、失败记录和成本见 [`results/d4.6/summary.md`](./results/d4.6/summary.md)，执行步骤见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)。
+
+| arm | n | TTFT P50 | TTFT P95 | TTFT P99 | TPOT P95 | output tok/s | goodput |
+|---|---|---|---|---|---|---|---|
+| HBM-only | 3 | 1434 ms | 2479 ms | 2737 ms | 36.7 ms | 115.3 | 0.810 |
+| **HBM + 16GiB CPU tier** | 3 | **336 ms** | 2505 ms | 2561 ms | **25.9 ms** | **161.5** | **1.105** |
+| 变化 | — | **−76.6%** | +1.0% | −6.4% | −29.4% | **+40.0%** | **+36.4%** |
+
+![D4.6 tiered vs HBM](./results/d4.6/d4.6-tiered-vs-hbm.png)
+
+**归因**：tiered 的复用请求（turn 2–4）P50 从 **1444ms 降到 289ms（−80%）**；每轮 store 28GiB / load 31GiB，CPU hit 51–53%，preemption 0。但 25% 的请求是 turn 1 冷启动，整体 P95/P99 由冷 prefill 决定，所以 tiered **不是 P99 银弹**——它是吞吐/中位数优化（goodput +36%）。
+
+**方法学坑**：`/reset_prefix_cache` 默认 `reset_external=false`，只清 HBM、不清 CPU tier；第一次 tiered 三轮因 warm-cache 污染，CPU hit 从 59%→95%、P99 假性降到 1.4s。改成 `?reset_external=true` 重跑后，CPU hit 稳定在 51–53%。详见 D4.6 文档 §7.7。
+
+**成本**：D4.6 增量 ~1.1h × `$0.2615/h` ≈ **$0.29**；实例累计 ~6.3h ≈ **$1.66**（含 D4 收尾）。
+
 ## 下一步
 
 D2 的参数对比、概念问答（chunked prefill / batched tokens / prefix caching / AWQ）和执行步骤见 `d2-vllm-tuning-runbook.md`。
@@ -180,6 +198,6 @@ D4（llm-d 路由）的学习文档见 [`d4-llm-d-learning.md`](./d4-llm-d-learn
 
 D4.5（可选，Q2）：PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；**本次 instance 62540497 是 2×3060 12GB，只有 2 卡，不能 2P+2D；4×3060 VM 不存在，D4.5 标记 skipped/blocked**；4×4090 5h（约 $9.3）保留为可选；见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（本次不执行）。
 
-D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，4–5h，约 $1.0–1.3**；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（未执行；D4 已完成，可复用当前 VM）。
+D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，16GiB CPU tier，3+3 轮**；**2026-11-25 已执行**，P50 1434→336ms（−77%）、goodput 0.81→1.10 req/s（+36%）、整体 P99 不变（冷启动主导）；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md) 与 `results/d4.6/`。
 
 技术栈调研与 D1–D5 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/Argo CD/GPU Operator/安全/OpenCost；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线。

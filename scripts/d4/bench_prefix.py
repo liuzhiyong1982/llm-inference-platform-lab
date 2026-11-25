@@ -141,7 +141,10 @@ def stats(values: list[float]) -> dict[str, float | None]:
 
 async def reset_caches(http: aiohttp.ClientSession, pod_urls: list[str]) -> None:
     for base in pod_urls:
-        url = base.rstrip("/") + "/reset_prefix_cache"
+        # reset_external=true also clears the connector-managed tier (e.g. the
+        # CPU tier behind vLLM's OffloadingConnector). Without it, only the HBM
+        # prefix cache is reset, so a second run starts with a warm CPU tier.
+        url = base.rstrip("/") + "/reset_prefix_cache?reset_external=true"
         try:
             async with http.post(
                 url, timeout=aiohttp.ClientTimeout(total=15)
