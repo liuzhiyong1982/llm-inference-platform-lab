@@ -1,0 +1,145 @@
+# D5 Kyverno CEL policies.
+#
+# Kyverno 1.20 removed the legacy kyverno.io ClusterPolicy engine. These are
+# CEL-based policies in the stable policies.kyverno.io/v1 API.
+#
+# Apply after Kyverno is installed:
+#   kubectl apply -f scripts/d5/30-kyverno-policies.yaml
+#
+# The two ValidatingPolicies enforce the Kueue contract at the API entrance:
+#   - GPU Jobs/Pods must carry kueue.x-k8s.io/queue-name=<namespace>
+#   - GPU Jobs/Pods must use one of the approved priority classes
+#   - (suspend is intentionally not validated here: Kueue's mutating webhook
+#      sets it before validating webhooks run; see the doc's CEL pitfalls)
+# The MutatingPolicy adds a cost-center label for chargeback experiments.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: d5-gpu-job-policy
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.template.spec.containers +
+        (has(object.spec.template.spec.initContainers)
+          ? object.spec.template.spec.initContainers
+          : [])
+    - name: isGPU
+      expression: >-
+        variables.containers.exists(c,
+          (has(c.resources) && has(c.resources.limits) &&
+           'nvidia.com/gpu' in c.resources.limits) ||
+          (has(c.resources) && has(c.resources.requests) &&
+           'nvidia.com/gpu' in c.resources.requests))
+    - name: labels
+      expression: >-
+        has(object.metadata.labels) ? object.metadata.labels : {}
+  validations:
+    - expression: >-
+        !variables.isGPU ||
+        ('kueue.x-k8s.io/queue-name' in variables.labels)
+      message: >-
+        GPU Job must carry label kueue.x-k8s.io/queue-name=<localqueue>.
+    - expression: >-
+        !variables.isGPU ||
+        (variables.labels['kueue.x-k8s.io/queue-name'] == object.metadata.namespace)
+      message: >-
+        GPU Job queue label must equal its namespace (team-a -> team-a).
+    - expression: >-
+        !variables.isGPU ||
+        (has(object.spec.template.spec.priorityClassName) &&
+         object.spec.template.spec.priorityClassName in ['gpu-high', 'gpu-low'])
+      message: >-
+        GPU Job must set spec.template.spec.priorityClassName to gpu-high or gpu-low.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: d5-gpu-pod-policy
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        (has(object.spec.initContainers) ? object.spec.initContainers : [])
+    - name: isGPU
+      expression: >-
+        variables.containers.exists(c,
+          (has(c.resources) && has(c.resources.limits) &&
+           'nvidia.com/gpu' in c.resources.limits) ||
+          (has(c.resources) && has(c.resources.requests) &&
+           'nvidia.com/gpu' in c.resources.requests))
+    - name: labels
+      expression: >-
+        has(object.metadata.labels) ? object.metadata.labels : {}
+    - name: queueName
+      expression: >-
+        ('kueue.x-k8s.io/queue-name' in variables.labels)
+          ? variables.labels['kueue.x-k8s.io/queue-name']
+          : (('kueue.x-k8s.io/local-queue-name' in variables.labels)
+              ? variables.labels['kueue.x-k8s.io/local-queue-name']
+              : '')
+  validations:
+    - expression: >-
+        !variables.isGPU || variables.queueName != ''
+      message: >-
+        GPU Pod must carry kueue.x-k8s.io/queue-name (bare Pod) or
+        kueue.x-k8s.io/local-queue-name (Kueue-managed Pod).
+    - expression: >-
+        !variables.isGPU || (variables.queueName == object.metadata.namespace)
+      message: >-
+        GPU Pod queue label must equal its namespace.
+    - expression: >-
+        !variables.isGPU ||
+        (has(object.spec.priorityClassName) &&
+         object.spec.priorityClassName in ['gpu-high', 'gpu-low'])
+      message: >-
+        GPU Pod must set priorityClassName to gpu-high or gpu-low.
+---
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: d5-gpu-cost-center
+spec:
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        gpu-pool: d5
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  mutations:
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >-
+          has(object.metadata.labels) ?
+          [JSONPatch{op: "add", path: "/metadata/labels/cost-center", value: "shared-gpu"}] :
+          [JSONPatch{op: "add", path: "/metadata/labels", value: {"cost-center": "shared-gpu"}}]

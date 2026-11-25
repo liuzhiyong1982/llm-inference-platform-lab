@@ -200,4 +200,6 @@ D4.5（可选，Q2）：PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；*
 
 D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，16GiB CPU tier，3+3 轮**；**2026-11-25 已执行**，P50 1434→336ms（−77%）、goodput 0.81→1.10 req/s（+36%）、整体 P99 不变（冷启动主导）；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md) 与 `results/d4.6/`。
 
+D5（B 线，3h）：Kueue 两团队 GPU 配额 + Kyverno CEL 准入；**2026-11-25 准备，尚未在 Vast 执行**；本地 kind 已用假 `nvidia.com/gpu=2` 验证配额/排队/抢占和 CEL 策略；文档见 [`d5-kueue-kyverno-lab.md`](./d5-kueue-kyverno-lab.md)，manifest 在 `scripts/d5/`；Kueue `v0.20.7`、Kyverno `1.20.0`，旧 `ClusterPolicy` 在 1.20 已停止执行。
+
 技术栈调研与 D1–D5 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/Argo CD/GPU Operator/安全/OpenCost；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线。

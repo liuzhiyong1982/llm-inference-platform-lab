@@ -377,6 +377,8 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 > **可选 D4.5（Q2，不是 D4 的 4h 内）：** PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；**本次 instance 62540497 是 2×3060 12GB，只有 2 张卡、不能 2P+2D；4×3060 VM 不存在，D4.5 标记 skipped/blocked**；4×4090 5h（约 $9.3，硬上限 $10）保留为可选，以后余额和需求都够再决定。文档见 [`d4.5-pd-lab.md`](./d4.5-pd-lab.md)（**本次不执行**），manifest/脚本在 `scripts/d4.5/`。它回答“4 个完整副本 vs 2 prefill+2 decode，在 4090/TCP 上 PD 是否值得”，不保证 PD 赢。
 >
 > **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5（本次 skipped/blocked）；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**2026-11-25 已执行**，2×3060 12GB + Qwen3-4B-AWQ，16GiB CPU tier，3+3 轮，增量 ~$0.29）：P50 **1434→336ms（−77%）**、goodput **0.81→1.10 req/s（+36%）**、整体 P99 不变（冷启动主导），复用请求 P50 **1444→289ms（−80%）**。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
+>
+> D5 的学习文档见 [`d5-kueue-kyverno-lab.md`](./d5-kueue-kyverno-lab.md)（**2026-11-25 准备，尚未在 Vast 执行**；本地 kind 已用假 `nvidia.com/gpu=2` 验证 Kueue 配额/排队/抢占 + Kyverno CEL）：3h、2×3060 12GB、约 `$0.9`；Kueue `v0.20.7`、Kyverno `1.20.0`、k3s `v1.37.2+k3s1`；manifest 在 `scripts/d5/`。**版本坑：Kueue 0.20 只服务 `kueue.x-k8s.io/v1beta2`；Kyverno 1.20 已停止执行 `kyverno.io/v1 ClusterPolicy`，策略统一用 `policies.kyverno.io/v1` 的 CEL 类型。** D5 是 B 线“配额/准入/审计”主证据；执行后把两条拒绝日志、配额表和抢占证据补进 README。
 
 ### D3 / D5 的 B 线讲法
 

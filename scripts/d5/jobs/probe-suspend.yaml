@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: team-a-probe-suspend
+  namespace: team-a
+  labels:
+    kueue.x-k8s.io/queue-name: team-a
+    team: team-a
+spec:
+  suspend: false
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        team: team-a
+    spec:
+      restartPolicy: Never
+      priorityClassName: gpu-low
+      containers:
+        - name: holder
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
