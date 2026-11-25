@@ -1953,112 +1953,116 @@ Service d4-router-epp:80
 
 > **FailOpen / FailClose 是什么：** 它们是“依赖组件（EPP）不可用时，数据面（Envoy）怎么办”的两种策略。
 >
-> - **FailOpen（失败时放行）**：ext_proc 调不通 EPP 时，Envoy 不阻断请求，按自己的负载均衡把请求发给后端（通常是 headless Service 里的某个 vLLM）。**可用性优先**，但丢掉 prefix/load 感知，可能打到冷副本或热点副本。
-> - **FailClose（失败时阻断）**：ext_proc 调不通 EPP 时，Envoy 直接返回 503/关闭请求。**路由正确性/控制优先**，但 EPP 成了硬依赖，可用性下降。
->
-> 记法：**FailOpen = 失败时把路打开（继续放行）；FailClose = 失败时把路关掉（拒绝请求）**。类比门禁断电：FailOpen 是门自动打开，FailClose 是门自动锁死。
+> - **FailOpen（失败时放行）**：ext_proc 调不通 EPP 时，Envoy 不阻断请求，按自己的负载均衡把请求发给后端（`inference_pool_fallback` / headless Service）。**可用性优先**，但丢掉 prefix/load 感知。
+> - **FailClose（失败时阻断）**：ext_proc 调不通 EPP 时，Envoy 直接返回 503。**路由正确性/控制优先**，但 EPP 成了硬依赖。
 
 | 故障 | 现象 | 检查 | 根因 | 处置 | 用户影响 |
 |---|---|---|---|---|---|
-| EPP 挂（FailOpen） | 请求仍 200，但 P99/分布变化 | `kill -STOP 1` 暂停 EPP 容器；发 20 条 | Envoy ext_proc 超时后走 headless Service | `kill -CONT 1` 恢复；观察索引重建 | 短暂无 cache 路由，不应 5xx |
-| EPP 挂（FailClose） | 503/超时 | `helm upgrade ... --set router.proxy.failOpen=false`；再暂停 EPP | standalone Envoy 的 failOpen 关了 | 恢复 EPP；`--set router.proxy.failOpen=true` | 请求失败 |
+| EPP 不可达（FailOpen） | `GET /v1/models` 200；**`POST /v1/completions` 400（body 丢失）** | iptables 拒绝 9002；发 20 条 | ext_proc 消费了 body，fallback 无法重放 | 恢复 9002；长期靠 EPP HA / FailClose | 连接不断，但 **LLM 请求不可用** |
+| EPP 卡住（SIGSTOP） | 请求挂起，**不会 fail-open** | `kill -STOP` 后发 1 条，`curl -m 15` | `message_timeout: 1000s`；卡住不是连接失败 | `kill -CONT`；不要让 EPP 进入 D 状态 | 超时，比“挂掉”更糟 |
+| EPP 挂（FailClose） | 503（或 Pod 被摘除后 connection refused） | `router.proxy.failOpen=false` + 拒绝 9002 | standalone Envoy 的 failOpen 关了 | 恢复 EPP；`--set router.proxy.failOpen=true` | 请求失败 |
 | render 404 | 请求 200，但 hit rate ~0 | 直接 POST `/v1/completions/render` | `--enable-scale-out` 没开；`modelName` 不匹配 | 修 vLLM flag/模型名；重启 EPP | 退化成普通负载均衡 |
 | KV events 没进来 | `active_subscribers` < 2；索引空 | EPP metrics；`kubectl exec` 测 5556 | 端口/topic/NetworkPolicy 错 | 修 `--kv-events-config`；重启 Pod/EPP | 无 prefix 路由 |
 | block size 不匹配 | hit rate ~0，索引有数据但 lookup miss | 对比 `--block-size` 与 `blockSizeTokens` | 两处不一致 | 统一成 64；重启 | 无收益 |
 | 后端 Pod 不健康 | 5xx/超时；endpoint 被摘除 | `kubectl get pods`；EPP logs | OOM/模型加载失败/GPU 错 | 重启/替换；看 D3 Lab 4 的排空 | 在途请求可能失败 |
 | 前缀不命中 | P99 与 direct 持平 | 看 workload 前缀是否重复 | 请求本身没有共享前缀 | 改 workload；不是 bug | 无收益 |
-| EPP 单副本重启 | FailOpen 下短暂延迟升高；FailClose 下 503 | `kill -STOP/-CONT` 或 rollout restart | 单副本 + 索引重建 | 生产用 HA/快照；D4 接受 | 短暂降级 |
+| EPP 单副本重启 | FailOpen 下短暂延迟升高；FailClose 下 503 | `rollout restart` | 单副本 + 索引重建 | 生产用 HA/快照；D4 接受 | 短暂降级 |
 
-> **sidecar 模式的坑：** standalone 默认把 Envoy 和 EPP 放在同一个 Pod。`kubectl scale deploy/d4-router-epp --replicas=0` 会把 Envoy 一起删掉，客户端直接 `connection refused`——这不是 FailOpen，是数据面整体消失。要测 FailOpen/FailClose，必须让 Envoy 活着、只让 EPP 不响应：用 `kill -STOP 1` 暂停 EPP 容器，测完 `kill -CONT 1`。EPP 的 readiness 默认是 `periodSeconds: 2` × `failureThreshold: 3`，几秒内就会把 Pod 从 Service 摘掉；而 Envoy 的 ext_proc 超时是 10s，可能还没 fail-open 就被摘掉。**所以下面的测试先把 readiness 的 failureThreshold 调到 60（约 120s），测完再改回 3。** 如果要更长的故障窗口/更接近生产，把 chart 切成 `router.proxy.mode=service`，让 proxy 独立于 EPP。
+> **实测更正（2026-11-25）：** chart 的 Envoy 配置是 `failure_mode_allow: true`，但 `message_timeout: 1000s`。因此：
+>
+> 1. **EPP 卡住（SIGSTOP）不会 fail-open**：Envoy 会一直等，客户端超时。只有 EPP **不可达（connection refused）** 才会立即走 fallback。
+> 2. 即使 fail-open 成功，chart 用的是 `request_body_mode: FULL_DUPLEX_STREAMED`：请求体已被 ext_proc 消费，fallback 无法重放。**`GET /v1/models` 返回 200，`POST /v1/completions` 返回 400（body missing）**。
+>
+> 所以 FailOpen 保的是“连接层可用”，**不是“LLM 请求可用”**。这一点比“FailOpen 是否 200”重要得多。
 
-> **两个 fail-open 开关，别混：**
-> - `InferencePool.spec.endpointPickerRef.failureMode` 是 **Gateway/EPP 契约**；支持它的 Gateway 会读。
-> - `router.proxy.failOpen` 是 **standalone Envoy 自己的行为**。standalone chart 的 `values.yaml` 默认是 `true`；helper 的兜底在 sidecar 模式是 `false`，但 chart 默认值会覆盖它。D4 的 `values-precise.yaml` 仍显式写 `failOpen: true`，避免依赖默认值。
->
-> 所以 standalone 的 FailClose 测试要改 `router.proxy.failOpen`，只 patch `InferencePool.failureMode` 不一定生效。
->
-> FailOpen 也不是“瞬间绕过”：Envoy 的 ext_proc 有超时（chart 默认 10s），所以暂停 EPP 后前几条请求可能先等超时，P99 会升高但不应 5xx。记录时把“等待超时”与“请求失败”分开。
->
-> FailClose 下，如果 readiness 先把 Pod 摘掉，客户端看到的可能是 `connection refused` 而不是 503；两者都属于 fail-close，但要在结果里分开写，别把 connection refused 当成“fail-open 失败”。
+**测试方法：用 iptables 在 EPP Pod 的 netns 里拒绝 9002**
 
-**FailOpen 测试命令**：
+这样做是“connection refused”，不是“进程卡住”；不需要改 Deployment，也不会删掉 Envoy sidecar。
 
 ```bash
-# 1. 临时放宽 EPP readiness，避免 Pod 在 ext_proc 超时前被摘掉
-kubectl patch deploy d4-router-epp -n d4 --type=strategic -p '
-spec:
-  template:
-    spec:
-      containers:
-      - name: epp
-        readinessProbe:
-          failureThreshold: 60
-'
-kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+EPP_POD=$(kubectl get pods -n d4 -o name | grep d4-router-epp | head -1 | cut -d/ -f2)
+CID=$(k3s crictl pods --name "$EPP_POD" -q | head -1)
+NETNS_PID=$(k3s crictl inspectp "$CID" | jq -r '.info.pid')
+echo "pod=$EPP_POD cid=$CID pid=$NETNS_PID"
 
-EPP_POD=$(kubectl get pods -n d4 -o jsonpath='{.items[*].metadata.name}' \
-  | tr ' ' '\n' | grep '^d4-router-epp' | head -1)
-echo "$EPP_POD"
-
-# 2. 暂停 EPP 进程（容器还在，Envoy sidecar 还在）
-# 如果 EPP 不是 PID 1，先 `ps -eo pid,args | grep -E 'epp|endpoint-picker'` 找 PID
-kubectl exec -n d4 "$EPP_POD" -c epp -- kill -STOP 1
-
-# 3. 发 20 条请求，记录 200/503/延迟；期望仍 200（ext_proc 超时后 fail-open）
-# 4. 恢复
-kubectl exec -n d4 "$EPP_POD" -c epp -- kill -CONT 1
-
-# 5. 把 readiness 改回默认
-kubectl patch deploy d4-router-epp -n d4 --type=strategic -p '
-spec:
-  template:
-    spec:
-      containers:
-      - name: epp
-        readinessProbe:
-          failureThreshold: 3
-'
-kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+# 拒绝 Envoy -> EPP 的 9002（模拟 EPP 不可达）
+nsenter -t "$NETNS_PID" -n iptables -A OUTPUT -p tcp --dport 9002 -j REJECT
+nsenter -t "$NETNS_PID" -n iptables -L OUTPUT -n | grep 9002
 ```
 
-如果容器里没有 `kill` 或权限不够，用 `sh -c`：
+用 **Pod 的 8081** 做 port-forward（不要用 Service：readiness 6s 就会把 Pod 摘掉，pod-forward 不受影响）：
 
 ```bash
-kubectl exec -n d4 "$EPP_POD" -c epp -- sh -c 'kill -STOP 1'
-kubectl exec -n d4 "$EPP_POD" -c epp -- sh -c 'kill -CONT 1'
+kubectl port-forward -n d4 "pod/$EPP_POD" 18080:8081 >/tmp/pf-failopen.log 2>&1 &
+PF=$!; sleep 3
 ```
 
-如果 `CONT` 失败，直接删 Pod 让它重启：
+**发 20 条请求，记录状态码和延迟**
 
 ```bash
-kubectl delete pod -n d4 "$EPP_POD"
-kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+echo "GET /v1/models:"
+curl -s -m 5 -o /dev/null -w "%{http_code} %{time_total}\n" \
+  http://127.0.0.1:18080/v1/models
+
+echo "POST /v1/completions × 20:"
+for i in $(seq 1 20); do
+  curl -s -m 10 -o /dev/null -w "%{http_code} %{time_total}\n" \
+    -X POST http://127.0.0.1:18080/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen3-4b","prompt":"failopen test","max_tokens":8,"temperature":0}'
+done | tee /tmp/failopen.txt
+
+awk '{c[$1]++; if ($2 > m) m=$2} END {for (k in c) printf "%s=%d ", k, c[k]; printf "max=%.3fs\n", m}' /tmp/failopen.txt
 ```
 
-**FailClose 测试**：
+本次实测：
+
+```text
+GET  /v1/models          200  0.022s
+POST /v1/completions ×20 400  0.022s（20/20）
+```
+
+20 条都是 400，不是 200——这是 chart 的 fail-open 丢失 body，不是 EPP 没挂。
+
+**对照：SIGSTOP 卡住 EPP**
 
 ```bash
-# standalone Envoy 的 failOpen 改成 false（standalone chart 默认是 true；
-# values-precise.yaml 也显式写了 true；这里用 --set 覆盖）
+EPP_HOST_PID=$(ps -eo pid,args | awk '/[e]pp --pool-name d4-router/{print $1; exit}')
+kill -STOP "$EPP_HOST_PID"
+curl -s -m 15 -o /dev/null -w "%{http_code} %{time_total}\n" \
+  -X POST http://127.0.0.1:18080/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-4b","prompt":"hang test","max_tokens":4,"temperature":0}'
+kill -CONT "$EPP_HOST_PID"
+```
+
+预期 `000 15.0`（curl 超时），不是 200/503。**必须在 30s 内 `-CONT`**，否则 liveness（3×10s）会重启容器。
+
+**恢复**
+
+```bash
+nsenter -t "$NETNS_PID" -n iptables -D OUTPUT -p tcp --dport 9002 -j REJECT
+kill $PF 2>/dev/null
+```
+
+> 忘了删规则，路由会一直走 fallback；删掉规则或重启 Pod 即可恢复。
+
+**FailClose 测试**
+
+```bash
 helm upgrade d4-router \
   oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
   -n d4 --version v1.0.0 \
   -f "${LAB}/llm-d/guides/recipes/router/base.values.yaml" \
   -f "${LAB}/scripts/d4/values-precise.yaml" \
   --set router.proxy.failOpen=false
-
 kubectl rollout restart deploy/d4-router-epp -n d4
 kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
+```
 
-# Pod 会被重建，重新取名字
-EPP_POD=$(kubectl get pods -n d4 -o jsonpath='{.items[*].metadata.name}' \
-  | tr ' ' '\n' | grep '^d4-router-epp' | head -1)
+Pod 会重建，重新取 `EPP_POD / CID / NETNS_PID`，再加 9002 的 REJECT，重复上面的 20 条 POST。预期 **503**（连接拒绝时立即返回，不等 10s）。测完恢复：
 
-# 再暂停 EPP；重复 20 条请求；期望 503
-kubectl exec -n d4 "$EPP_POD" -c epp -- kill -STOP 1
-
-# 恢复
-kubectl exec -n d4 "$EPP_POD" -c epp -- kill -CONT 1
+```bash
 helm upgrade d4-router \
   oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
   -n d4 --version v1.0.0 \
@@ -2066,18 +2070,20 @@ helm upgrade d4-router \
   -f "${LAB}/scripts/d4/values-precise.yaml" \
   --set router.proxy.failOpen=true
 kubectl rollout restart deploy/d4-router-epp -n d4
+kubectl rollout status deploy/d4-router-epp -n d4 --timeout=120s
 ```
 
-> `InferencePool` 的实际名字是 `d4-router`（chart 用 release name），可以用 `kubectl get inferencepool -n d4` 确认。`InferencePool.failureMode` 留给 Gateway Mode 的面试讲法；standalone 的实测以 `router.proxy.failOpen` 为准。
+> `InferencePool` 的实际名字是 `d4-router`（chart 用 release name）。`InferencePool.failureMode` 留给 Gateway Mode 的面试讲法；standalone 的实测以 `router.proxy.failOpen` 为准。
 
-**故障实测记录**：
+**故障实测记录**
 
-| 故障 | 请求数 | 200 | 503/5xx | P99 (ms) | 恢复时间 | 备注 |
-|---|---:|---:|---:|---:|---|---|
-| FailOpen（暂停 EPP 10s） | 20 | | | | | |
-| FailClose（暂停 EPP 10s） | 20 | | | | | |
-| EPP Deployment 整体 0 副本 | 20 | | | | | 这是数据面整体消失，不是 FailOpen |
-| render 404（错误 modelName） | 20 | | | | | hit rate 应掉到 ~0 |
+| 故障 | 请求数 | 200 | 400 | 503/5xx | P99 (ms) | 恢复时间 | 备注 |
+|---|---:|---:|---:|---:|---:|---|---|
+| FailOpen：iptables 拒绝 9002 | 20 | 0 | **20** | 0 | ~22 | 删规则即恢复 | GET 200；POST body 丢失 |
+| EPP SIGSTOP（卡住） | 1 | 0 | 0 | 0 | 超时 15s | `-CONT` | 不触发 fail-open |
+| FailClose：拒绝 9002 | 0 | — | — | — | — | — | 未跑 |
+| EPP Deployment 整体 0 副本 | 0 | — | — | — | — | — | 未跑；数据面整体消失 |
+| render 404（错误 modelName） | 0 | — | — | — | — | — | 未跑 |
 
 ### 7.4 容量与成本
 
@@ -2226,7 +2232,7 @@ scp root@<host>:/results/* results/d4/
 
 ### 10.3 验收清单
 
-> **2026-11-25 执行状态**：主实验完成；**§7.3 故障表未跑**（时间盒），B 线讲法和 §1.4/附录 A 的 D 档验收未逐项做。
+> **2026-11-25 执行状态**：主实验完成；**§7.3 只跑了 FailOpen**（结论：GET 200 / POST 400，body 丢失）；FailClose、B 线讲法和 §1.4/附录 A 的 D 档验收未逐项做。
 
 - [x] 2×3060 12GB VM（instance 62540497），`nvidia.com/gpu` allocatable = 2；driver 580.178.04 / 170W；
 - [x] 两个 vLLM Pod 各 1 GPU，`/v1/models` 返回 `qwen3-4b`；
@@ -2238,7 +2244,7 @@ scp root@<host>:/results/* results/d4/
 - [x] `direct` / `precise` 各 3 轮；`optimized` 3 轮；`random` 1 轮；
 - [x] 每轮前 reset cache（`VLLM_SERVER_DEV_MODE=1`）；precise 每轮前重启 EPP；
 - [x] P99 表 + `d4-ttft.png`；per-arm hit rate 未采样（客户端 JSON 不含 `cached_tokens`）；
-- [ ] 故障表至少跑 EPP FailOpen；时间够再跑 FailClose / render 404；
+- [x] FailOpen 已跑（iptables 拒绝 9002）：GET 200、POST 400（body 丢失）；FailClose / render 404 未跑；
 - [ ] B 线运维图 + 10 分钟讲法；
 - [ ] §1.4 的 19 项核心 feature 至少到 D 档；
 - [ ] 附录 A 的 PD/wide EP/flow control/tiered/P2P/autoscaling/batch/rollout/API 每项能讲 1 分钟；

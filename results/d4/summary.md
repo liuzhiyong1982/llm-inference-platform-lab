@@ -40,6 +40,7 @@
 - tmux 旧 pane 不继承 `/etc/environment`：`tmux setenv -g LAB /root/lab` 只对新 pane 生效，当前 pane 要 `export`。
 - 2 sessions 的 smoke 出现 5/5 分流，不是故障：一个 session 粘一个 Pod；判据是 `decisions_total{outcome="sticky"}` +8。
 - 未逐 arm 采样 per-pod prefix hit rate（客户端 JSON 不含 cached_tokens）；结论使用 TTFT/goodput，不依赖该表。
+- FailOpen 实测：chart 的 Envoy `message_timeout: 1000s`，SIGSTOP 卡住不会 fail-open；用 iptables 拒绝 9002 制造 connection refused 后，`GET /v1/models` 200，但 `POST /v1/completions` 400（ext_proc 已消费 body，fallback 无法重放）。
 
 ## Cost
 
