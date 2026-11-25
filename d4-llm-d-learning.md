@@ -299,6 +299,27 @@ EPP 不可用 + FailOpen：
 >
 > `vms_enabled=false` 的 VM 再便宜也不能用；同一 GPU 的 VM 和容器 offer ID 不同。创建后先 `nvidia-smi` 确认两张卡都在，再装 k3s。62540497 的镜像是 `docker.io/vastai/kvm:cuda-12.9.1-auto`（VM，不是容器）。
 
+**为什么是「2 副本 × TP=1」，不是「单实例 × TP=2」**
+
+TP（Tensor Parallelism，张量并行）换单请求延迟，副本换总吞吐：
+
+| 维度 | TP=2 单实例 | 2 副本 × TP=1 |
+|---|---|---|
+| 单请求 TTFT/TPOT | 更快（前向拆到 2 卡） | 不变 |
+| 总吞吐 | 约 1 卡的 1.2–1.5 倍 | 约 2 倍 |
+| 故障域 | 整个进程组，一崩全崩 | 挂一个还剩 50% |
+| 扩容粒度 | 2 卡一跳 | 1 卡一跳 |
+| 前缀缓存 | 一个逻辑 cache，天然全局命中 | 两个独立 cache，互相看不见 |
+
+1. **4B-AWQ 放得下**：权重约 2.7GB，12GB 卡还剩约 7GB 给 KV；TP 的第一价值（单卡装不下才拆）用不上。
+2. **3060 没有 NVLink**：TP 每层 all-reduce 只能走 PCIe，decode 小 batch 下固定开销占比高，实际加速远低于 2 倍；副本之间零通信。
+3. **SLO 是 P99 + 高并发**：c=16/64 的瓶颈是单位时间 token 数，不是单流 TPOT；2 副本 = 2 份算力 + 2 份 batch 槽位。
+4. **D4 要测路由，路由的前提是「有得选」**：单实例只有一个 KV cache，`direct`/`optimized`/`random`/`precise` 会退化成同一个数；2 副本才有「A 有、B 没有」这个状态。
+
+> **vLLM 自带的 DP 为什么也不用：** `--data-parallel-size 2` 是「引擎内核复制、API server 共享」，内部 LB 只看各引擎的 running/waiting 队列，**不看 KV cache**（官方文档原话：could be made more sophisticated in future by incorporating KV cache aware logic），EPP 也插不进去。D4 的 2 副本是**外部 DP**：两个独立 Pod，路由权在 Envoy + EPP 手里。
+
+> 选型法则：**取满足「放得下 + 单卡延迟达 SLO」的最小 TP，剩下的卡全做副本。** TP 与副本正交（可 `TP=2 × DP=2`）；本例两条都满足 → TP=1。换成 Qwen3-32B-AWQ（约 18GB）单卡装不下 → 必须 TP=2，那时也做不了路由实验。
+
 ### 3.1.1 从零安装环境（每台新 VM 独立）
 
 **最快路径（推荐）**
