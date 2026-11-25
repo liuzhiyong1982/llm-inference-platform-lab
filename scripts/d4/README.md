@@ -32,7 +32,18 @@ ssh -i ~/.ssh/<key> -p <port> root@<host> 'bash /root/bootstrap-vm.sh'
 
 - 日志：`/var/log/d4-bootstrap.log`。
 - 失败先看日志；`nvidia-smi` 报 `Driver/library version mismatch` 时脚本 **exit 2**，先 **reboot** 再重跑，不要 kill 进程或删 lock。
-- 可选 env：`NAMESPACE`、`K3S_VERSION`、`DEVICE_PLUGIN_VERSION`、`CUDA_SMOKE_IMAGE`、`LOG_FILE`、`APT_LOCK_TIMEOUT`（`bash bootstrap-vm.sh --help` 有完整列表）。
+- 可选 env：`EXPECTED_GPUS`（默认 2）、`EXPECTED_GPU_NAME`（默认空，任意 NVIDIA 卡）、`NAMESPACE`、`K3S_VERSION`、`DEVICE_PLUGIN_VERSION`、`CUDA_SMOKE_IMAGE`、`LOG_FILE`、`APT_LOCK_TIMEOUT`（`bash bootstrap-vm.sh --help` 有完整列表）。
+
+```bash
+# 1 卡实验
+sudo EXPECTED_GPUS=1 NAMESPACE=d1 bash bootstrap-vm.sh
+
+# 4 卡 PD lab
+sudo EXPECTED_GPUS=4 NAMESPACE=d45 bash bootstrap-vm.sh
+
+# 只接受 3060；不写 EXPECTED_GPU_NAME 则任意 NVIDIA 卡
+sudo EXPECTED_GPUS=2 EXPECTED_GPU_NAME='RTX 3060' bash bootstrap-vm.sh
+```
 - **不要先手工 `apt-get install` 再跑脚本**：脚本会在任何 apt 之前停自动升级；顺序反了会再次遇到 lock/driver mismatch。
 
 ## 最短路径

@@ -310,7 +310,7 @@ scp -i ~/.ssh/<key> -P <port> scripts/d4/bootstrap-vm.sh root@<host>:/root/
 ssh -i ~/.ssh/<key> -p <port> root@<host> 'bash /root/bootstrap-vm.sh'
 ```
 
-脚本会自动：先停 `unattended-upgrades` / `apt-daily`，再等 apt/dpkg lock，装 NVIDIA toolkit、k3s、device plugin、Helm，最后建 `d4` namespace 并跑 2 卡 `gpu-smoke`。日志在 `/var/log/d4-bootstrap.log`，版本记录写到 `~/d4-versions.txt`。
+脚本默认 **`EXPECTED_GPUS=2`、不限定 GPU 型号**；换 1/4 卡或换卡型时不用改脚本，传 `EXPECTED_GPUS=1/4`、`EXPECTED_GPU_NAME='RTX 3090'` 即可。它会先停 `unattended-upgrades` / `apt-daily`，再等 apt/dpkg lock，装 NVIDIA toolkit、k3s、device plugin、Helm，最后建 `d4` namespace 并跑 `EXPECTED_GPUS` 张卡的 `gpu-smoke`。日志在 `/var/log/d4-bootstrap.log`，版本记录写到 `~/d4-versions.txt`。
 
 > 如果 `nvidia-smi` 报 `Driver/library version mismatch`，脚本会 **exit 2** 并提示先 reboot；按提示 reboot 后重跑同一条命令。不要 kill 进程、不要删 lock、不要让脚本自动 reboot。
 

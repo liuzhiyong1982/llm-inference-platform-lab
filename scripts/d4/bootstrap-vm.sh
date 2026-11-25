@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# D4 VM bootstrap: Ubuntu 22.04 + 2 GPU -> k3s + NVIDIA runtime/device plugin + Helm.
+# GPU lab VM bootstrap: Ubuntu 22.04 + N GPU -> k3s + NVIDIA runtime/device plugin + Helm.
 #
 # 设计前提：
 #   - 每天实验独立；不假设上一次的 k3s / namespace / device plugin / 镜像缓存还在。
@@ -19,6 +19,8 @@ NAMESPACE="${NAMESPACE:-d4}"
 K3S_VERSION="${K3S_VERSION:-v1.37.2+k3s1}"
 DEVICE_PLUGIN_VERSION="${DEVICE_PLUGIN_VERSION:-v0.18.0}"
 CUDA_SMOKE_IMAGE="${CUDA_SMOKE_IMAGE:-nvidia/cuda:12.4.1-base-ubuntu22.04}"
+EXPECTED_GPUS="${EXPECTED_GPUS:-2}"
+EXPECTED_GPU_NAME="${EXPECTED_GPU_NAME:-}"
 LOG_FILE="${LOG_FILE:-/var/log/d4-bootstrap.log}"
 APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-900}"
 
@@ -26,32 +28,41 @@ CURRENT_STEP="init"
 
 usage() {
   cat <<'EOF'
-D4 VM bootstrap (Ubuntu 22.04 + systemd + cgroup v2 + 2 GPU)
+GPU lab VM bootstrap (Ubuntu 22.04 + systemd + cgroup v2 + N GPU)
 
 Usage:
   sudo bash bootstrap-vm.sh
   sudo bash bootstrap-vm.sh --help
 
 Environment overrides:
-  NAMESPACE              Kubernetes namespace for the D4 bench/smoke Pod (default: d4)
+  EXPECTED_GPUS          expected GPU count, positive integer (default: 2)
+  EXPECTED_GPU_NAME      optional case-insensitive substring, e.g. "RTX 3060";
+                         empty means any NVIDIA GPU (default: empty)
+  NAMESPACE              Kubernetes namespace for the bench/smoke Pod (default: d4)
   K3S_VERSION            k3s version to install if k3s is absent (default: v1.37.2+k3s1)
   DEVICE_PLUGIN_VERSION  NVIDIA k8s-device-plugin version (default: v0.18.0)
   CUDA_SMOKE_IMAGE       GPU smoke-test image (default: nvidia/cuda:12.4.1-base-ubuntu22.04)
   LOG_FILE               bootstrap log path (default: /var/log/d4-bootstrap.log)
   APT_LOCK_TIMEOUT       max seconds to wait for apt/dpkg locks (default: 900)
 
+Examples:
+  sudo bash bootstrap-vm.sh
+  sudo EXPECTED_GPUS=1 NAMESPACE=d1 bash bootstrap-vm.sh
+  sudo EXPECTED_GPUS=4 NAMESPACE=d45 bash bootstrap-vm.sh
+  sudo EXPECTED_GPUS=2 EXPECTED_GPU_NAME='RTX 3060' bash bootstrap-vm.sh
+
 What it does:
   1. preflight: root/systemd/cgroup v2/Ubuntu 22.04
   2. stop + disable + mask unattended-upgrades / apt-daily (before any apt-get)
   3. wait for apt/dpkg locks (never deletes locks)
-  4. GPU preflight (2 GPUs, nvidia-smi) + install base packages
+  4. GPU preflight (EXPECTED_GPUS, nvidia-smi) + install base packages
   5. install NVIDIA container toolkit
   6. configure standalone containerd if present; otherwise rely on k3s embedded containerd
   7. install/start k3s, copy kubeconfig, wait for node Ready
   8. verify k3s containerd config contains nvidia
   9. install NVIDIA device plugin, patch runtimeClassName, ensure RuntimeClass/nvidia
  10. install Helm if absent
- 11. create namespace, check nvidia.com/gpu=2, run a 2-GPU gpu-smoke Pod
+ 11. create namespace, check nvidia.com/gpu=EXPECTED_GPUS, run an EXPECTED_GPUS-GPU gpu-smoke Pod
  12. write ~/d4-versions.txt and print next steps
 
 It does NOT install/upgrade the NVIDIA driver, run vLLM/bench, or reboot the VM.
@@ -165,6 +176,11 @@ case "${1:-}" in
     ;;
 esac
 
+if ! [[ "$EXPECTED_GPUS" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'EXPECTED_GPUS must be a positive integer, got: %s\n' "$EXPECTED_GPUS" >&2
+  exit 64
+fi
+
 if [[ "$(id -u)" -ne 0 ]]; then
   printf '[bootstrap] ERROR: must run as root (id -u = %s)\n' "$(id -u)" >&2
   exit 1
@@ -176,7 +192,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 trap 'on_err' ERR
 
-log "D4 VM bootstrap start (pid $$, log $LOG_FILE)"
+log "GPU lab VM bootstrap start (pid $$, log $LOG_FILE)"
 
 # ---------------------------------------------------------------------------
 # 1. preflight
@@ -286,7 +302,7 @@ done
 # ---------------------------------------------------------------------------
 # 4. GPU preflight + base packages
 # ---------------------------------------------------------------------------
-step "4/12 GPU preflight + 基础包"
+step "4/12 GPU preflight (${EXPECTED_GPUS} GPU) + 基础包"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   die "nvidia-smi 不存在" \
@@ -306,13 +322,22 @@ fi
 
 if (( smi_rc != 0 )); then
   die "nvidia-smi 执行失败（exit ${smi_rc}）" \
-    "确认这是 2 GPU 的 VM；必要时重建，不要自动装/换 driver" 1
+    "确认 GPU 数与 EXPECTED_GPUS 一致；必要时重建，不要自动装/换 driver" 1
 fi
 
 mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
-if (( ${#gpu_names[@]} != 2 )); then
-  die "nvidia-smi 看到 ${#gpu_names[@]} 张 GPU，期望 2 张" \
-    "D4 需要 2 个副本、每副本 1 卡；换 2 卡 VM"
+if (( ${#gpu_names[@]} != EXPECTED_GPUS )); then
+  die "nvidia-smi 看到 ${#gpu_names[@]} 张 GPU，期望 ${EXPECTED_GPUS} 张" \
+    "按实验拓扑设置 EXPECTED_GPUS（当前 ${EXPECTED_GPUS}）；不要为了凑数改脚本"
+fi
+
+if [[ -n "$EXPECTED_GPU_NAME" ]]; then
+  for gpu_name in "${gpu_names[@]}"; do
+    if [[ "${gpu_name,,}" != *"${EXPECTED_GPU_NAME,,}"* ]]; then
+      die "GPU 型号不匹配：看到 '${gpu_name}'，期望包含 '${EXPECTED_GPU_NAME}'" \
+        "按实际卡型设置 EXPECTED_GPU_NAME，或留空表示任意 NVIDIA GPU"
+    fi
+  done
 fi
 log "GPU: ${gpu_names[*]}"
 
@@ -506,24 +531,24 @@ kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -
 gpu_alloc=""
 for ((i = 0; i < 60; i++)); do
   gpu_alloc="$(kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}' 2>/dev/null || true)"
-  if [[ "$gpu_alloc" == "2" ]]; then
+  if [[ "$gpu_alloc" == "$EXPECTED_GPUS" ]]; then
     break
   fi
   sleep 3
 done
 
-if [[ "$gpu_alloc" != "2" ]]; then
+if [[ "$gpu_alloc" != "$EXPECTED_GPUS" ]]; then
   kubectl get nodes -o wide || true
   kubectl -n kube-system get pods -l name=nvidia-device-plugin-ds -o wide || true
-  die "nvidia.com/gpu allocatable=${gpu_alloc:-<empty>}，期望 2" \
+  die "nvidia.com/gpu allocatable=${gpu_alloc:-<empty>}，期望 ${EXPECTED_GPUS}" \
     "看 device plugin 日志；确认 runtimeClassName patch 生效、DS Pod Ready"
 fi
-log "nvidia.com/gpu allocatable=2"
+log "nvidia.com/gpu allocatable=${EXPECTED_GPUS}"
 
 kubectl delete pod -n "$NAMESPACE" gpu-smoke --ignore-not-found --wait=true --timeout=60s
 
-overrides="$(jq -nc --arg img "$CUDA_SMOKE_IMAGE" \
-  '{apiVersion:"v1",spec:{runtimeClassName:"nvidia",containers:[{name:"gpu-smoke",image:$img,command:["bash","-c","nvidia-smi; nvidia-smi -L"],resources:{limits:{"nvidia.com/gpu":2}}}]}}')"
+overrides="$(jq -nc --arg img "$CUDA_SMOKE_IMAGE" --argjson gpus "$EXPECTED_GPUS" \
+  '{apiVersion:"v1",spec:{runtimeClassName:"nvidia",containers:[{name:"gpu-smoke",image:$img,command:["bash","-c","nvidia-smi; nvidia-smi -L"],resources:{limits:{"nvidia.com/gpu":$gpus}}}]}}')"
 
 kubectl run gpu-smoke -n "$NAMESPACE" --restart=Never \
   --image="$CUDA_SMOKE_IMAGE" --overrides="$overrides"
@@ -548,11 +573,11 @@ printf '%s\n' "$smoke_log"
 gpu_lines="$(printf '%s\n' "$smoke_log" | grep -cE 'GPU [0-9]+:' || true)"
 kubectl delete pod -n "$NAMESPACE" gpu-smoke --ignore-not-found || true
 
-if [[ "$gpu_lines" != "2" ]]; then
-  die "gpu-smoke 看到 ${gpu_lines} 张 GPU，期望 2 张" \
-    "确认 Pod 请求了 nvidia.com/gpu=2，且 device plugin allocatable=2"
+if [[ "$gpu_lines" != "$EXPECTED_GPUS" ]]; then
+  die "gpu-smoke 看到 ${gpu_lines} 张 GPU，期望 ${EXPECTED_GPUS} 张" \
+    "确认 Pod 请求了 nvidia.com/gpu=${EXPECTED_GPUS}，且 device plugin allocatable=${EXPECTED_GPUS}"
 fi
-log "gpu-smoke 看到 2 张 GPU"
+log "gpu-smoke 看到 ${EXPECTED_GPUS} 张 GPU"
 
 # ---------------------------------------------------------------------------
 # 12. version record
@@ -563,7 +588,7 @@ VERSION_FILE="/root/d4-versions.txt"
 cuda_version="$(nvidia-smi | grep -oE 'CUDA Version: [0-9.]+' | head -1 || true)"
 
 {
-  echo "# D4 VM bootstrap versions"
+  echo "# GPU lab VM bootstrap versions"
   echo "date: $(date -Is)"
   echo "host: $(hostname)"
   echo "os: ${PRETTY_NAME:-unknown}"
