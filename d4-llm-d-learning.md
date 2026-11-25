@@ -2522,6 +2522,19 @@ A：能，分内部 DP（一个 endpoint，vLLM 自己分发）、Hybrid LB（�
 **Q8：PP 一定要跨物理节点吗？**
 A：不必。PP 按层切，同机也能跑；但它只在 stage 边界传 activation，通信量远小于 TP 的每层 all-reduce，所以实践公式是 `TP = 每节点 GPU 数，PP = 节点数`。代价是 **pipeline bubble**，低并发时延迟更差，所以 PP 是吞吐/容量工具。**PP 也不等于 P/D 分离**：前者是一个实例在层维度串行，后者是 prefill/decode 两个服务。详见 §1.0.2。
 
+**Q9：precise 不可用时，llm-d 会自动降级到 optimized 吗？**
+A：**不会。** `optimized` 是另一套静态插件配置（`approx-prefix-cache-producer`），不是 `precise` 的运行时 fallback。llm-d 的降级分三层，行为各不相同：
+
+| 故障 | 自动行为 | 实际相当于 |
+|---|---|---|
+| EPP Pod 挂 / 不可达 | `failureMode: FailOpen` 时 Envoy 按自己的 LB 转发；`FailClose` 时 503 | **random / direct**，不是 optimized |
+| `render` 404 / tokenizer 失败 | EPP 仍返回 200，但 `token-producer` 拿不到 token IDs，没有前缀信息 | 只剩 `token-load-scorer`，**load-aware** |
+| ZMQ 断流 / 索引为空 | 查找全 miss，`prefix-cache-affinity-filter` 不淘汰候选 | 同上，**load-aware** |
+
+要真正切到 `optimized`，必须手动 `helm upgrade ... -f values-optimized.yaml`（或用两个 pool + HTTPRoute 权重切流）。插件是静态装配，不做运行时热切换。
+
+> 运维含义：**最危险的是「静默降级」**——EPP 进程还活着、请求全 200，但已经不看前缀了。监控要看 `active_subscribers`、`token_producer_render_duration_seconds_count{result!="success"}`、`index_lookup_hits_total`、`decisions_total{outcome="sticky"}` 的比例；只看 5xx 发现不了。FailOpen 保的是可用性，不是路由质量。
+
 ---
 
 ## 12. Sources
