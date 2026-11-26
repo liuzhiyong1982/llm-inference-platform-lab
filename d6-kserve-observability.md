@@ -670,6 +670,37 @@ kubectl apply --server-side -f \
 
 ## 7. Lab 2：raw Deployment 控制组
 
+### 7.0 前置：创建 namespace 和模型 PVC
+
+Lab 1 只安装 KServe 控制面，**不会创建业务 namespace**。raw Deployment 和 ISVC 都放在 `kserve-test`，所以先执行：
+
+```bash
+cd /root
+kubectl apply -f scripts/d6/00-namespace.yaml
+kubectl apply -f scripts/d6/05-models-pvc.yaml
+
+kubectl -n kserve-test get pvc
+# 期望：d6-models-pvc   Bound
+```
+
+如果 PVC 不是 `Bound`，先确认模型目录存在：
+
+```bash
+ls -la /workspace/models/Qwen3-8B-AWQ/config.json
+```
+
+`05-models-pvc.yaml` 把宿主机的 `/workspace/models` 挂成 PV，ISVC 再用 `pvc://d6-models-pvc/Qwen3-8B-AWQ` 读取。模型没下载时，先补：
+
+```bash
+mkdir -p /workspace/models
+HF_HOME=/workspace/hf hf download Qwen/Qwen3-8B-AWQ \
+  --local-dir /workspace/models/Qwen3-8B-AWQ
+```
+
+> 顺序不能反：`00-namespace.yaml` → `05-models-pvc.yaml` → `10-raw-vllm.yaml`。直接 apply raw 会报 `namespaces "kserve-test" not found`。
+
+然后才执行：
+
 ```bash
 kubectl apply -f scripts/d6/10-raw-vllm.yaml
 kubectl -n kserve-test rollout status deploy/vllm-raw --timeout=15m
@@ -1050,6 +1081,8 @@ kubectl -n kserve-test get deploy,svc,gateway,httproute,inferencepool
 
 | 现象 | 可能原因 | 排查 |
 |---|---|---|
+| `namespaces "kserve-test" not found` | 忘了创建业务 namespace | `kubectl apply -f scripts/d6/00-namespace.yaml` |
+| `persistentvolumeclaim "d6-models-pvc" not found` | 跳过 PVC 步骤 | `kubectl apply -f scripts/d6/05-models-pvc.yaml`，确认 PVC `Bound` |
 | `InferenceService` READY=False | cert-manager/Gateway/storage initializer | `kubectl describe isvc`，看 Events |
 | `/mnt/models` 不存在 | 建在 `kserve` 控制面 namespace | 换 `kserve-test` |
 | 401 / gated model | HF token 未配 | `hf-secret` + `ClusterStorageContainer` |
