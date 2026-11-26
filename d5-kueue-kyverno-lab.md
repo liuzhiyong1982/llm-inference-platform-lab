@@ -194,6 +194,43 @@ kubectl apply Job
 
 这张表就是 D5 的排障顺序：**先看对象有没有创建，再看 Workload 有没有 quota，再看 Pod 有没有调度。**
 
+### 3.1.1 DRA 与 D5 的边界（为什么本 lab 不用 DRA）
+
+DRA（Dynamic Resource Allocation）是 Kubernetes 1.34 GA 的设备分配 API（`resource.k8s.io/v1`），解决的是“**Pod 要什么样的设备**”，不是“谁能拿到配额”。
+
+| 对象 | 作用 |
+|---|---|
+| `DeviceClass` | 设备类别，如 `gpu.nvidia.com`（以驱动发布为准） |
+| `ResourceSlice` | 驱动发布“本节点有哪些设备、什么属性”：显存、型号、MIG profile、拓扑 |
+| `ResourceClaim` | Pod 的设备申请：要几张、什么属性 |
+| `ResourceClaimTemplate` | 每个 Pod 自动生成 claim，适合多副本 |
+
+D5 用的是老模型：NVIDIA device plugin 把 GPU 暴露成 extended resource `nvidia.com/gpu`，Pod 只写一个整数。两者差别：
+
+| 维度 | D5：device plugin | DRA |
+|---|---|---|
+| 资源声明 | `nvidia.com/gpu: 1` | `ResourceClaimTemplate` + `DeviceClass` |
+| 选卡依据 | 数量 + `nodeSelector` / affinity | 设备属性：显存、型号、MIG、拓扑 |
+| MIG / 共享 | 靠驱动暴露不同 resource name | 原生 partitionable devices、设备共享 |
+| 配额 | Kueue 按 `nvidia.com/gpu` 计数 | Kueue DRA 集成按设备数或 counter 计 |
+| Pod 调度 | kube-scheduler + device plugin | kube-scheduler 的 DRA 插件 |
+
+**为什么 D5 不用 DRA：**
+
+1. **时间盒只有 3h。** 装 NVIDIA DRA driver、确认 `ResourceSlice`、写 `ResourceClaimTemplate`，会挤掉配额、抢占和两条拒绝日志。
+2. **2×3060 不支持 MIG。** DRA 最有价值的“按显存/分区选卡”没有素材；两张同型号卡只能演示“申请一张整卡”。
+3. **问题正交。** D5 回答“谁能拿卡、拿不到怎么排队”；DRA 回答“拿哪张卡”。DRA 不提供 quota、queue、preemption。
+4. **版本不是障碍。** k3s 1.37 + Kueue 0.20.7 已支持 DRA（Kueue 0.18 起集成 beta，0.19 起相关 feature gate 默认开启），但“能跑”不等于“3h 内值得跑”。
+
+**最容易混的两个词：**
+
+- Kueue `ResourceFlavor`：**配额维度**，按节点 label/taint 划分“这批配额对应哪些节点”，不是设备；
+- DRA `DeviceClass`：**设备类别**，描述“有哪些卡、什么属性”。
+
+**如果要把 D5 扩成 DRA 版：** 需要 K8s ≥1.34、NVIDIA DRA driver、`ResourceClaimTemplate`，并把 `20-kueue.yaml` 里按 `nvidia.com/gpu` 计的配额换成 DRA 设备计数或 counter；至少多 1.5–2h。建议单独做 Q3 的 GPU Operator/MIG lab，不要塞进 D5。
+
+**面试一句话：** “D5 用 device plugin + extended resource，因为实验目标是配额和准入；DRA 是设备分配层的升级，解决 MIG、设备属性、拓扑，不解决队列和抢占。两者可以组合，Kueue 0.18+ 已经能按 DRA 设备计配额。”
+
 ### 3.2 Kueue 对象模型
 
 | 对象 | 作用域 | 一句话 |

@@ -85,7 +85,7 @@ A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/�
 
 **PR / citizenship：** PR 在加拿大自由工作，但没有美国工作授权。现在能走加拿大实体/remote-Canada、少数美国公司的 EOR contractor、或加拿大公司的美国团队内部转岗（L-1 通常需海外任职满一年）。拿到 citizenship 后 TN 是最快通道；TN 的 "Engineer" 类别对学位/P.Eng 有要求，platform/DevOps title 可能更适合 "Computer Systems Analyst"。找移民律师确认，不要把"拿到护照"当成自动美国工作许可。等待期间不要停，先用加拿大 remote 岗位积累 A 线经验。
 
-**时间分配（A 线专精 + B 线就业）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno，**同时作为 B 线 artifact 的主证据**）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。DRA、Volcano、Kubeflow 全家桶、PD 分离深挖降为 30 分钟概念，不进入验收；B 线只做 1 个 KServe/MLflow vertical slice，不展开全家桶。
+**时间分配（A 线专精 + B 线就业）：** A 线核心 60%（D1/D2/D4：benchmark 方法、KV 压力、量化质量、prefix-cache 路由）；平台支撑 25%（D3/D5：K8s、冷启动、Kueue/Kyverno，**同时作为 B 线 artifact 的主证据**）；阅读/写作 15%（vLLM/llm-d 源码、writeup）。**DRA、Volcano、Kubeflow 全家桶、PD 分离深挖降为 30 分钟概念，不进入 D1–D5 验收**；GPU Operator + MIG/time-slicing 的 6h 实操是 **B 线 Q3 可选加挂**（A 线可跳过），和 DRA 概念分开算；B 线只做 1 个 KServe/MLflow vertical slice，不展开全家桶。
 
 > B 线不能只靠“我有 DevOps 履历”。D3（GPU 平台交付）、D5（多租户配额）、Q2 的 chargeback 要能各自独立讲成 10 分钟案例；否则投 B 线岗时仍然只有一个 inference benchmark 项目。
 
@@ -197,13 +197,15 @@ A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/�
 
 | 方案 | 隔离性 | 显存切分 | 硬件要求 | 典型场景 |
 |---|---|---|---|---|
-| **MIG** | 硬件级（显存/故障隔离） | 固定档位（如 1g.5gb），档位不能自定义 | Ampere 及以后，部分卡不支持 | 生产多租户，要求强隔离 |
+| **MIG** | 硬件级（显存/故障隔离） | 固定档位（如 1g.5gb），档位不能自定义 | 仅部分数据中心卡：A100/A30/H100/H200/B200 等；**L4、L40S、4090、3060 不支持** | 生产多租户，要求强隔离 |
 | **Time-slicing** | 无隔离，仅时间片轮转 | 不切显存，各负载都看到整卡 | 任意 NVIDIA 卡 | 开发/测试、超卖提利用率 |
 | **HAMi**（CNCF Incubating，v2.11） | 软件限制（libvgpu 拦截 CUDA 调用） | **任意大小**（可以切 12GB 这种 MIG 切不出来的规格） | 异构（NVIDIA/AMD/昇腾等），不依赖 MIG | 国内/政企、异构算力、需要非标准切分 |
 | **KAI GPU Fractioning**（NVIDIA 开源，2026-10） | 软件 + CUDA 原生显存强制 | 分数卡 | NVIDIA，配合较新 CUDA | NVIDIA 生态、想要比 time-slicing 更强的限制 |
-| **DRA** | 由 device 驱动决定 | 取决于驱动（DRA 只负责申请与分配契约） | K8s ≥1.35（你集群 1.36 可用） | 新集群、结构化设备申请、未来默认 |
+| **DRA** | 由 device 驱动决定 | 取决于驱动（DRA 只负责申请与分配契约） | K8s ≥1.34 GA（1.35 起 gate 锁定；本仓库 1.37） | 新集群、结构化设备申请、未来默认 |
 
 **一句话记住：** MIG 是硬件切、档位固定；time-slicing 是排队用整卡、没有隔离；HAMi 和 KAI Fractioning 是软件切、能切任意大小但没有硬件级故障隔离；DRA 是"怎么向 K8s 申请设备"的协议，不是切分方案本身——它常和上面几个一起用。
+
+**L4 特别说明：** L4 是 Ada 卡，**不支持 MIG**；要在 K8s 里做 MIG 实验必须换 A100/A30/H100/H200 等。L4 上只能用 time-slicing / MPS 共享，或者整卡分配；DRA 也不能把不支持 MIG 的卡“变”出 MIG。
 
 ### NCP-AIO(L)：这张证到底证明什么（修正前一版）
 
@@ -590,13 +592,14 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | | **k3s + Deployment + 权重缓存** | 1 天 | 你本来就熟，只是对象换成模型服务 |
 | | **llm-d（一条 Well-Lit Path）** | 1 天 | 推理感知路由的唯一可讲证据；KServe 底层就是它[13] |
 | **必修·W2–W9** | **Kueue** | 4h | 配额/排队/抢占的 k8s-sigs 原生答案[9] |
-| | **DRA + NVIDIA GPU Operator** | 6h | 资源语义 + 共享模型（MIG/time-slicing）[6][8] |
 | | **KServe `LLMInferenceService`** | 6h | 只学 GenAI 这一半：KV-cache 路由、PD 分离、token 限流[4]；传统 `InferenceService` 知道存在即可 |
 | | **DCGM + vLLM `/metrics` + OTel** | 4h | SLO 与成本归属的证据 |
 | **对症选修** | **Langfuse（+ OTel GenAI）** | 3h | 只对 **agentic infra 线** 有用：trace、单任务 token 成本、eval 回归[21]。接在你自己的 Hermes agent 上，产出一个"成本可归因"的案例 |
 | | **Argo Workflows** | 4h | 批处理 / eval 流水线的编排；与 Kueue 组合是标准答案（Kueue 有官方 Argo 集成文档）[22]。不做训练平台就别深挖 |
 | | **Gateway API Inference Extension** | 3h | `InferencePool` / EPP 契约；学它是为了不被 llm-d 的实现细节绑死 |
-| **只需 30 分钟概念** | **Volcano** | 0.5h | gang scheduling + 层级 fairshare；只在训练平台或中国公司高权重[18][19] |
+| **B 线·Q3 可选** | **GPU Operator + MIG/time-slicing** | 6h | **B 线 P0 gap，A 线可跳过**：driver/toolkit/device plugin/DCGM/NFD 生命周期 + 共享模型；有 MIG 卡（A100/A30/H100/H200）做一次 MIG，没有就做 time-slicing[6][8] |
+| **只需 30 分钟概念** | **DRA** | 0.5h | 设备申请协议：`DeviceClass` / `ResourceSlice` / `ResourceClaim`；知道它解决“按属性选卡、MIG、拓扑”，不解决配额/排队/抢占；D5 不包含 DRA |
+| | **Volcano** | 0.5h | gang scheduling + 层级 fairshare；只在训练平台或中国公司高权重[18][19] |
 | | **Kubeflow** | 0.5h | 今天的 Kubeflow ≈ Trainer + Pipelines + Katib + Model Registry，且 KFP v2 已与 Argo 解耦[23]；Katib 已被 Trainer 的 OptimizationJob 取代。**只要不说错话即可** |
 | | **KubeRay / Ray** | 0.5h | 定位：Ray Serve 是通用分布式 serving，链多个模型/Python 复杂编排才用；单一 LLM 的推理栈现在是 vLLM + llm-d |
 | | SGLang / Triton / Kthena / Slurm | 0 | 知道名字和适用边界即可 |
