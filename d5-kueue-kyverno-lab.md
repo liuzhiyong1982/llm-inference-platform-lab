@@ -89,6 +89,7 @@
 | `priority` 是什么？ | §3.3.3 |
 | preemption 三个字段的可选值？ | §3.3.4 |
 | CEL 的 `all(c, ...)` / `has(...)` 怎么读？ | §3.6.3 |
+| CEL 的 `has` / `in` / `[]` 有什么区别？ | §3.6.4 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -881,6 +882,27 @@ object.spec.containers.all(c,
 | `size(x)` | 长度 | `size(object.spec.containers)` |
 | `s.startsWith("x")` | 字符串前缀 | `c.image.startsWith("nginx")` |
 | `s.contains("x")` | 字符串包含 | `c.image.contains("latest")` |
+
+**`has` / `in` / `[]` 的区别：**
+
+| 语法 | 作用 | 适用 | 返回 |
+|---|---|---|---|
+| `has(obj.field)` | 字段是否存在 | message / object 的字段 | bool |
+| `'key' in map` | key 是否存在 | map | bool |
+| `x in list` | 元素是否存在 | list | bool |
+| `map['key']` | 取 key 对应的值 | map | value；key 不存在会报错 |
+| `list[i]` | 取第 i 个元素 | list | value；越界会报错 |
+
+例子：
+
+```cel
+has(c.resources)                 // resources 字段存在吗？
+has(c.resources.limits)          // limits 字段存在吗？
+'cpu' in c.resources.limits      // limits 里有 cpu 这个 key 吗？
+c.resources.limits['cpu']        // 取出 cpu 的值；要先确认 key 存在
+```
+
+> `has` 不是“对象”，`in` 也不是只用于 key：`in` 还可以判断元素是否在 list 里；`[]` 是访问器，不是值本身。`map['missing']` 在 CEL 里会报错，所以先用 `in` 或 `has` 保护。
 
 **布尔语义：** `ValidatingPolicy` 的 `expression` 返回 `true` = 通过，`false` = 违反策略。
 
