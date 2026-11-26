@@ -59,16 +59,17 @@ kubectl apply -f scripts/d6/50-llminferenceservice.yaml
 kubectl -n kserve-test port-forward svc/vllm-raw 8000:8000
 curl -s http://127.0.0.1:8000/v1/models | jq
 
-# KServe：先找 Envoy Gateway 的 Service
-kubectl -n kserve get svc
-# 形如 envoy-kserve-kserve-ingress-gateway；port-forward 8080:80
-kubectl -n kserve port-forward svc/<envoy-svc> 8080:80
-SERVICE_HOSTNAME=$(kubectl -n kserve-test get inferenceservice qwen3-8b \
-  -o jsonpath='{.status.url}' | cut -d/ -f3)
-curl -s -H "Host: ${SERVICE_HOSTNAME}" \
-  http://127.0.0.1:8080/openai/v1/chat/completions \
+# KServe：直接 port-forward predictor Service（不需要 Envoy）
+kubectl -n kserve-test get svc
+kubectl -n kserve-test port-forward svc/qwen3-8b-predictor 8080:80
+curl -s http://127.0.0.1:8080/v1/models | jq
+curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}],"max_tokens":32}'
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' | jq
+
+# 可选：如果装了 Envoy Gateway，才用 status.url 的 Host + /openai 前缀
+# kubectl get svc -A | grep -i envoy
+# kubectl -n <ns> port-forward svc/<actual-envoy-svc> 8080:80
 ```
 
 ## 常见问题

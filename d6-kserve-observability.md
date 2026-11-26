@@ -993,19 +993,93 @@ qwen3-8b    http://qwen3-8b.kserve-test.example.com  True    ...
 
 ### 8.2 访问
 
+Standard mode 下 ISVC 会创建一个 predictor Service，名字是：
+
+```text
+qwen3-8b-predictor
+```
+
+它把 `80` 转到 vLLM 的 `8080`。**没有 Envoy Gateway 也能直接用这个 Service 访问。**
+
+#### 方式 A：直连 predictor Service（本 lab 默认）
+
+开两个终端。
+
+终端 1：
+
 ```bash
-kubectl -n kserve get svc
-# 找到 envoy-... 的 Service，port-forward 8080:80
-kubectl -n kserve port-forward svc/<envoy-svc> 8080:80
+kubectl -n kserve-test get svc
+# 期望看到 qwen3-8b-predictor  ClusterIP  80/TCP
+
+kubectl -n kserve-test port-forward svc/qwen3-8b-predictor 8080:80
+```
+
+终端 2：
+
+```bash
+curl -s http://127.0.0.1:8080/v1/models | jq
+
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' | jq
+```
+
+注意路径：
+
+```text
+直连 predictor：/v1/models、/v1/chat/completions
+经过 Gateway：  /openai/v1/models、/openai/v1/chat/completions
+```
+
+直连时不要加 `/openai` 前缀，否则会 404。
+
+#### 方式 B：通过 Envoy Gateway（只有装了 Gateway 才用）
+
+先确认 Gateway/Envoy 存在：
+
+```bash
+kubectl get gateway -A
+kubectl get svc -A | grep -i envoy
+```
+
+如果两条命令都没有输出，说明集群没装 Envoy Gateway，直接用方式 A。
+
+如果存在 Envoy Service，先看实际名字：
+
+```bash
+kubectl get svc -A | grep -i envoy
+# 例如：
+# kserve  envoy-kserve-kserve-ingress-gateway  ClusterIP  80/TCP
+```
+
+把 `<envoy-svc>` 替换成**实际 Service 名**，不要原样复制尖括号：
+
+```bash
+# 终端 1；<ns> 和 <envoy-svc> 都要替换成实际值
+kubectl -n <ns> port-forward svc/<envoy-svc> 8080:80
+```
+
+终端 2：
+
+```bash
 SERVICE_HOSTNAME=$(kubectl -n kserve-test get inferenceservice qwen3-8b \
-  -o jsonpath='{.status.url}' | cut -d/ -f3)
+  -o jsonpath='{.status.url}' | sed 's#http://##;s#/.*##')
+
 curl -s -H "Host: ${SERVICE_HOSTNAME}" \
   http://127.0.0.1:8080/openai/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' | jq
 ```
 
-> 如果 DNS 不通，用 `status.url` 的 host + port-forward；不要直接访问 ClusterIP。
+> `<envoy-svc>` 是占位符，不是字面量。直接执行 `kubectl ... port-forward svc/<envoy-svc>` 时，bash 会把 `<` 当成输入重定向，报 `-bash: envoy-svc: No such file or directory`。
+>
+> `kubectl port-forward` 是前台阻塞命令；必须开两个终端，或者把它放到后台：
+>
+> ```bash
+> kubectl -n kserve-test port-forward svc/qwen3-8b-predictor 8080:80 &
+> ```
+
+如果 `status.url` 是默认的 `http://qwen3-8b-kserve-test.example.com`，说明没有配置真实域名/Gateway；这不影响方式 A，直连 Service 即可。
 
 ### 8.3 冷启动 + benchmark
 
@@ -1300,6 +1374,10 @@ kubectl -n kserve-test get deploy,svc,gateway,httproute,inferencepool
 | HPA 不扩 | metrics-server/CPU 指标/上限 | `kubectl describe hpa` |
 | canary 没流量 | 没有 canary entry / 比例太小 | 确认 `spec.canary` 已生效；多发请求；检查 HTTPRoute 权重 |
 | Gateway 502 | Envoy/Gateway 未 Ready / Host 错 | `kubectl -n kserve get gateway,svc` |
+| `kubectl -n kserve get svc` 没有 Envoy | 没装 Envoy Gateway，或 Gateway 在别的 namespace | 用 `kubectl get svc -A | grep -i envoy`；没有就直接 port-forward `qwen3-8b-predictor` |
+| `-bash: envoy-svc: No such file or directory` | 把 `<envoy-svc>` 占位符原样执行，bash 当成重定向 | 替换成实际 Service 名，去掉尖括号 |
+| `/openai/v1/...` 404 | 直连 predictor 没有 `/openai` 前缀 | 用 `/v1/models`、`/v1/chat/completions` |
+| `port-forward` 卡住不返回 | 前台阻塞命令 | 开第二个终端，或命令末尾加 `&` |
 | PodMonitor 不生效 | label/port/namespaceSelector | 对照 Prometheus 配置 |
 | OTel 无 trace | flag/endpoint/采样 | vLLM 日志 + Collector debug |
 
