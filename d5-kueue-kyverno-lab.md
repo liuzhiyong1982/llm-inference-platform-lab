@@ -94,6 +94,7 @@
 | 两个 `has` 是不是重复？ | §3.6.3 |
 | CEL 怎么取字段值，比如 container name？ | §3.6.4 |
 | `isGPU` 前面的 `!` 和逻辑或是什么意思？ | §3.6.5 |
+| CEL 不好用，什么时候不该用？ | §3.6.9 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -1228,6 +1229,14 @@ Kueue 的 mutating webhook 会把带 queue label 的 Job 的 `suspend` 改成 `t
 - 用 `variables` 抽公共路径（D5 的 `containers` / `labels` / `isGPU` 已经这样做）；
 - 用 `.?` / `.orValue()` 可选语法替代部分 `has` 链，但以当前 Kyverno / K8s CEL 版本为准；
 - 一条策略只做一件事，别把所有校验塞进一个表达式。
+
+**什么时候别用 CEL：**
+
+- 需要复杂控制流、字符串处理、复用函数、外部调用 → 用 Go/Python admission webhook、OPA/Rego 或 Kubewarden；
+- 策略简单但团队不熟 CEL → 先把规则拆小，用 `variables` 和 `kyverno apply --explain`，不要硬写一个大表达式；
+- 必须用旧 Kyverno DSL → 只能锁 Kyverno <1.20，属于技术债，不建议为了少写几行 downgrade。
+
+CEL 的定位是“**安全、可静态检查、无副作用的策略表达式**”，不是“好写的通用语言”。如果你的策略已经需要函数、循环、错误处理，说明它不该用 CEL 写。
 
 ### 3.7 审计与 chargeback 的数据从哪来
 
