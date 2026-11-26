@@ -1,0 +1,25 @@
+# D6 raw cold start (PVC model, image cached)
+
+pod: vllm-raw-c68f989c6-574rx
+pod.created: 2026-11-26T20:19:55Z
+container.startedAt: 2026-11-26T20:19:58Z
+pod.Ready: 2026-11-26T20:22:07Z
+
+image_pull_s: 0        # image already present on node
+model_download_s: 0    # PVC mount, no HF download
+engine_init_s: 129     # container start -> Ready
+total_ready_s: 132      # pod created -> Ready
+
+## Timeline (from vLLM logs)
+20:20:47  Initializing model took 1.71s
+20:20:50  Loading weights took 3.05s
+20:20:53  Model loading took 8.67s; KV cache 2.95 GiB at 20:21:43
+20:21:28  [backbone] Compiling a graph for compile range (1, 2048) takes 16.78 s
+20:21:37  [backbone] torch.compile took 41.73 s in total
+20:22:00  Starting vLLM server on http://0.0.0.0:8000
+20:22:07  Pod Ready
+
+## Notes
+- This run reused the cached vLLM image; first pull was ~393s (6m33s).
+- Model is mounted from PVC, so model_download_s is 0.
+- engine_init_s includes ~7s readiness-probe delay.
