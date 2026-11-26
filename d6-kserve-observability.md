@@ -890,7 +890,16 @@ kubectl -n kserve-test run bench --rm -it --restart=Never \
 
 ### 8.1 应用 custom runtime + ISVC
 
-> 2×3060 上 raw 和 ISVC 各占 1 卡，可以同时跑；1×4090 上先删 raw 再跑 ISVC。冷启动对比要顺序跑，避免 CPU/网络互相干扰。
+> **单卡机器（1×3060 或 1×4090）必须先删 raw，释放 GPU 再跑 ISVC；否则 ISVC Pod 会 `Pending: Insufficient nvidia.com/gpu`。** 2×3060 可以 raw 和 ISVC 各占 1 卡同时跑，但冷启动对比仍建议顺序跑，避免 CPU/网络互相干扰。
+
+```bash
+# 单卡：先删 raw Deployment + Service；PVC 不要删
+kubectl -n kserve-test delete -f scripts/d6/10-raw-vllm.yaml --wait=true
+kubectl -n kserve-test wait --for=delete pod -l app=vllm-raw --timeout=120s
+kubectl -n kserve-test get pods
+```
+
+确认 raw Pod 已消失后，再执行：
 
 ```bash
 kubectl apply -f scripts/d6/20-clusterservingruntime.yaml
