@@ -374,6 +374,8 @@ insufficient unused quota for nvidia.com/gpu in flavor gpu-3060, 1 more needed
 
 #### 3.3.2 cohort：把多个 ClusterQueue 的闲置配额放进一个池子
 
+> **中文怎么叫：** Kueue 官方中文文档不翻译这个词，直接写 “Cohort”；可以理解为“**配额共享组**”或“**同组队列**”。英文 cohort 本义是“有共同特征的一批人”（如 birth cohort、cohort study），在 Kueue 里特指“可以互相借闲置配额的一组 ClusterQueue”，不是业务团队，也不是 namespace。
+
 `cohort` 就是一个字符串名字。所有 `spec.cohortName` 相同的 ClusterQueue 属于同一个 cohort，可以在彼此**闲置**时借配额。
 
 ```text
