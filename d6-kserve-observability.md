@@ -977,13 +977,15 @@ kubectl apply -f scripts/d6/61-prometheusrule.yaml
 kubectl -n monitoring get prometheusrule d6-inference-slo
 ```
 
-至少验证一条：
+至少验证一条。`scripts/d6/61-prometheusrule.yaml` 里的是 **lab 阈值**，方便在几分钟内触发/恢复：
 
-- TTFT P99 > 2s 持续 10m；
-- KV > 90% 持续 10m；
-- waiting > 10；
+- TTFT P99 > 0.5s 持续 1m；
+- KV > 50% 持续 1m；
+- waiting > 4 持续 1m；
 - preemption > 0；
 - GPU XID > 0。
+
+生产按 SLO 调回，例如 TTFT P99 > 2s 持续 10m、KV > 90% 持续 10m、waiting > 10 持续 5m。
 
 ### 9.6 game day
 
