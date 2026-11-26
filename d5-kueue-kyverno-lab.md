@@ -93,6 +93,7 @@
 | `kubectl explain` 能查到的字段就用 `has` 吗？ | §3.6.4 |
 | 两个 `has` 是不是重复？ | §3.6.3 |
 | CEL 怎么取字段值，比如 container name？ | §3.6.4 |
+| `!variables.isGPU \|\|` 是什么意思？ | §3.6.5 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -1021,6 +1022,28 @@ has(object.metadata.labels) ? object.metadata.labels : {}
 
 - 没有 labels 时返回空 map；
 - 后面 `'key' in variables.labels` 不会炸。
+
+**为什么每条校验都以 `!variables.isGPU ||` 开头？**
+
+这是 CEL 里的“条件豁免”：`!A || B` 等价于 `A -> B`（A 蕴含 B）。
+
+- 不是 GPU workload → `!isGPU` 为 `true` → 整条通过，不需要 queue label / priorityClass；
+- 是 GPU workload → `!isGPU` 为 `false` → 必须满足右边的条件；
+- `||` 短路：非 GPU workload 不会去读 labels / priorityClassName，也不会误伤 CPU Job。
+
+| `isGPU` | 右边条件 | 结果 |
+|---|---|---|
+| `false` | 不执行 | `true`（放行） |
+| `true` | `true` | `true`（放行） |
+| `true` | `false` | `false`（拒绝） |
+
+也可以写成三元表达式，但 `!A || B` 更短、更接近“如果 A 则必须 B”：
+
+```cel
+variables.isGPU
+  ? ('kueue.x-k8s.io/queue-name' in variables.labels)
+  : true
+```
 
 **校验 1：queue label 必须存在**
 
