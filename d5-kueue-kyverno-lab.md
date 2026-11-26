@@ -90,6 +90,7 @@
 | preemption 三个字段的可选值？ | §3.3.4 |
 | CEL 的 `all(c, ...)` / `has(...)` 怎么读？ | §3.6.3 |
 | CEL 的 `has` / `in` / `[]` 有什么区别？ | §3.6.4 |
+| `kubectl explain` 能查到的字段就用 `has` 吗？ | §3.6.4 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -926,6 +927,28 @@ Container（有 schema）
 | `{"cpu": "1"}` | `true` | `true` |
 
 `{"memory": "1Gi"}` 是最好的反例：字段存在（`has=true`），但没有 `cpu` key（`in=false`）。所以在 Kubernetes CEL 里：字段用 `has`，map key 用 `in`；`in` 只接受集合，不接受对象字段。
+
+**怎么快速判断用 `has` 还是 `in`：**
+
+| 你查的东西 | 例子 | 用什么 |
+|---|---|---|
+| API schema 里的字段 | `spec.template`、`resources`、`limits` | `has` |
+| map 里的 key | `labels["team"]`、`limits["cpu"]`、`nodeSelector["disktype"]` | `in` |
+| list 里的元素 | `["gpu", "cpu"]` | `in` |
+
+`kubectl explain` 能看到的是**字段**，不是 map 里的 key。例如：
+
+```bash
+kubectl explain pod.spec.containers.resources.limits
+# 显示的是 map[string]Quantity 这个字段
+# 不会显示 cpu / memory / nvidia.com/gpu 这些 key
+```
+
+所以口诀可以记成：
+
+> **`kubectl explain` 能查到的是字段 → `has`；explain 查不到、由用户写的 key → `in`。**
+
+更准确地说，看类型：**message / object 的字段用 `has`，map / list 的成员用 `in`**。CRD 没有 OpenAPI schema 时 `kubectl explain` 可能查不到，但类型规则仍然适用。
 
 **布尔语义：** `ValidatingPolicy` 的 `expression` 返回 `true` = 通过，`false` = 违反策略。
 
