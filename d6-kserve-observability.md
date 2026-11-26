@@ -1059,11 +1059,15 @@ kserve,,,,
 
 ### 8.4 canary
 
+**canary 是在同一个 ISVC 下同时跑 stable 和 canary 两个 Deployment，把一小部分流量切给 canary，用指标决定 promote 还是 rollback。** 它不是模型评测本身，而是“新版本先接 10% 流量”的发布策略。
+
 ```bash
 kubectl apply -f scripts/d6/40-canary.yaml
 kubectl -n kserve-test get inferenceservice qwen3-8b
 kubectl -n kserve-test get deploy
 ```
+
+> 本仓库 `40-canary.yaml` 用 `pvc://`，并且它是**替换整个 ISVC**（不是 patch）。单卡不要 apply；2 卡时先确认 stable 已经 `READY=True`，再 apply。canary 的 `--max-model-len=4096` 只是制造一个可区分的 variant；真实发布应换模型/镜像/量化版本。
 
 > Standard mode 没有 Knative `Revision` 对象；canary 的 PREV/LATEST 看 `InferenceService` status 列，底层是两个 Deployment。不要用 `kubectl get revisions`（那是 Serverless/Knative）。
 >

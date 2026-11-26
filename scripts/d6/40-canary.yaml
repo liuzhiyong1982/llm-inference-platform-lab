@@ -19,7 +19,7 @@ spec:
       modelFormat:
         name: vLLM
       runtime: kserve-vllmserver-d6
-      storageUri: hf://Qwen/Qwen3-8B-AWQ
+      storageUri: pvc://d6-models-pvc/Qwen3-8B-AWQ
       resources:
         requests:
           cpu: "4"
@@ -36,7 +36,7 @@ spec:
           modelFormat:
             name: vLLM
           runtime: kserve-vllmserver-d6
-          storageUri: hf://Qwen/Qwen3-8B-AWQ
+          storageUri: pvc://d6-models-pvc/Qwen3-8B-AWQ
           args:
             - --max-model-len=4096
           resources:
