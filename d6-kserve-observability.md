@@ -888,18 +888,67 @@ kubectl -n kserve-test run bench --rm -it --restart=Never \
 
 ## 8. Lab 3：KServe InferenceService
 
-### 8.1 应用 custom runtime + ISVC
+### 8.0 前置：单卡先释放 GPU
 
-> **单卡机器（1×3060 或 1×4090）必须先删 raw，释放 GPU 再跑 ISVC；否则 ISVC Pod 会 `Pending: Insufficient nvidia.com/gpu`。** 2×3060 可以 raw 和 ISVC 各占 1 卡同时跑，但冷启动对比仍建议顺序跑，避免 CPU/网络互相干扰。
+D6 的 raw 和 ISVC 都请求 `nvidia.com/gpu: 1`。这台 VM 只有 1 张 RTX 3060，raw 不删，ISVC Pod 会一直：
 
-```bash
-# 单卡：先删 raw Deployment + Service；PVC 不要删
-kubectl -n kserve-test delete -f scripts/d6/10-raw-vllm.yaml --wait=true
-kubectl -n kserve-test wait --for=delete pod -l app=vllm-raw --timeout=120s
-kubectl -n kserve-test get pods
+```text
+Pending
+  Warning  FailedScheduling  0/1 nodes are available: 1 Insufficient nvidia.com/gpu.
 ```
 
-确认 raw Pod 已消失后，再执行：
+所以 Lab 3 之前必须：
+
+1. 确认 §7.1 冷启动和 §7.2 benchmark 数据已记录；
+2. 删除 raw Deployment + Service；
+3. 等 raw Pod 完全消失；
+4. **保留 PVC/PV**；
+5. 再 apply runtime + ISVC。
+
+```bash
+cd /root
+
+# 1) 确认数据已记录；没有就先补，别急着删
+ls -l results/d6/cold-start.csv results/d6/raw-bench.json
+
+# 2) 删 raw（Deployment + Service）
+kubectl -n kserve-test delete -f scripts/d6/10-raw-vllm.yaml --wait=true
+
+# 3) 等 Pod 消失
+kubectl -n kserve-test wait --for=delete pod -l app=vllm-raw --timeout=120s
+kubectl -n kserve-test get pods
+
+# 4) 再起 ISVC
+kubectl apply -f scripts/d6/20-clusterservingruntime.yaml
+kubectl apply -f scripts/d6/30-inferenceservice.yaml
+```
+
+**不要删：**
+
+| 对象 | 原因 |
+|---|---|
+| `d6-models-pvc` | ISVC 还要用 `pvc://...` 读模型 |
+| `d6-models-pv` | PVC 的底层存储，删了模型盘就没了 |
+| `kserve-test` namespace | 删了 raw/ISVC 都没地方建 |
+
+`kubectl delete -f 10-raw-vllm.yaml` 只删 Deployment 和 Service，不会删 PVC。
+
+**2 张卡的情况：**
+
+- 2×3060 可以 raw 和 ISVC 各占 1 卡同时跑；
+- 但冷启动对比建议顺序跑，避免 CPU/网络互相干扰；
+- ISVC HPA `maxReplicas: 2` 扩到 2 时仍会抢第二张卡；单卡上不要用 HPA 压测。
+
+确认 GPU 已释放：
+
+```bash
+kubectl -n kserve-test get pods
+kubectl describe node | sed -n '/Allocated resources:/,/Events:/p' | grep nvidia.com/gpu
+```
+
+### 8.1 应用 custom runtime + ISVC
+
+> 单卡的前置步骤见 §8.0；确认 raw Pod 已删除、GPU 空闲后再执行本节。
 
 ```bash
 kubectl apply -f scripts/d6/20-clusterservingruntime.yaml
