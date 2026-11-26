@@ -32,7 +32,7 @@
 | # | 证据 | 通过标准 |
 |---|---|---|
 | 1 | Kyverno 拒绝日志 ×2 | 缺 queue label、缺 priorityClass 各一条 `Forbidden`，保存 stderr |
-| 2 | Kueue 配额表 | 集群 2 GPU；team A 2 个 Job → 1 `Admitted` + 1 `QuotaReserved=False`；team B 1 个 → `Admitted` |
+| 2 | Kueue 配额表 | 集群 2 GPU；team A 2 个 Job → 1 `Admitted` + 1 `QuotaReserved=False`；team B 1 个 → `Admitted`。单卡时 team B 只到 `Admitted` + Pod `Pending`，按 §2.1 口径记录 |
 | 3 | 抢占证据 | team A 高优先级 Job 使低优先级 Workload 出现 `Evicted=True, reason=Preempted`，并且 `kueue_preempted_workloads_total` 增加 |
 
 ### 1.2 B 线：三个交付物
@@ -83,9 +83,22 @@
 | 3h 成本 | ≈ **`$0.78`**；加 0.5h 安装/排障 ≈ `$0.91` |
 | 系统 | Ubuntu 22.04 VM，driver 580.x，k3s `v1.37.2+k3s1` |
 
-**为什么必须 2 张卡：** 两个团队各 1 张配额，才能同时展示“team A 拿不到第二张、team B 仍能拿到另一张”。单卡只能演示排队，无法演示“另一个团队仍有卡”。
+**为什么默认选 2 张卡：** 两个团队各 1 张配额，才能同时展示“team A 拿不到第二张、team B 仍能拿到另一张”。单卡只能演示排队，无法演示“另一个团队仍有卡”。
 
-如果 2×3060 不可用，备选 2×3090（约 `$0.94/h`，3h ≈ `$2.8`），结果里要改卡型，不能和 3060 混在一起。
+**但 2 卡不是硬性前提。** D5 的机制（Kueue 配额/排队/抢占、Kyverno 准入）只数 `nvidia.com/gpu` request，不关心物理卡数；GPU 只被 `pause` 容器占位，不跑模型。单卡时按下面口径改：
+
+| 验收项 | 单卡可做 | 口径变化 |
+|---|---|---|
+| Kyverno 两条拒绝 | ✅ | 与 GPU 无关 |
+| team A 2 Job → 1 `Admitted` + 1 `QuotaReserved=False` | ✅ | 不变 |
+| 同队列高优先级抢占 | ✅ | 让低优先级先占住唯一一张卡 |
+| team B 拿到“另一张卡”并 `Running` | ❌ | 只能到 `Admitted` + Pod `Pending` |
+
+单卡的 team B 结果不是失败，而是本文 §0 第 3 条的最好证据：**`nominalQuota` 是请求上限，不等于节点容量**。写结果时把“B 仍能拿另一张卡”改成“B 被 Kueue 放行但 scheduler `Pending`”，并保存 `kubectl describe pod` 里的 `Insufficient nvidia.com/gpu`。
+
+**选机建议：** 2×3060 没库存时，不要为 D5 单独等或单独租两次。优先租 **1×RTX 4090 24GB**（D6 也能复用；D6 的 canary 改成 dark launch 或跳过），D5 按上表单卡口径跑；只有必须演示“两个团队同时 Running”时才坚持 2 卡。
+
+如果 2×3060 不可用且仍要双卡，备选 2×3090（约 `$0.94/h`，3h ≈ `$2.8`），结果里要改卡型，不能和 3060 混在一起。
 
 ### 2.2 版本矩阵
 
@@ -135,6 +148,8 @@ Job 上的 `kueue.x-k8s.io/queue-name` 不会自动出现在 Pod 上。Pod 策�
 | D5 后余额 | 约 `$12.4` |
 
 > 不在共享 UAT 集群上做，避免污染环境、触发 Coder→Reviewer SOP 和公司成本。
+>
+> 单卡/换卡型时按 Vast 实时单价重算，不要用 2×3060 的单价乘；实际账单写 `results/d5/cost.txt`。
 
 ### 2.5 本地 kind 预演（可选，零成本）
 
