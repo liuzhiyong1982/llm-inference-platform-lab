@@ -80,6 +80,7 @@
 | 为什么要有 `LocalQueue` 一层？ | §3.2.4 |
 | `queue-name` label 的值是 `LocalQueue` 名吗？ | §3.2.4 |
 | 没有 `queue-name` label 会绕过 Kueue 吗？ | §3.5 |
+| Workload 怎么“控制” Job 的状态？ | §3.2.5 |
 | `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -432,6 +433,46 @@ D5 里说的 “Job” 就是 Kubernetes 的 `batch/v1 Job`，**不是 Kueue 自
 > D5 里 `queue-name: team-a` → `LocalQueue team-a`（namespace `team-a`）→ `ClusterQueue team-a-cq`；不是 `queue-name: team-a-cq`。同一个 label 值在不同 namespace 指向不同的 LocalQueue，所以 Kyverno 才强制 `queue-name == namespace`，防止 team A 用 team B 的入口。
 
 生产上还可以在 namespace 里建一个名为 `default` 的 LocalQueue：Kueue 会给没有 `queue-name` label 的 Job 自动补上 `queue-name: default`（Kueue v0.17 起 stable）。D5 **故意不建**，否则 §7 的“无 label 绕过配额”实验就看不到了。
+
+#### 3.2.5 Workload 怎么“控制” Job 的状态？
+
+严格说，`Workload` 不写 Job 的 `status`；它通过 Job 的 `spec.suspend` 和 Workload 的 conditions 做握手。Job 的 `Active / Succeeded / Failed` 仍然由 Kubernetes Job controller 写。
+
+```text
+Job 创建（带 queue-name）
+  │
+  ├─ 1. Kueue mutating webhook：Job.spec.suspend = true
+  │      → Kubernetes Job controller 不创建 Pod
+  │
+  ├─ 2. Kueue job controller：创建 Workload
+  │      ownerReference → Job
+  │      podSets 从 Job 的 parallelism + pod template 生成
+  │
+  ├─ 3. Kueue scheduler：Workload.QuotaReserved=True
+  │      → Workload.Admitted=True
+  │
+  ├─ 4. Kueue job controller：Job.spec.suspend = false
+  │      → Kubernetes Job controller 创建 Pod
+  │
+  ├─ 5. Kueue 观察 Job/Pod 状态
+  │      → 更新 Workload 的 PodsReady / Finished 条件
+  │
+  └─ 6. 抢占 / 删除 / 完成
+        抢占：Workload.Evicted=True → Job.spec.suspend=true → Job controller 删除 Pod
+        重新 admit：Job.spec.suspend=false → Pod 重建
+        完成/删除：Workload 被删除 → 配额释放
+```
+
+| 方向 | 谁写 | 写什么 |
+|---|---|---|
+| Workload → Job | Kueue job controller | `Job.spec.suspend`（true / false） |
+| Job/Pod → Workload | Kueue job controller | 观察状态，更新 `PodsReady` / `Finished` 条件 |
+| Job status | Kubernetes Job controller | `Active` / `Succeeded` / `Failed` |
+| Workload status | Kueue scheduler / controller | `QuotaReserved` / `Admitted` / `Evicted` / `PodsReady` / `Finished` |
+
+所以准确说法是：**Workload 的 admission 结果决定 Kueue 是否放掉 Job 的 `suspend`；Job 的实际运行状态仍由 Kubernetes 管。** Kueue 和 Job controller 是协作关系，不是父子替代。
+
+> 一个容易混的点：抢占时 Kueue **不直接删 Pod**，它把 `Job.spec.suspend` 改回 `true`，由 Kubernetes Job controller 删除 Pod；这样 Job 的 `backoffLimit`、重试和完成语义仍然由 Kubernetes 负责。
 
 ### 3.3 配额、借用、抢占
 
