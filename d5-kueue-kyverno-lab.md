@@ -93,7 +93,7 @@
 | `kubectl explain` 能查到的字段就用 `has` 吗？ | §3.6.4 |
 | 两个 `has` 是不是重复？ | §3.6.3 |
 | CEL 怎么取字段值，比如 container name？ | §3.6.4 |
-| `!variables.isGPU \|\|` 是什么意思？ | §3.6.5 |
+| `isGPU` 前面的 `!` 和逻辑或是什么意思？ | §3.6.5 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
