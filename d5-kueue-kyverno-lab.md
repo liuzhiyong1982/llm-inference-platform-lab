@@ -838,8 +838,9 @@ object.spec.containers.all(c,
 
 **为什么不能直接写 `has(c.resources.limits.cpu)`？**
 
-- `has()` 只保护**最后一个字段**，不会让中间路径变安全；`c.resources` 或 `c.resources.limits` 不存在时，路径本身就会报错。
-- `limits` 是 `map[string]Quantity`，不是 message；检查 key 要用 `'cpu' in c.resources.limits`，不是 `has(...)`。
+- `has()` 只保护路径的最后一层；`c.resources` 或 `c.resources.limits` 不存在时，路径本身就会报错。
+- Kubernetes CEL 的约定是：**字段存在性用 `has`，map key 用 `in`**。`limits` 是 `map[string]Quantity`，`cpu` 是 key，不是字段；不要用 `has` 查 key。
+- `has(c.resources.limits)` 检查的是 `limits` 这个字段本身，不是 `cpu` 这个 key；查 key 仍然用 `'cpu' in c.resources.limits`。
 - `&&` 短路让链条安全：`has(c.resources)` 为 `false` 时，后面根本不执行。
 
 | 检查 | 检查什么 | 为什么需要 |
@@ -848,7 +849,7 @@ object.spec.containers.all(c,
 | `has(c.resources.limits)` | `limits` 字段存在 | 防止对不存在的 map 做 `in` |
 | `'cpu' in c.resources.limits` | `cpu` 这个 key 存在 | map key 检查 |
 
-所以这三段不是重复，而是**逐层保护**：先确认父字段存在，再检查子字段，最后检查 map key。
+所以这三段不是重复，而是**逐层保护**：先确认父字段存在，再确认 map 字段存在，最后检查 map key。
 
 旧 DSL 要靠 `foreach` + `pattern` + `deny.conditions` 一层层套。D5 的“GPU 在 limits **或** requests 里”也是同理。
 
@@ -903,6 +904,10 @@ c.resources.limits['cpu']        // 取出 cpu 的值；要先确认 key 存在
 ```
 
 > `has` 不是“对象”，`in` 也不是只用于 key：`in` 还可以判断元素是否在 list 里；`[]` 是访问器，不是值本身。`map['missing']` 在 CEL 里会报错，所以先用 `in` 或 `has` 保护。
+>
+> **Kubernetes CEL 官方约定：字段用 `has`，map key 用 `in`。** 不要写 `has(map.key)` 或 `has(map['key'])`；通用 CEL 里 map 的 `has` 虽然 defined，但 K8s 明确不推荐，D5 按 K8s 约定写。
+>
+> 空 map 的 `has` 边界取决于类型/是否显式设置，不要依赖它；要判断某个 key 在不在，一律用 `in`。
 
 **`has` 和 `in` 的区别，用对象结构看：**
 
@@ -917,10 +922,10 @@ Container（有 schema）
 | `limits` 的状态 | `has(c.resources.limits)` | `'cpu' in c.resources.limits` |
 |---|---|---|
 | 字段不存在 | `false` | 需要先保护，不能直接求值 |
-| 字段存在但是空 map `{}` | `true` | `false` |
+| `{"memory": "1Gi"}` | `true` | `false` |
 | `{"cpu": "1"}` | `true` | `true` |
 
-空 map 是最好的反例：字段在（`has=true`），但 key 不在（`in=false`）。所以 `has` 只接受字段选择，不接受 map key；`in` 只接受集合，不接受对象字段。
+`{"memory": "1Gi"}` 是最好的反例：字段存在（`has=true`），但没有 `cpu` key（`in=false`）。所以在 Kubernetes CEL 里：字段用 `has`，map key 用 `in`；`in` 只接受集合，不接受对象字段。
 
 **布尔语义：** `ValidatingPolicy` 的 `expression` 返回 `true` = 通过，`false` = 违反策略。
 
