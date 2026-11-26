@@ -1389,12 +1389,63 @@ spec:
                 values: ["<node-name>"]
 ```
 
-> **为什么同时要 `persistentVolumeSpec` 和 `persistentVolumeClaimSpec`：**
->
-> - `persistentVolumeSpec` 描述“盘在哪”：节点本地路径 `local.path`、容量、`nodeAffinity`；它是集群级的实际存储。
-> - `persistentVolumeClaimSpec` 描述“Pod 怎么申请”：容量、访问模式、StorageClass；它是 namespace 级、给下载 Job 和 ISVC Pod 挂载用的 claim。
-> - 本地盘没有动态 provisioner，KServe 必须自己创建**成对的 PV/PVC**：只给 PVC 不知道盘在哪个节点；只给 PV，Pod 又不能直接挂载。两者的容量、`accessModes`、`storageClassName` 必须匹配，否则 PVC 会一直 `Pending`。
-> - 下载 Job 用一套 PV/PVC；每个使用该缓存的 ISVC namespace 还会生成 serving 用的 PV/PVC，底层指向同一个 `local.path`。
+#### 8.7.4.1 为什么同时要 PV 和 PVC 模板
+
+| 模板 | 描述什么 | 作用域 | 谁使用 |
+|---|---|---|---|
+| `persistentVolumeSpec` | 盘在哪：`local.path`、容量、`nodeAffinity` | Cluster | PV，代表节点上的实际本地盘 |
+| `persistentVolumeClaimSpec` | Pod 怎么申请：容量、访问模式、StorageClass | Namespace | PVC，给下载 Job / ISVC Pod 挂载 |
+
+Kubernetes 的绑定关系是：
+
+```text
+PV  ──绑定──▶ PVC  ──挂载──▶ Pod
+```
+
+- Pod **不能直接挂 PV**，只能引用 PVC；
+- PV 是集群级资源，PVC 是 namespace 级申请；
+- local 静态盘没有动态 provisioner，不能只写一个 PVC 让 StorageClass 自动变出 PV。
+
+所以 KServe 必须按两个模板创建**成对**的 PV/PVC，并显式预绑定：
+
+```go
+pvc.Spec.VolumeName = pv.Name
+```
+
+不是等 scheduler 慢慢匹配，而是直接指定“这个 PVC 绑这个 PV”。
+
+**为什么不能只给一个**
+
+| 只给 | 缺什么 | 结果 |
+|---|---|---|
+| 只给 PVC | 不知道盘在哪个节点、哪个路径 | 没有 PV 可绑，PVC `Pending` |
+| 只给 PV | Pod 不能直接挂 PV；下载 Job 和 ISVC 在不同 namespace | 无法挂载 |
+
+两个模板的以下字段必须匹配：
+
+```text
+capacity / storage
+accessModes
+storageClassName
+volumeMode
+```
+
+否则即使 `volumeName` 指定了，PVC 仍然绑不上。
+
+**实际创建几套 PV/PVC**
+
+```text
+下载阶段：
+  kserve-localmodel-jobs/qwen3-8b-workers
+  PV: qwen3-8b-workers-download
+
+每个使用缓存的 ISVC namespace：
+  kserve-test/qwen3-8b-workers
+  PV: qwen3-8b-workers-kserve-test
+```
+
+它们底层都指向同一个 `persistentVolumeSpec.local.path`（例如 `/mnt/models`），但 PVC 必须是 namespace 级的，才能被该 namespace 的 Pod 挂载。
+
 
 检查：
 
@@ -1437,9 +1488,29 @@ Job: Complete
 
 关键：**ISVC 的 `storageUri` 必须和 `LocalModelCache.sourceModelUri` 匹配**。
 
-> 这里写 `hf://` 不是“又下载一次”，而是把 `hf://` 当作 **cache 的匹配键**。KServe 匹配到 LocalModelCache 后，会把 URI 改写成 `pvc://<cache>-<nodegroup>/models/<hash>`，Pod 最终挂的是 PVC。
->
-> 如果直接写 `pvc://...`，就绕过了 LocalModelCache 的匹配、节点组选择、缓存状态和生命周期，只是手工挂一个 PVC；那种写法对应 D6 当前的 `d6-models-pvc`，不是 LocalModelCache 模式。
+#### 8.7.6.1 为什么 `storageUri` 写 `hf://` 而不是 `pvc://`
+
+`hf://Qwen/Qwen3-8B-AWQ` 是**逻辑模型标识**，也是 LocalModelCache 的匹配键；`pvc://...` 是匹配成功后 KServe **内部改写出来的挂载路径**。
+
+| ISVC `storageUri` | 行为 |
+|---|---|
+| `hf://...` + 匹配的 LocalModelCache | 不下载；改写成 `pvc://<cache>-<nodegroup>/models/<hash>`，挂缓存 |
+| `hf://...` + 没有 cache | 正常走 storage-initializer 下载 |
+| `pvc://...` | 直接挂指定 PVC；**不参与 LocalModelCache 匹配** |
+
+为什么不建议直接写 `pvc://`：
+
+1. **PVC 名字是生成的**：下载 PVC 是 `<cache>-<nodegroup>`，serving PVC/PV 还会按 namespace 生成；写死会绑死某个 namespace/nodeGroup。
+2. **绕过 cache 状态**：不会检查 `NodeDownloaded`，cache 没 Ready 也可能起 Pod。
+3. **绕过节点组选择**：`serving.kserve.io/nodegroup` 注解不再参与 `<cache>-<nodegroup>` 的解析。
+4. **绕过生命周期**：不会登记到 `status.inferenceServices`，也不会享受 cache 删除保护。
+5. **破坏版本契约**：`sourceModelUri` 是 immutable 的模型版本标识；用 `pvc://` 就失去了“同一个 URI 匹配同一个缓存”的语义。
+
+直接写 `pvc://` 是**手工 PVC 模式**，对应 D6 当前的 `d6-models-pvc`；LocalModelCache 模式必须用 `sourceModelUri` 的原始 URI。
+
+一句话：
+
+> **`hf://` 是“我要哪个模型”，`pvc://` 是“最终从哪块盘挂进来”；LocalModelCache 负责把前者解析成后者。**
 
 ```yaml
 apiVersion: serving.kserve.io/v1beta1
