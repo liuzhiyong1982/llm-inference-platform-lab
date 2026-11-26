@@ -82,6 +82,7 @@
 | 没有 `queue-name` label 会绕过 Kueue 吗？ | §3.5 |
 | Workload 怎么“控制” Job 的状态？ | §3.2.5 |
 | `QuotaReserved` 和 `Admitted` 等价吗？ | §3.2.5 |
+| Pod 的 priority 和 D5 的 `PriorityClass` 是一回事吗？ | §3.3.3 |
 | `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -587,6 +588,13 @@ Workload 的 `priority` 是一个整数，越大越优先。它影响两件事�
 2. **抢占资格**：高 priority 的 Workload 可以按策略驱逐低 priority 的 Workload。
 
 priority 有两个来源，别混：
+
+**D5 的 `PriorityClass` 就是 Kubernetes 的 `scheduling.k8s.io/v1 PriorityClass`，不是 Kueue 的 `WorkloadPriorityClass`。** Kueue 读取 Job 的 Pod priority，复制成 Workload priority；Pod priority 仍然由 kube-scheduler 使用。
+
+| 对象 | API | 谁用 | 改变 Pod priority？ |
+|---|---|---|---|
+| `PriorityClass`（D5 用） | `scheduling.k8s.io/v1` | kube-scheduler + Kueue（继承） | 是 |
+| `WorkloadPriorityClass` | `kueue.x-k8s.io/v1beta2` | 只用于 Kueue 排队/抢占 | 否 |
 
 | 来源 | 怎么设 | 影响范围 |
 |---|---|---|
