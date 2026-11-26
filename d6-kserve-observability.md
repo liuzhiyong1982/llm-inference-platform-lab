@@ -1374,7 +1374,7 @@ kubectl -n kserve-test get deploy,svc,gateway,httproute,inferencepool
 | HPA 不扩 | metrics-server/CPU 指标/上限 | `kubectl describe hpa` |
 | canary 没流量 | 没有 canary entry / 比例太小 | 确认 `spec.canary` 已生效；多发请求；检查 HTTPRoute 权重 |
 | Gateway 502 | Envoy/Gateway 未 Ready / Host 错 | `kubectl -n kserve get gateway,svc` |
-| `kubectl -n kserve get svc` 没有 Envoy | 没装 Envoy Gateway，或 Gateway 在别的 namespace | 用 `kubectl get svc -A | grep -i envoy`；没有就直接 port-forward `qwen3-8b-predictor` |
+| `kubectl -n kserve get svc` 没有 Envoy | 没装 Envoy Gateway，或 Gateway 在别的 namespace | 用 `kubectl get svc -A` 过滤 envoy；没有就直接 port-forward `qwen3-8b-predictor` |
 | `-bash: envoy-svc: No such file or directory` | 把 `<envoy-svc>` 占位符原样执行，bash 当成重定向 | 替换成实际 Service 名，去掉尖括号 |
 | `/openai/v1/...` 404 | 直连 predictor 没有 `/openai` 前缀 | 用 `/v1/models`、`/v1/chat/completions` |
 | `port-forward` 卡住不返回 | 前台阻塞命令 | 开第二个终端，或命令末尾加 `&` |
