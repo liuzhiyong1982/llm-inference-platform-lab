@@ -77,6 +77,7 @@
 | 为什么 D5 用 Job，不用 D1–D4 的 Deployment？ | §3.4.1 |
 | Kueue 的 Job 和 K8s 的 Job / Pod 是什么关系？ | §3.2.3 |
 | `ClusterQueue` 和 `team-a-cq` 是什么关系？ | §3.2.2 |
+| 为什么要有 `LocalQueue` 一层？ | §3.2.4 |
 | `nominalQuota` 是什么？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -395,6 +396,36 @@ D5 里说的 “Job” 就是 Kubernetes 的 `batch/v1 Job`，**不是 Kueue 自
 | `Deployment`（`replicas: 3`） | **3 个**（每个 Pod 一个） | 每个 Workload 1 个 podSet，`count: 1` |
 
 > 一句话：**Job 是 Kubernetes 的工作负载对象，Workload 是 Kueue 的准入对象，Pod 是实际运行对象。** 三者是三层，不是同一个东西。
+
+#### 3.2.4 为什么要有 LocalQueue 一层？
+
+一句话：**ClusterQueue 是平台管的“配额池”，LocalQueue 是 namespace 里的“取号窗口”；中间这层把“配额策略”和“提交入口”解耦。**
+
+```text
+平台管理员（cluster-scoped）
+  ClusterQueue team-a-cq   ← 配额、borrowing、preemption 在这里
+        ▲
+        │ spec.clusterQueue
+团队 / namespace（namespace-scoped）
+  LocalQueue team-a        ← 团队能看到、能提交的入口
+        ▲
+        │ kueue.x-k8s.io/queue-name: team-a
+用户
+  Job
+```
+
+四个原因：
+
+| 原因 | 说明 |
+|---|---|
+| **RBAC / 权限边界** | `ClusterQueue` 是 cluster-scoped，只有平台管理员能改；`LocalQueue` 是 namespace-scoped，团队不需要 cluster 权限就能提交、查看自己的队列。 |
+| **委派 / 自助** | 平台建好配额池，团队在自己 namespace 建 `LocalQueue` 指向它；平台不用为每个 namespace 建队列。 |
+| **解耦 / 可迁移** | Job 只写 `queue-name: team-a`，不写 `ClusterQueue` 名；平台换配额池、改 cohort、迁移时只改 `LocalQueue` 的 `spec.clusterQueue`，用户 manifest 不动。 |
+| **多入口 / 多租户** | 一个 namespace 可以有多个 `LocalQueue`（GPU 池、CPU 池、spot 池）；多个 namespace 也可以指向同一个 `ClusterQueue`。 |
+
+> `LocalQueue` 自己不持有配额，它只是一个指针；配额仍在 `ClusterQueue`。`LocalQueue` 的 status 只显示这个入口的 pending / admitted 情况。
+
+生产上还可以在 namespace 里建一个名为 `default` 的 LocalQueue：Kueue 会给没有 `queue-name` label 的 Job 自动补上 `queue-name: default`（Kueue v0.17 起 stable）。D5 **故意不建**，否则 §7 的“无 label 绕过配额”实验就看不到了。
 
 ### 3.3 配额、借用、抢占
 
