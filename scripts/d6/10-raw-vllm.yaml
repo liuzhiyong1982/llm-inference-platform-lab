@@ -21,7 +21,7 @@ spec:
         - name: vllm
           image: vllm/vllm-openai:v0.34.0
           args:
-            - --model=Qwen/Qwen3-8B-AWQ
+            - --model=/models
             - --served-model-name=qwen3-8b
             - --host=0.0.0.0
             - --port=8000
@@ -56,11 +56,19 @@ spec:
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
+            - name: models
+              mountPath: /models
+              subPath: Qwen3-8B-AWQ
+              readOnly: true
       volumes:
         - name: dshm
           emptyDir:
             medium: Memory
             sizeLimit: 2Gi
+        - name: models
+          persistentVolumeClaim:
+            claimName: d6-models-pvc
+            readOnly: true
 ---
 apiVersion: v1
 kind: Service

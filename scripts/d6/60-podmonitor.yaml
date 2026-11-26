@@ -17,7 +17,7 @@ spec:
   podMetricsEndpoints:
     - port: http
       path: /metrics
-      interval: 15s
+      interval: 5s
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -36,4 +36,4 @@ spec:
   podMetricsEndpoints:
     - port: http
       path: /metrics
-      interval: 15s
+      interval: 5s

@@ -1,0 +1,31 @@
+# D6: 本地模型盘。VM 上模型已下载到 /workspace/models/Qwen3-8B-AWQ，
+# 用 hostPath PV + PVC 让 raw Deployment 和 InferenceService 共用同一份权重。
+# 这样 cold start 不包含 Hugging Face 下载，raw/KServe 的差异只剩服务框架本身。
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: d6-models-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: d6-local
+  hostPath:
+    path: /workspace/models
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: d6-models-pvc
+  namespace: kserve-test
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: d6-local
+  volumeName: d6-models-pv
+  resources:
+    requests:
+      storage: 20Gi

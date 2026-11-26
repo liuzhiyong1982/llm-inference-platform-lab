@@ -15,31 +15,31 @@ spec:
           expr: |
             histogram_quantile(
               0.99,
-              sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m]))
-            ) > 2
-          for: 10m
+              sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[2m]))
+            ) > 0.5
+          for: 1m
           labels:
             severity: warning
           annotations:
-            summary: "vLLM TTFT P99 > 2s for 10m"
+            summary: "vLLM TTFT P99 > 0.5s for 1m (D6 lab threshold)"
             description: "Check queue time, prefill time, KV cache usage, and EPP routing."
 
         - alert: D6KVCacheHigh
-          expr: avg(vllm:gpu_cache_usage_perc) > 0.9
-          for: 10m
+          expr: avg(vllm:kv_cache_usage_perc) > 0.5
+          for: 1m
           labels:
             severity: warning
           annotations:
-            summary: "vLLM KV cache > 90% for 10m"
+            summary: "vLLM KV cache > 50% for 1m (D6 lab threshold)"
             description: "Decode is KV-bound; expect queueing/preemption. Check max-num-seqs and concurrency."
 
         - alert: D6QueueBacklog
-          expr: sum(vllm:num_requests_waiting) > 10
-          for: 5m
+          expr: sum(vllm:num_requests_waiting) > 4
+          for: 1m
           labels:
             severity: warning
           annotations:
-            summary: "vLLM waiting queue > 10 for 5m"
+            summary: "vLLM waiting queue > 4 for 1m (D6 lab threshold)"
             description: "Check capacity, HPA/KEDA, and per-tenant traffic."
 
         - alert: D6Preemptions
