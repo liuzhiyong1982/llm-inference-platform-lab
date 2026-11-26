@@ -740,6 +740,14 @@ PVC d6-models-pvc             # namespace 级申请，在 kserve-test 里
 | **StorageClass** | 这里是静态 `d6-local`，不自动创建存储 |
 | **Pod volumeMount** | 把 PVC 挂进容器，变成 `/models` 或 `/mnt/models` |
 
+> **PVC 绑定的是 PV，不是 Pod。** 我们的 PVC 在 `spec.volumeName` 里直接指定了 `d6-models-pv`，所以 PVC 创建后 PV controller 就会完成绑定，**不需要先有 Pod**。Pod 只是引用 PVC；Pod 不存在时，PVC 仍然可以是 `Bound`。
+>
+> 绑定方向：`PVC.spec.volumeName → PV`，同时 PV 的 `spec.claimRef` 指回 PVC。一个 PVC 只能绑一个 PV，一个 PV 也只能绑一个 PVC。
+>
+> 例外：如果 StorageClass 是 `volumeBindingMode: WaitForFirstConsumer`，PVC 会等到有 Pod 调度时才绑定。本 lab 的 `d6-local` 是静态 PV + `volumeName`，不是这种模式，所以 apply `05-models-pvc.yaml` 后就会 `Bound`。
+>
+> `ReadWriteOnce` 是“单节点读写”，不是“只能一个 Pod”；同一节点上的多个 Pod 可以同时挂同一个 RWO PVC。
+
 `20Gi` 是 PV 的声明容量；`hostPath` 不会真的限制目录大小，生产要用 CSI/配额来管。
 
 #### 7.0.2 raw 和 ISVC 怎么挂这份模型
@@ -1196,7 +1204,7 @@ kubectl -n kserve-test get deploy,svc,gateway,httproute,inferencepool
 |---|---|---|
 | `namespaces "kserve-test" not found` | 忘了创建业务 namespace | `kubectl apply -f scripts/d6/00-namespace.yaml` |
 | `persistentvolumeclaim "d6-models-pvc" not found` | 跳过 PVC 步骤 | `kubectl apply -f scripts/d6/05-models-pvc.yaml`，确认 PVC `Bound` |
-| PVC `Pending` / PV `Released` | hostPath 不存在或旧 PV 未清理 | 确认 `/workspace/models`；删旧 PV 后重新 apply `05` |
+| PVC `Pending` / PV `Released` | 没有匹配 PV、旧 PV 未清理，或 StorageClass 是 `WaitForFirstConsumer` | 确认 `/workspace/models`；删旧 PV 后重新 apply `05`；看 `kubectl describe pvc` 事件 |
 | `/models/config.json` 不存在 | `subPath` 写错或模型未下载 | 检查 `subPath: Qwen3-8B-AWQ` 和 `/workspace/models/Qwen3-8B-AWQ/config.json` |
 | `InferenceService` READY=False | cert-manager/Gateway/storage initializer | `kubectl describe isvc`，看 Events |
 | `/mnt/models` 不存在 | 建在 `kserve` 控制面 namespace | 换 `kserve-test` |
