@@ -88,6 +88,7 @@
 | 一个 Cohort 下面通常有几个 ClusterQueue？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
 | preemption 三个字段的可选值？ | §3.3.4 |
+| CEL 里的 `c` 是遍历变量吗？ | §3.6.3 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -827,6 +828,12 @@ object.spec.containers.all(c,
   has(c.resources.limits) &&
   'cpu' in c.resources.limits)
 ```
+
+> `c` 是 `all` 宏的**迭代变量**，不是字段名。`object.spec.containers` 是容器列表；`all(c, ...)` 把 `c` 依次绑定到每个容器对象，再对每个容器求 `...`。叫 `container` 或 `x` 也一样。
+>
+> `all` 的语义：所有元素都满足才返回 `true`；空列表返回 `true`；遇到第一个 `false` 就短路。`has(c.resources) && ...` 里的 `&&` 也短路，所以 `resources` 不存在时不会去读 `c.resources.limits`。
+>
+> 这段只遍历 `containers`，不含 `initContainers`；D5 的策略用变量把两者拼起来（见 §3.6.5）。
 
 旧 DSL 要靠 `foreach` + `pattern` + `deny.conditions` 一层层套。D5 的“GPU 在 limits **或** requests 里”也是同理。
 
