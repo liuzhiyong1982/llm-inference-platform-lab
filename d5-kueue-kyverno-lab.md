@@ -92,6 +92,7 @@
 | CEL 的 `has` / `in` / `[]` 有什么区别？ | §3.6.4 |
 | `kubectl explain` 能查到的字段就用 `has` 吗？ | §3.6.4 |
 | 两个 `has` 是不是重复？ | §3.6.3 |
+| CEL 怎么取字段值，比如 container name？ | §3.6.4 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -964,6 +965,22 @@ kubectl explain pod.spec.containers.resources.limits
 > **`kubectl explain` 能查到的是字段 → `has`；explain 查不到、由用户写的 key → `in`。**
 
 更准确地说，看类型：**message / object 的字段用 `has`，map / list 的成员用 `in`**。CRD 没有 OpenAPI schema 时 `kubectl explain` 可能查不到，但类型规则仍然适用。
+
+**怎么取值：**
+
+| 目标 | CEL | 返回 |
+|---|---|---|
+| 第一个容器的 `name` | `object.spec.containers[0].name` | string |
+| 所有容器的 `name` | `object.spec.containers.map(c, c.name)` | list |
+| `name == "vllm"` 的容器 | `object.spec.containers.filter(c, c.name == "vllm")` | list |
+| 是否有 `name == "vllm"` | `object.spec.containers.exists(c, c.name == "vllm")` | bool |
+| 所有 `name` 非空 | `object.spec.containers.all(c, c.name != "")` | bool |
+| label 的值 | `object.metadata.labels["team"]` | string |
+| annotation 的值 | `object.metadata.annotations["key"]` | string |
+
+> `name` / `image` 是 Container 的必填字段，直接 `c.name`；`resources` 是可选字段，先 `has` 再取。`[0]` 在空列表上会报错，`filter(...)[0]` 在没匹配时也会报错，先用 `size()` / `exists()` 保护。
+
+> 上面是 **Pod** 的路径；**Job / Deployment** 要写 `object.spec.template.spec.containers`。D5 的策略目标是 Job，所以用的是后者。
 
 **布尔语义：** `ValidatingPolicy` 的 `expression` 返回 `true` = 通过，`false` = 违反策略。
 
