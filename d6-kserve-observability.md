@@ -125,9 +125,9 @@
 | 模型 | `Qwen/Qwen3-8B-AWQ` | 约 5.7GB，12GB 卡可跑 |
 | OTel Collector | `0.166.0` | `otel/opentelemetry-collector-contrib` |
 | DCGM exporter | `4.9.0` | GPU 指标 |
-| KServe 内置 runtime | `kserve-vllmserver` | 镜像是 `vllm/vllm-openai:v0.21.0`；本文用 custom runtime 对齐 v0.34.0 |
+| KServe 内置 runtime | `kserve-vllmserver` | 镜像 tag 以安装方式为准：repo 脚本是 `latest`，release manifest 是 `v0.21.0`；本文用 custom runtime 对齐 v0.34.0 |
 
-### 2.3 六个版本/路径坑
+### 2.3 七个版本/路径坑
 
 1. **KServe v0.21 的 runtime 清单叫 `kserve-cluster-resources.yaml`**，不是老文档里的 `kserve-runtimes.yaml`。
 2. **Standard mode 不支持 HTTP scale-to-zero。** KServe 文档明确写了；要测 0→1 必须 Knative/Serverless。
@@ -135,6 +135,7 @@
 4. **不要把 `InferenceService` 建在 `kserve` 控制面 namespace。** KServe 会跳过 storage-initializer 注入，Pod 报 `/mnt/models` 不存在。
 5. **内置 `kserve-vllmserver` 的 vLLM 版本和 D1–D4 的 `v0.34.0` 不一致。** 要比 TTFT/TPOT，用本文的 custom `ClusterServingRuntime`；否则只比冷启动/运维行为，并明确 confound。
 6. **Standard mode 的 canary 用 `spec.canary`，不是 `canaryTrafficPercent`。** 后者是 Knative 字段，在 Standard mode 会被静默忽略；v0.20+ 用 `spec.canary`（`predictor.name` + `trafficPercent`）。
+7. **repo 安装脚本生成的 runtime tag 是 `latest`，不是 `v0.21.0`。** `./hack/kserve-install.sh` 使用 `config/runtimes/kustomization.yaml` 的 `newTag: latest`；release asset `kserve-cluster-resources.yaml` 才 pin `v0.21.0`。不要假设内置 runtime 的 vLLM 版本，先查 `.spec.containers[0].image`。
 
 ### 2.4 预算
 
@@ -530,11 +531,11 @@ kubectl get clusterservingruntime kserve-vllmserver -o yaml | head -40
 
 1. `kserve-vllmserver` 对象存在；
 2. `supportedModelFormats` 包含 `vLLM`；
-3. 镜像是 `vllm/vllm-openai:v0.21.0`，端口/args/probe 符合预期。
+3. 镜像 tag 符合预期：repo 脚本常见 `latest`，release manifest 是 `v0.21.0`；端口/args/probe 符合预期。
 
 如果 runtime 缺失，后面创建 ISVC 会报“找不到匹配的 ServingRuntime”。所以 §6.2 是“装完 KServe 后的第一层 smoke test”。
 
-D6 用自定义 `kserve-vllmserver-d6` 的原因：内置 `kserve-vllmserver` 用 `vllm/vllm-openai:v0.21.0`，而 raw 用 `v0.34.0`；为了只比较“raw vs KServe”，不让 vLLM 版本成为变量，D6 把镜像、args、端口、probe 都对齐到 `v0.34.0`。
+D6 用自定义 `kserve-vllmserver-d6` 的原因：内置 `kserve-vllmserver` 的 vLLM tag 可能是 `latest` 或 `v0.21.0`，和 raw 的 `v0.34.0` 不一致；为了只比较“raw vs KServe”，不让 vLLM 版本成为变量，D6 把镜像、args、端口、probe 都对齐到 `v0.34.0`。
 
 #### Q8：ServingRuntime 和容器 runtime 是一回事吗？
 
@@ -630,7 +631,14 @@ kubectl get clusterservingruntime | grep -E 'vllm|huggingface'
 kubectl get clusterservingruntime kserve-vllmserver -o yaml | head -40
 ```
 
-内置 `kserve-vllmserver` 的镜像是 `vllm/vllm-openai:v0.21.0`。本文用 `scripts/d6/20-clusterservingruntime.yaml` 的 `kserve-vllmserver-d6`（v0.34.0）对齐 D1–D4。
+内置 `kserve-vllmserver` 的镜像 tag 取决于安装方式：repo 的 `hack/kserve-install.sh` 用 `latest`，release asset `kserve-cluster-resources.yaml` 用 `v0.21.0`。先查实际值：
+
+```bash
+kubectl get clusterservingruntime kserve-vllmserver \
+  -o jsonpath='{.spec.containers[0].image}{"\n"}'
+```
+
+本文用 `scripts/d6/20-clusterservingruntime.yaml` 的 `kserve-vllmserver-d6`（v0.34.0）对齐 D1–D4；不要拿内置 runtime 的 `latest` 做 benchmark。
 
 ### 6.3 如果 install script 失败
 
@@ -1192,6 +1200,8 @@ results/d6/
 ## 15. Sources
 
 - KServe v0.21.0 release：<https://github.com/kserve/kserve/releases/tag/v0.21.0>
+- KServe v0.21.0 runtimes kustomization（`newTag: latest`）：<https://github.com/kserve/kserve/blob/v0.21.0/config/runtimes/kustomization.yaml>
+- KServe v0.21.0 release `kserve-cluster-resources.yaml`（pin `v0.21.0`）：<https://github.com/kserve/kserve/releases/download/v0.21.0/kserve-cluster-resources.yaml>
 - KServe Standard 安装：<https://kserve.github.io/website/docs/admin-guide/kubernetes-deployment>
 - KServe `InferenceService` + Qwen：<https://kserve.github.io/website/docs/getting-started/genai-first-isvc>
 - KServe `LLMInferenceService`：<https://kserve.github.io/website/docs/model-serving/generative-inference/llmisvc/llmisvc-overview>
