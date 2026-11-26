@@ -88,7 +88,7 @@
 | 一个 Cohort 下面通常有几个 ClusterQueue？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
 | preemption 三个字段的可选值？ | §3.3.4 |
-| CEL 里的 `c` 是遍历变量吗？ | §3.6.3 |
+| CEL 的 `all(c, ...)` / `has(...)` 怎么读？ | §3.6.3 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -834,6 +834,20 @@ object.spec.containers.all(c,
 > `all` 的语义：所有元素都满足才返回 `true`；空列表返回 `true`；遇到第一个 `false` 就短路。`has(c.resources) && ...` 里的 `&&` 也短路，所以 `resources` 不存在时不会去读 `c.resources.limits`。
 >
 > 这段只遍历 `containers`，不含 `initContainers`；D5 的策略用变量把两者拼起来（见 §3.6.5）。
+
+**为什么不能直接写 `has(c.resources.limits.cpu)`？**
+
+- `has()` 只保护**最后一个字段**，不会让中间路径变安全；`c.resources` 或 `c.resources.limits` 不存在时，路径本身就会报错。
+- `limits` 是 `map[string]Quantity`，不是 message；检查 key 要用 `'cpu' in c.resources.limits`，不是 `has(...)`。
+- `&&` 短路让链条安全：`has(c.resources)` 为 `false` 时，后面根本不执行。
+
+| 检查 | 检查什么 | 为什么需要 |
+|---|---|---|
+| `has(c.resources)` | `resources` 字段存在 | 防止读 `limits` 时报错 |
+| `has(c.resources.limits)` | `limits` 字段存在 | 防止对不存在的 map 做 `in` |
+| `'cpu' in c.resources.limits` | `cpu` 这个 key 存在 | map key 检查 |
+
+所以这三段不是重复，而是**逐层保护**：先确认父字段存在，再检查子字段，最后检查 map key。
 
 旧 DSL 要靠 `foreach` + `pattern` + `deny.conditions` 一层层套。D5 的“GPU 在 limits **或** requests 里”也是同理。
 
