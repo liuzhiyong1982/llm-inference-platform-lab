@@ -6,7 +6,7 @@
 >
 > 版本基线：**KServe `v0.21.0`**、k3s `v1.37.2+k3s1`、Kubernetes `v1.37`（KServe 要求 ≥1.32）、vLLM `v0.34.0`、Qwen3-8B-AWQ、OTel Collector `0.166.0`、DCGM exporter `4.9.0`。
 >
-> 机器：优先复用 **D5 的单卡 VM（显存 ≥12GB 时）**；新租选 1×RTX 4090 24GB。**canary 需要 2 张卡；单卡改为 dark launch 或跳过**（见 §8.4）。**不要按 L4 VM 租**：Vast 的 L4 只有容器，k3s 起不来。
+> 机器：优先复用 **D5 的单卡 VM（显存 ≥12GB 时）**；新租选 1×RTX 4090 24GB。**canary 需要 2 张卡；单卡跳过（`trafficPercent: 0` 也会创建第二个 Deployment，仍要 GPU）**（见 §8.4）。**不要按 L4 VM 租**：Vast 的 L4 只有容器，k3s 起不来。
 >
 > 预算：2×3060 参考 **`$1.5–1.8`（含 buffer）**；1×4090 或复用 D5 单卡按 Vast 实时价重算。实际账单写进 `results/d6/cost.txt`，不要用估算替代。
 
@@ -30,7 +30,7 @@
 | # | 证据 | 说明 |
 |---|---|---|
 | 1 | **raw vs KServe 冷启动表** | 镜像拉取 / 权重下载 / 引擎初始化 / Ready；同一模型、同一 vLLM 镜像 |
-| 2 | **KServe 运维行为** | canary Deployment 10%、HPA 1→2、rollback；scale-to-zero 的限制 |
+| 2 | **KServe 运维行为** | canary Deployment 10%（需 2 卡；单卡跳过）、HPA 1→2、rollback；scale-to-zero 的限制 |
 | 3 | **推理 dashboard + trace + alert** | TTFT/TPOT/goodput/KV/GPU；一条 `gateway→vLLM` trace；一条 SLO 告警 |
 
 ### 1.2 B 线交付物
@@ -47,11 +47,11 @@
 
 | 时间 | 动作 | 判据 |
 |---|---|---|
-| 0:00–0:25 | 复用 D5 VM；确认 k3s/GPU/镜像 | `nvidia.com/gpu=1`；canary 另需 2 卡，按 §8.4 跳过或 dark launch |
+| 0:00–0:25 | 复用 D5 VM；确认 k3s/GPU/镜像 | `nvidia.com/gpu=1`；canary 另需 2 卡，按 §8.4 单卡跳过 |
 | 0:25–0:55 | 装 cert-manager/Gateway API/Envoy/KServe | `kserve` pod 全 Ready |
 | 0:55–1:35 | raw Deployment + benchmark | `/v1/models` 200；记录冷启动 |
 | 1:35–2:15 | `InferenceService` + benchmark | `READY=True`；同一 workload |
-| 2:15–2:45 | canary / HPA | stable + canary Deployment；副本 1→2 |
+| 2:15–2:45 | canary / HPA（单卡跳过 canary） | stable + canary Deployment；副本 1→2 |
 | 2:45–3:00 | 记录 | `results/d6/` |
 
 **D6b（2–3h）**
@@ -80,9 +80,21 @@
 
 | 方案 | 说明 |
 |---|---|
-| **复用 D5 单卡 VM** | 推荐（显存 ≥12GB 时）；D5 只占位 GPU，D6 直接换模型；canary 改为 dark launch 或跳过；增量 5–6h |
+| **复用 D5 单卡 VM** | 推荐（显存 ≥12GB 时）；D5 只占位 GPU，D6 直接换模型；canary 单卡跳过；增量 5–6h |
 | 1×RTX 4090 24GB | 单卡更宽裕；按 Vast 实时价 |
 | 1×L4 VM | **不可行**：Vast L4 只有容器，k3s 需要 VM |
+
+**要几张 GPU：**
+
+| 目标 | 最少 GPU | 说明 |
+|---|---:|---|
+| D6a 核心：raw vs ISVC | 1 | 顺序跑：先 raw，删掉，再 ISVC |
+| D6a 并行对比 | 2 | raw 和 ISVC 各 1 卡，省时间 |
+| canary（stable + canary） | 2 | 两个 Deployment 各要 1 卡；单卡跳过 |
+| D6b 观测 | 1 | Prometheus/Grafana/OTel/DCGM 不额外占 GPU |
+| 显存 | ≥12GB | Qwen3-8B-AWQ 约 5.7GB；24GB 更宽裕 |
+
+> 结论：**KServe 核心 1 张卡就能做；2 张卡是为了并行对比和 canary。**
 
 ### 2.2 版本矩阵
 
@@ -165,7 +177,7 @@ KServe LLMInferenceService（GenAI 控制面）
 - **canary（Standard）**：`spec.canary` 列表，每项 `predictor.name` + `trafficPercent`；KServe 创建 `{isvc}-{name}-predictor` Deployment，按比例分流。
 - **canary（Serverless）**：才用 `canaryTrafficPercent`；它在 Standard mode 会被静默忽略。
 - **HPA**：`minReplicas`/`maxReplicas`；Standard mode 默认按 CPU，LLM 应换 KEDA/Prometheus 按 `num_requests_waiting` 或自定义指标。
-- **rollback**：把 canary `trafficPercent` 设回 0 / 删掉 canary entry；记录 stable/canary Deployment。
+- **rollback**：删掉 canary entry（只把 `trafficPercent` 设 0 不一定会删掉 canary Deployment）；记录 stable/canary Deployment。
 - **scale-to-zero**：Standard 不支持；LLM 冷启动代价高，生产一般 `minReplicas >= 1`。
 
 ### 3.5 推理 observability 的五个增量
@@ -430,7 +442,7 @@ kubectl -n kserve-test get deploy
 
 > Standard mode 没有 Knative `Revision` 对象；canary 的 PREV/LATEST 看 `InferenceService` status 列，底层是两个 Deployment。不要用 `kubectl get revisions`（那是 Serverless/Knative）。
 >
-> canary 会额外占 1 张 GPU：2×3060 才能同时跑 stable + canary；1×4090 上把 `trafficPercent` 设 0 做 dark launch，或跳过 canary。
+> canary 会额外占 1 张 GPU：`spec.canary` 会创建第二个 Deployment（`qwen3-8b-canary-predictor`），stable + canary 各要 1 卡。**单卡上即使 `trafficPercent: 0`，这个 Deployment 仍然会被创建并需要 GPU**，所以 dark launch 不成立；单卡只能跳过 canary，或先停掉 stable 做停机验证（那不是 canary）。
 
 观察：
 
@@ -712,7 +724,7 @@ results/d6/
 - [ ] `InferenceService` READY=True；
 - [ ] raw vs KServe 冷启动表（4 个阶段）；
 - [ ] 同一 workload 的 raw/KServe benchmark；
-- [ ] canary 10%（stable + canary Deployment）；
+- [ ] canary 10%（stable + canary Deployment；单卡跳过并记录原因）；
 - [ ] HPA 1→2（或说明 Standard HPA 的限制）；
 - [ ] dashboard 截图（TTFT/TPOT/KV/GPU）；
 - [ ] 1 条 OTel trace；
