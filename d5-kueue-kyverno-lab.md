@@ -87,6 +87,7 @@
 | `cohort` 是什么？ | §3.3.2 |
 | 一个 Cohort 下面通常有几个 ClusterQueue？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
+| preemption 三个字段的可选值？ | §3.3.4 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -640,7 +641,34 @@ Kueue 的抢占分三个边界，配置和语义都不同：
 | cohort 内 reclaim | `preemption.reclaimWithinCohort` | 我把配额借给别人了，我要用时能不能收回？ |
 | cohort 内 borrow | `preemption.borrowWithinCohort` | 我要借配额，能不能抢别人正在用的？ |
 
-D5 只开第一个：
+三个字段的可选值：
+
+| 字段 | 可选值 | 默认 | 含义 |
+|---|---|---|---|
+| `preemption.withinClusterQueue` | `Never` / `LowerPriority` / `LowerOrNewerEqualPriority` | `Never` | 同 CQ 内：不抢 / 只抢更低优先级 / 也抢同优先级但更新的 |
+| `preemption.reclaimWithinCohort` | `Never` / `LowerPriority` / `Any` | `Never` | cohort 内收回：不抢 / 只抢更低优先级 / 不看优先级都抢 |
+| `preemption.borrowWithinCohort.policy` | `Never` / `LowerPriority` | `Never` | 借配额时：不抢 / 只抢更低优先级 |
+| `preemption.borrowWithinCohort.maxPriorityThreshold` | int32 | 不设 | 只抢 priority ≤ N 的 Workload |
+
+注意：
+
+- `borrowWithinCohort` 在 v1beta2 是 **struct**，不是字符串；要写 `policy:` 子字段。写成 `borrowWithinCohort: LowerPriority` 会 schema 报错。
+- `borrowWithinCohort.policy: LowerPriority` 只在 `reclaimWithinCohort != Never` 时生效。
+- 三个默认都是 `Never`，即 preemption 默认全关，必须显式开。
+- `LowerOrNewerEqualPriority` 只用于 `withinClusterQueue`；`reclaimWithinCohort` 没有这个值。
+
+完整写法：
+
+```yaml
+preemption:
+  withinClusterQueue: LowerPriority
+  reclaimWithinCohort: LowerPriority
+  borrowWithinCohort:
+    policy: LowerPriority
+    maxPriorityThreshold: 100
+```
+
+D5 只开第一个（没有 cohort，另外两个保持默认 `Never`）：
 
 ```yaml
 preemption:
