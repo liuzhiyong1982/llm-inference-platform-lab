@@ -79,6 +79,7 @@
 | `ClusterQueue` 和 `team-a-cq` 是什么关系？ | §3.2.2 |
 | 为什么要有 `LocalQueue` 一层？ | §3.2.4 |
 | `queue-name` label 的值是 `LocalQueue` 名吗？ | §3.2.4 |
+| 没有 `queue-name` label 会绕过 Kueue 吗？ | §3.5 |
 | `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -618,6 +619,8 @@ D5 选 Job 还有实验原因：`pause` 镜像秒起，不下载模型；用 vLL
 
 ### 3.5 为什么 Kueue 需要 Kyverno 补入口
 
+**直接回答：默认会绕过。** 没有 label → Kueue 不创建 Workload → Job 直接由 Kubernetes Job controller 创建 Pod，kube-scheduler 按物理资源调度；Kueue 的 `nominalQuota`、排队、抢占都不参与。它绕过的只是 Kueue，不是 Kubernetes 的 `ResourceQuota` / `PriorityClass` / 节点亲和性。
+
 Kueue 默认只管理带 `kueue.x-k8s.io/queue-name` 的 Job。原因是它要 opt-in，避免误管系统 Job。
 
 于是有一个真实缺口：
@@ -629,14 +632,15 @@ Kueue 默认只管理带 `kueue.x-k8s.io/queue-name` 的 Job。原因是它要 o
   → 配额被绕过
 ```
 
-有两种补法：
+三种补法：
 
-| 方案 | 做法 | 优缺点 |
-|---|---|---|
-| Kueue 全局接管 | `manageJobsWithoutQueueName: true` | 能兜底，但会碰到系统 Job；错误信息不如策略清晰 |
-| Kyverno 入口策略 | GPU Job 必须带 queue label / priorityClass | 精准、可审计、错误信息明确；推荐 |
+| 方案 | 做法 | 结果 | 代价 |
+|---|---|---|---|
+| 默认 LocalQueue | namespace 里建一个名为 `default` 的 LocalQueue | Kueue 自动给无 label 的 Job 补 `queue-name: default`，受管 | 只对该 namespace 生效；D5 故意不建，否则 §7 的绕过实验看不到 |
+| Kueue 全局接管 | `manageJobsWithoutQueueName: true` | 匹配 namespace 里的 Job 都被接管；无队列的会先 `suspend`，等 label | 可能碰到系统 Job；用 `managedJobsNamespaceSelector` 限定范围 |
+| Kyverno 入口策略 | GPU Job 必须带 queue label / priorityClass | API 直接 `Forbidden`，对象不创建 | 多一个 webhook；要 HA 和 `failurePolicy` |
 
-D5 用第二种，并把第一种作为生产 hardening 的补充。
+D5 用第三种，第一种作为生产 hardening 的补充；第二种只做概念，不作为主路径。
 
 ### 3.6 CEL 速成（D5 专用）
 
