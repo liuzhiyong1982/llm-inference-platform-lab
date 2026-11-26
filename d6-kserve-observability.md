@@ -72,6 +72,21 @@
 - 不做 MIG/DRA/Dragonfly；
 - 不重跑 D1–D4 的全量对比。
 
+### 1.5 D6 学习问题索引
+
+执行和阅读时反复问到的概念问题，统一收在 §3.8：
+
+| 问题 | 位置 |
+|---|---|
+| D6 到底要几张 GPU？ | §2.1、§3.8 Q1 |
+| ISVC 是什么？ | §3.8 Q2 |
+| InferenceService 和 LLMInferenceService 怎么选、怎么结合？ | §3.8 Q3、§13 Q3 |
+| LWS 是什么？ | §3.8 Q4 |
+| TP / DP / EP 分别是什么？ | §3.8 Q5 |
+| PP 是什么？PP 和 PD 有什么区别？ | §3.8 Q6 |
+| `ClusterServingRuntime` 是什么？§6.2 检查 runtime 在干嘛？ | §3.8 Q7 |
+| ServingRuntime 和容器 runtime 是一回事吗？ | §3.8 Q8 |
+
 ---
 
 ## 2. 环境、版本、预算
@@ -162,6 +177,8 @@ KServe LLMInferenceService（GenAI 控制面）
 | `LLMInferenceService` | GenAI 专用：vLLM workers + Gateway/HTTPRoute/InferencePool/EPP |
 | `LocalModelCache` | 节点本地模型缓存（optional） |
 
+> `LeaderWorkerSet`（LWS）不是 KServe CRD，而是 Kubernetes SIG Apps 的 workload API；`LLMInferenceService` 在多机/多 Pod 场景会创建它。见 §3.8 Q4。
+
 ### 3.3 Standard vs Serverless
 
 | | Standard（RawDeployment） | Serverless（Knative） |
@@ -208,6 +225,329 @@ KServe LLMInferenceService（GenAI 控制面）
 - GPU util 40% 不代表空闲，decode 可能已经 KV-bound；
 - 不要用 `request_id` / prompt 做 metric label（高基数）；
 - 默认不要记录 prompt/completion 原文。
+
+### 3.8 学习问答：ISVC、LLMISVC、LWS、并行
+
+这一节记录 D6 学习过程中提出的概念问题。命令、参数、指标名保持英文；结论以 KServe `v0.21.0` 和 vLLM `v0.34.0` 为准。
+
+#### Q1：D6 到底要几张 GPU？
+
+| 目标 | 最少 GPU | 说明 |
+|---|---:|---|
+| D6a 核心：raw vs ISVC | 1 | 顺序跑：先 raw，删掉，再 ISVC |
+| D6a 并行对比 | 2 | raw 和 ISVC 各 1 卡，省时间 |
+| canary（stable + canary） | 2 | 两个 Deployment 各要 1 卡；单卡跳过 |
+| D6b 观测 | 1 | Prometheus/Grafana/OTel/DCGM 不额外占 GPU |
+| 显存 | ≥12GB | Qwen3-8B-AWQ 约 5.7GB；24GB 更宽裕 |
+
+> **结论：核心 1 张卡就能做；2 张卡是为了并行对比和 canary。** 单卡上 `trafficPercent: 0` 仍会创建第二个 Deployment，不能当 dark launch。
+
+#### Q2：ISVC 是什么？
+
+`ISVC` 是 `InferenceService` 的 `kubectl` 短名，是 KServe 的通用 serving CRD：
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen3-8b
+```
+
+它用一份 YAML 描述“模型从哪来、用哪个 runtime、要几副本、怎么扩缩容、怎么分流”，KServe 控制器再翻译成：
+
+```text
+InferenceService
+├── Deployment qwen3-8b-predictor
+├── Service    qwen3-8b-predictor
+├── HPA        qwen3-8b-predictor
+└── （可选）Ingress/HTTPRoute、canary Deployment
+```
+
+关键点：
+
+- ISVC 是**控制面抽象**，不是推理引擎；底层仍然是 vLLM。
+- 它不会让 TTFT/TPOT 变好；D6 的 raw vs ISVC 就是验证“KServe 只加运维抽象，不换引擎”。
+- 与 raw Deployment 的区别是：模型存储、runtime 模板、revision、canary、HPA、Gateway 都收进一个 CRD。
+
+#### Q3：InferenceService 和 LLMInferenceService 怎么选、怎么结合？
+
+**两者是 KServe 的双轨，不是新旧版本，也不是二选一。**
+
+| 维度 | `InferenceService` | `LLMInferenceService` |
+|---|---|---|
+| API | `serving.kserve.io/v1beta1`，stable | `serving.kserve.io/v1alpha2`，alpha |
+| 定位 | Predictive AI + 基础单机 LLM | GenAI / LLM 专用 |
+| 控制器 | `kserve-controller-manager` | 独立的 `llmisvc-controller-manager` |
+| 底层 | Deployment/Service/HPA/Ingress，或 Knative | Deployment 或 **LWS** + Service + Gateway/HTTPRoute + **InferencePool/EPP** |
+| 路由 | 普通 Ingress/Gateway，按副本负载均衡 | **KV cache / prefix-aware**、PD 分离路由 |
+| 并行 | 单机为主 | TP/DP/EP、多机多卡 |
+| 扩缩容 | HPA；Standard 不支持 HTTP 0→1 | HPA/KEDA，支持 **scale-to-zero** |
+| 流量 | `spec.canary` | Gateway/HTTPRoute 流量管理，字段体系不同 |
+| 依赖 | cert-manager，可选 Gateway | Gateway API、GIE、LWS、Envoy Gateway、KEDA、llm-d |
+| 典型负载 | sklearn/TF/PyTorch、embedding、rerank、≤7B 单机 LLM | 7B–405B、多机、PD 分离、LoRA 多租户 |
+
+> 版本注意：v0.21 源码的 storage version 是 `v1alpha2`，部分文档示例仍写 `v1alpha1`；以集群里的 `kubectl api-resources | grep -i llm` 为准。
+
+**怎么选：**
+
+```text
+传统 ML / embedding / rerank
+  → InferenceService
+
+LLM，单机单卡、一个模型、标准 OpenAI API
+  → InferenceService
+
+多机多卡、TP/DP/EP、PD 分离、KV-aware 路由、KEDA 0→1
+  → LLMInferenceService
+
+7B–70B，单机多卡，暂时不需要 PD/EPP
+  → 先 InferenceService；不够再迁 LLMInferenceService
+```
+
+**怎么结合：**
+
+- **同集群双轨**：ISVC 跑小模型/embedding/分类器，LLMISVC 跑旗舰 LLM；共享同一个 Gateway 和 PVC/模型缓存，按 host/path 分流。
+- **迁移路径**：ISVC 做 POC → 需要多机/PD/EPP 时新建 LLMISVC；同一模型 URI、同一 vLLM 镜像，压测后再切流。
+- **不要嵌套**：LLMISVC 不是建在 ISVC 之上，两者是并列 CRD；LLMISVC 不会创建 ISVC，ISVC 也不会创建 LLMISVC。
+- **不要同一 endpoint 双挂**：同一 host/path 同时挂 ISVC 和 LLMISVC 会导致路由冲突。
+
+D6 是单卡 RTX 3060，选 ISVC 是正确的；LLMISVC 会多引入 Gateway/EPP/LWS 控制面，但单卡没有 PD/多机/KV-aware 的收益。
+
+#### Q4：LWS 是什么？
+
+`LWS` = **LeaderWorkerSet**，Kubernetes SIG Apps 的 workload API：
+
+```yaml
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+```
+
+它把“1 个 leader + N 个 worker”的 Pod 组当作**一个副本单位**：
+
+```text
+replicas=1, size=2
+→ 1 个组
+→ 1 个 leader + 1 个 worker
+```
+
+它解决 Deployment/StatefulSet 表达不了的问题：
+
+| | Deployment | StatefulSet | LeaderWorkerSet |
+|---|---|---|---|
+| 副本单位 | 单个 Pod | 单个 Pod | **一个 Pod 组** |
+| 身份 | 随机 | 稳定序号 | 稳定序号 + leader/worker 角色 |
+| 扩缩容 | 扩 Pod 数 | 扩 Pod 数 | **扩组数** |
+| 组内关系 | 无 | 无 | leader + workers，互相发现 |
+| 滚动更新 | 单 Pod | 单 Pod | **整组一起更新** |
+| 典型场景 | 无状态服务 | 数据库/有状态服务 | **多机 LLM 推理、分布式训练** |
+
+核心字段和行为：
+
+- `spec.replicas`：组的数量，不是 Pod 数量；
+- `leaderWorkerTemplate.size`：每组 Pod 总数，**包含 leader**；`size=2` 表示 1 leader + 1 worker；
+- `leaderTemplate` 可选，不写就复用 `workerTemplate`；
+- 注入 `LWS_LEADER_ADDRESS`、`LWS_GROUP_SIZE`、`LWS_WORKER_INDEX`；
+- `startupPolicy`：`LeaderReady` 等 leader Ready 再起 worker；`LeaderCreated` 等 leader 创建后起 worker；
+- 支持组级滚动更新、组级重启、HPA scale subresource；
+- gang scheduling 仍是 **alpha**，不要当作默认保证；
+- LWS 不分配 GPU；GPU 仍由 device plugin + kube-scheduler 分配。
+
+在 LLMISVC 里，`spec.worker` 存在时控制器会创建 LWS 而不是 Deployment；`size = data / dataLocal`。例如：
+
+```yaml
+parallelism:
+  data: 8
+  dataLocal: 2
+```
+
+得到 `size = 8 / 2 = 4`，即 1 leader + 3 worker。
+
+> 单卡 D6 不会创建 LWS；一个 Pod 里 2 张卡做 `TP=2` 也不需要 LWS。**只有模型跨多个 Pod/节点时才需要 LWS。**
+
+#### Q5：TP / DP / EP 分别是什么？
+
+| | TP | DP | EP |
+|---|---|---|---|
+| 全称 | Tensor Parallelism | Data Parallelism | Expert Parallelism |
+| 切什么 | 层内权重/注意力头 | 请求/副本 | MoE 的 expert |
+| 每张卡存什么 | 部分权重 | 完整模型 | 部分 expert |
+| 通信 | all-reduce / all-gather | 推理几乎无 | all-to-all |
+| 显存 | 降 | 不降 | 降 expert |
+| 主要收益 | 单卡放不下、降延迟 | 提吞吐 | 跑超大 MoE、提容量 |
+| 通信代价 | 高，优先 NVLink | 低 | 高，怕负载不均 |
+| 典型 | 70B 单机 8 卡 TP=8 | 8B 多副本 DP=8 | DeepSeek/Mixtral 的 EP |
+
+一句话：
+
+> **TP 切模型，DP 切请求，EP 切专家。**
+
+补充：
+
+- **TP**：同一个 token 的计算分到多卡，每层通常要 all-reduce；TP degree 要能整除 attention heads/hidden size 等维度。
+- **DP**：每个副本都有完整模型，各自处理不同请求；推理 DP 没有梯度同步，和训练 DP 不是一回事。
+- **EP**：只对 MoE 有意义；token 经 router 选 top-k expert，再 all-to-all 发到对应 GPU。vLLM 的 `EP_SIZE = TP_SIZE × DP_SIZE`，通过 `--enable-expert-parallel` 打开。
+
+KServe LLMISVC 的 `spec.parallelism` 直接对应这些轴：
+
+```yaml
+spec:
+  parallelism:
+    tensor: 4        # TP=4
+    pipeline: 1      # PP=1
+    data: 2          # 总共 2 个 DP 副本
+    dataLocal: 1     # 每个 Pod 1 个 DP 副本
+    expert: false    # 不开 EP
+```
+
+dense 模型的总 GPU 数近似：
+
+```text
+总 GPU ≈ DP × TP × PP
+```
+
+`dataLocal` 不是“本地有几张 GPU”，而是“一个 Pod 里放几个 DP 副本”；`size = data / dataLocal`。
+
+D6 的 Qwen3-8B-AWQ 是 dense 模型，单卡配置就是：
+
+```text
+TP=1, PP=1, DP=1, EP=false
+```
+
+`max-num-seqs=16` 是连续批处理，不是 DP；HPA 1→2 是扩 Pod 副本，也不是 DP。
+
+#### Q6：PP 是什么？PP 和 PD 有什么区别？
+
+**PP = Pipeline Parallelism，按层切 stage：**
+
+```text
+80 层模型，PP=4：
+
+Stage 0 / GPU0: layers 0-19
+Stage 1 / GPU1: layers 20-39
+Stage 2 / GPU2: layers 40-59
+Stage 3 / GPU3: layers 60-79
+
+请求 → Stage0 → Stage1 → Stage2 → Stage3 → 输出
+```
+
+特点：
+
+- 每张卡只存一部分层，降低显存；
+- stage 之间传 activation，是 point-to-point 通信，比 TP 的每层 all-reduce 更适合跨节点；
+- 有 **pipeline bubble**：低并发时 stage 会空转，单请求延迟通常不占优；
+- 需要足够多的 microbatch/并发来填满流水线；
+- 通常要求层数能被 PP 整除，具体以 vLLM 版本约束为准。
+
+PP 和 PD 不是一回事：
+
+| | PP（Pipeline Parallelism） | PD（Prefill/Decode 分离） |
+|---|---|---|
+| 切什么 | **模型层** | **请求阶段** |
+| 同一个请求 | 顺序经过所有 stage | prefill 池算完，decode 池接着跑 |
+| 目的 | 模型放得下、跨机扩展 | 按阶段配资源，降 TTFT/提吞吐 |
+| 通信 | stage 间 activation | **KV cache 传输** |
+| KServe 字段 | `spec.parallelism.pipeline` | `spec.prefill` |
+| 是否并行轴 | 是 | 更偏 serving 架构，不是 TP/DP/EP 那种轴 |
+
+vLLM：
+
+```bash
+--pipeline-parallel-size 2
+```
+
+> **PP 是“模型太大，按层切开”；PD 是“prefill 和 decode 资源需求不同，分开部署”。**
+
+#### Q7：`ClusterServingRuntime` 是什么？§6.2 检查 runtime 在干嘛？
+
+`ClusterServingRuntime` 是 KServe 的**模型服务运行时模板** CRD：
+
+> 它本身不跑 Pod，只告诉 KServe：某类模型应该用哪个镜像、什么命令、什么端口、什么探针来跑。
+
+```yaml
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-vllmserver-d6
+spec:
+  supportedModelFormats:
+    - name: vLLM
+      version: "1"
+      autoSelect: true
+      priority: 1
+  containers:
+    - name: kserve-container          # 主容器必须叫这个
+      image: vllm/vllm-openai:v0.34.0
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --model=/mnt/models
+        - --served-model-name={{.Name}}
+      ports:
+        - name: http
+          containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /v1/models
+          port: 8080
+```
+
+ISVC 这样引用：
+
+```yaml
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: kserve-vllmserver-d6
+      storageUri: pvc://d6-models-pvc/Qwen3-8B-AWQ
+```
+
+不写 `runtime` 时，KServe 按 `modelFormat` + `autoSelect` + `priority` 自动选择。
+
+`ClusterServingRuntime` 和 `ServingRuntime` 的区别：
+
+| | `ClusterServingRuntime` | `ServingRuntime` |
+|---|---|---|
+| 作用域 | 集群级 | namespace 级 |
+| 谁维护 | 平台团队 | 租户/团队 |
+| 典型用途 | 平台默认 runtime | 团队自定义镜像/参数 |
+| 命令 | `kubectl get clusterservingruntime` | `kubectl -n xxx get servingruntime` |
+
+**§6.2 在干嘛：**
+
+`kserve-controller-manager` Ready 只说明控制面在跑；§6.2 检查的是数据面模板有没有装上：
+
+```bash
+kubectl get clusterservingruntime | grep -E 'vllm|huggingface'
+kubectl get clusterservingruntime kserve-vllmserver -o yaml | head -40
+```
+
+它要确认：
+
+1. `kserve-vllmserver` 对象存在；
+2. `supportedModelFormats` 包含 `vLLM`；
+3. 镜像是 `vllm/vllm-openai:v0.21.0`，端口/args/probe 符合预期。
+
+如果 runtime 缺失，后面创建 ISVC 会报“找不到匹配的 ServingRuntime”。所以 §6.2 是“装完 KServe 后的第一层 smoke test”。
+
+D6 用自定义 `kserve-vllmserver-d6` 的原因：内置 `kserve-vllmserver` 用 `vllm/vllm-openai:v0.21.0`，而 raw 用 `v0.34.0`；为了只比较“raw vs KServe”，不让 vLLM 版本成为变量，D6 把镜像、args、端口、probe 都对齐到 `v0.34.0`。
+
+#### Q8：ServingRuntime 和容器 runtime 是一回事吗？
+
+不是。`runtime` 这个词在两层出现：
+
+| | 容器 runtime | KServe ServingRuntime |
+|---|---|---|
+| 例子 | `containerd`、`nvidia-container-runtime`、`runc` | `kserve-vllmserver`、`kserve-huggingfaceserver` |
+| 管什么 | 怎么起容器、怎么把 GPU 挂进容器 | 怎么起模型服务、用什么镜像/端口/探针 |
+| 配置位置 | k3s/containerd 配置 | Kubernetes CRD |
+| D6 里的角色 | 让 Pod 能看见 `nvidia.com/gpu` | 告诉 KServe 怎么跑 vLLM |
+
+所以“装 NVIDIA runtime”和“装 KServe ServingRuntime”是两件不同的事，不要混。
 
 ---
 
@@ -351,15 +691,16 @@ kubectl -n kserve-test describe pod -l app=vllm-raw | sed -n '/Events:/,$p'
 kubectl -n kserve-test logs deploy/vllm-raw | grep -E 'Loading|model|KV|CUDA|Started|ready'
 ```
 
-记录到 `results/d6/cold-start.csv`：
+记录到 `results/d6/cold-start.csv`。**本节只测 raw**，先写 raw 行：
 
 ```csv
 path,image_pull_s,model_download_s,engine_init_s,total_ready_s
-raw,,,, 
-kserve,,,, 
+raw,,,,
 ```
 
-> raw 的 vLLM 直接从 HF 下载；KServe 的 storage initializer 先下载到 `/mnt/models`，再启动 vLLM。两者阶段不同，报告里要写清。
+> KServe 行不在本节采集；等 §8.3 部署 ISVC 后，用同样的字段补 `kserve` 行，最后合并成一张表。
+>
+> 当前 `scripts/d6/10-raw-vllm.yaml` 用 PVC 直挂 `/workspace/models/Qwen3-8B-AWQ`，所以 `model_download_s` 记为 0（模型已在本机）。如果要测 HF 下载，把 `--model` 改回 `Qwen/Qwen3-8B-AWQ`，并单独记录下载时间。
 
 ### 7.2 benchmark
 
@@ -404,7 +745,9 @@ NAME        URL                                      READY   PREV   LATEST   ...
 qwen3-8b    http://qwen3-8b.kserve-test.example.com  True    ...
 ```
 
-首次会拉 storage-initializer 下载模型，5–15 分钟取决于网络/缓存。
+如果 `storageUri` 用 `hf://`，首次会拉 storage-initializer 下载模型，5–15 分钟取决于网络/缓存。
+
+> 本仓库的 `30-inferenceservice.yaml` 默认用 `storageUri: pvc://d6-models-pvc/Qwen3-8B-AWQ` 直挂本地模型，**不会创建 storage-initializer**，所以没有“下载模型”阶段。要测 HF 下载路径，把 `storageUri` 改成 `hf://Qwen/Qwen3-8B-AWQ`；注意 KServe 默认给 storage-initializer 的 `memoryLimit` 只有 1Gi，下载 Qwen3-8B 可能 OOMKilled，需要把 `kserve/inferenceservice-config` 的 `storageInitializer.memoryLimit` 调大。
 
 ### 8.2 访问
 
@@ -424,10 +767,50 @@ curl -s -H "Host: ${SERVICE_HOSTNAME}" \
 
 ### 8.3 冷启动 + benchmark
 
+**KServe 的冷启动数据在这里采集，不在 §7.1。** 删 Pod 前先确认 ISVC `READY=True`；删 Pod 后 KServe 会重建，记录四个阶段：
+
 ```bash
-kubectl -n kserve-test delete pod -l serving.kserve.io/inferenceservice=qwen3-8b
+POD_LABEL='serving.kserve.io/inferenceservice=qwen3-8b'
+
+# 1) 触发重建并计时
+kubectl -n kserve-test delete pod -l "$POD_LABEL"
 time kubectl -n kserve-test wait --for=condition=Ready pod \
-  -l serving.kserve.io/inferenceservice=qwen3-8b --timeout=15m
+  -l "$POD_LABEL" --timeout=15m
+
+# 2) Pod 时间线：created / container startedAt / Ready
+kubectl -n kserve-test get pod -l "$POD_LABEL" -o json > /tmp/isvc-pod.json
+jq -r '.items[0] | {
+  created: .metadata.creationTimestamp,
+  startedAt: .status.containerStatuses[0].state.running.startedAt,
+  ready: (.status.conditions[] | select(.type=="Ready") | .lastTransitionTime)
+}' /tmp/isvc-pod.json
+
+# 3) 镜像拉取和调度事件
+kubectl -n kserve-test describe pod -l "$POD_LABEL" | sed -n '/Events:/,$p'
+
+# 4) 如果有 storage-initializer（hf:// 路径），看下载耗时
+kubectl -n kserve-test logs -l "$POD_LABEL" -c storage-initializer --tail=50 2>/dev/null \
+  || echo 'no storage-initializer（PVC 直挂路径）'
+
+# 5) vLLM 引擎初始化
+kubectl -n kserve-test logs -l "$POD_LABEL" -c kserve-container \
+  | grep -E 'Model loading took|Loading weights took|Starting vLLM|Application startup complete|Initializing model took'
+```
+
+各字段来源：
+
+| 字段 | 从哪拿 | PVC 直挂（本仓库默认） | `hf://` |
+|---|---|---|---|
+| `image_pull_s` | Events 里的 `Pulled ... in Xs` | 镜像已缓存时接近 0 | 同左 |
+| `model_download_s` | storage-initializer 日志起止时间 | **0**（PVC 挂载，无下载） | `Copying contents...` 到下载完成 |
+| `engine_init_s` | 主容器 `Model loading took` / `Loading weights took` / `Starting vLLM` | vLLM 初始化时间 | 同左 |
+| `total_ready_s` | Pod `creationTimestamp` → `Ready.lastTransitionTime` | 总时间 | 总时间 |
+
+把结果追加到 `results/d6/cold-start.csv`：
+
+```csv
+path,image_pull_s,model_download_s,engine_init_s,total_ready_s
+kserve,,,,
 ```
 
 用同一个 bench 命令，把 `--base-url` 换成 KServe 的 Service/网关；保存 `results/d6/kserve-bench.json`。
@@ -747,7 +1130,7 @@ results/d6/
 
 **Q3：`InferenceService` 和 `LLMInferenceService` 怎么选？**
 
-> 单模型、通用 serving、企业标准：`InferenceService`；要多模型/prefix 感知/PD/llm-d：`LLMInferenceService`。前者是后者的基础，不是替代关系。
+> 两者是 KServe 的双轨，不是新旧版本，也不是替代关系：`InferenceService` 面向 Predictive AI + 基础单机 LLM；`LLMInferenceService` 面向 GenAI 规模化（多机、PD、KV-aware、EP）。默认从 ISVC 开始，需要高级能力再迁 LLMISVC。两者可以同集群共存，但 LLMISVC 不是建在 ISVC 之上，不能互相嵌套。详见 §3.8 Q3。
 
 **Q4：Standard 和 Serverless 怎么选？**
 
@@ -777,6 +1160,14 @@ results/d6/
 
 > KServe canary（Standard 用 `spec.canary`）+ Deployment 回滚；镜像/模型/配置都要带版本标签；回滚前先看指标和 eval，不要只看 Pod Ready。
 
+**Q11：LWS 是什么？**
+
+> LeaderWorkerSet，Kubernetes SIG Apps 的 workload API；把“1 leader + N worker”作为一个副本组来管理，解决多机多 Pod 模型的组级扩缩容、滚动更新、稳定身份和互相发现问题。LLMISVC 的 `spec.worker` 存在时会创建 LWS；单卡/单 Pod 不需要。详见 §3.8 Q4。
+
+**Q12：TP / DP / EP / PP 怎么选？**
+
+> TP 切层内权重，优先 NVLink；PP 切层间 stage，适合跨机但有 bubble；DP 复制完整模型切请求，主要提吞吐；EP 切 MoE expert，只对 MoE 有意义。dense 模型总 GPU 近似 `DP × TP × PP`；MoE 还要把 EP 算进去。详见 §3.8 Q5、Q6。
+
 ---
 
 ## 14. 与 D1–D5 的衔接
@@ -802,6 +1193,13 @@ results/d6/
 - KServe Standard 安装：<https://kserve.github.io/website/docs/admin-guide/kubernetes-deployment>
 - KServe `InferenceService` + Qwen：<https://kserve.github.io/website/docs/getting-started/genai-first-isvc>
 - KServe `LLMInferenceService`：<https://kserve.github.io/website/docs/model-serving/generative-inference/llmisvc/llmisvc-overview>
+- KServe LLMISVC 架构（Gateway/EPP/InferencePool）：<https://kserve.github.io/website/docs/concepts/architecture/control-plane-llmisvc>
+- KServe LLMISVC 依赖（Gateway API/GIE/LWS）：<https://kserve.github.io/website/docs/model-serving/generative-inference/llmisvc/llmisvc-dependencies>
+- LeaderWorkerSet 文档：<https://lws.sigs.k8s.io/docs/>
+- LeaderWorkerSet 仓库：<https://github.com/kubernetes-sigs/lws>
+- vLLM parallelism/scaling：<https://docs.vllm.ai/en/latest/serving/parallelism_scaling/>
+- vLLM data parallel：<https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/>
+- vLLM expert parallel：<https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/>
 - KServe v0.17 LLM 发布说明：<https://kserve.github.io/website/blog/kserve-0.17-release>
 - KServe v0.18 多节点/llm-d：<https://kserve.github.io/website/blog/kserve-0.18-release>
 - vLLM KServe 集成：<https://docs.vllm.ai/en/stable/deployment/integrations/kserve>
