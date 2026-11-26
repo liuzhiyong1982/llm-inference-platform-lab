@@ -88,6 +88,7 @@
 | 一个 Cohort 下面通常有几个 ClusterQueue？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
+| Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
 
 > 这里只负责指路，不重复正文；每个问题在对应小节有完整答案。
@@ -660,6 +661,19 @@ preemption:
 | 和 D3 的关系 | D5 管“谁能拿卡” | D3 的 KEDA 管“服务扩几个副本” |
 
 一句话：**Kueue 决定“能不能开始”，HPA/KEDA 决定“同时跑几个”。**
+
+> **Inference platform 一定要 Kueue 吗？** 不一定。纯在线推理、单团队、GPU 足够时，`Deployment + Service + HPA/KEDA` 就够了；Kueue 不是 Deployment 的替代品。
+>
+> Kueue 真正有用的是**共享 GPU 平台**：训练、微调、批推理、离线评测和在线 serving 混在同一批 GPU 上时，用它给“可以等”的批处理做配额、排队、抢占；在线 serving 的副本数仍然交给 HPA/KEDA。Kueue 可以在外层用 `lendingLimit` 给 serving 预留配额，或者按 Pod 管 Deployment，但典型 serving 不需要它。
+>
+> | 场景 | 需要 Kueue？ |
+> |---|---|
+> | 单团队、只做在线推理 | 不需要；Deployment + HPA/KEDA |
+> | 多团队共享 GPU + 训练/批推理 | 需要；Kueue 管 batch quota / queue / preemption |
+> | 在线 serving + 批处理混部 | 需要；Kueue 管 batch，HPA 管 serving |
+> | 只要 KServe 多模型 / canary | 不需要；KServe + HPA/KEDA |
+>
+> 所以 D5 是 **B 线平台治理** artifact，不是每个 inference platform 的必选项；对纯 A 线 inference 岗，知道“Kueue 管准入、HPA 管副本”就够了。
 
 #### 3.4.1 为什么 D5 用 Job，不用 D1–D4 的 Deployment
 
