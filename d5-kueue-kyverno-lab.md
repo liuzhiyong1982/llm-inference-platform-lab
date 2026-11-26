@@ -14,7 +14,7 @@
 
 ## 0. 先看结论（执行前先记住）
 
-1. **Kueue 管“批处理谁能拿卡、拿不到怎么排队”；HPA/KEDA 管“在线服务副本数”。** 两者不是替代关系，Kueue 也不会加 GPU 节点。
+1. **Kueue 管“批处理谁能拿卡、拿不到怎么排队”；HPA/KEDA 管“在线服务副本数”。** 两者不是替代关系，Kueue 也不会加 GPU 节点。Deployment 也能接 Kueue，但按 Pod 粒度，见 §3.4.1。
 2. **Kueue 默认只接管带 `kueue.x-k8s.io/queue-name` 的 Job。** 不带 label 的 GPU Job 会直接跑，绕过配额；所以需要 Kyverno 在 API 入口强制 label、priorityClass。
 3. **配额是 request-based 的上限，不是容量保证。** `nominalQuota` 超过实际 `nvidia.com/gpu` 时，Kueue 会放行，Pod 会在 kube-scheduler 层 `Pending`。
 4. **Kyverno 1.20 不再执行旧 `ClusterPolicy`。** 新策略统一用 `policies.kyverno.io/v1` 的 `ValidatingPolicy` / `MutatingPolicy`，逻辑用 CEL 写；旧 CRD 在 1.20 还在，但 create/update 被拒，1.21 才删 CRD。
@@ -179,8 +179,8 @@ kubectl apply Job
   │     检查：queue label / priorityClass / 其他平台策略
   │     失败 → API 返回 Forbidden，对象不创建
   │
-  ├─ 2. Kueue mutating webhook
-  │     给 Job 补 suspend / 创建 Workload
+  ├─ 2. Kueue mutating webhook + controller
+  │     webhook 把 Job 置为 suspend；controller 创建 Workload
   │     Job 保持 Suspended，先不创建 Pod
   │
   ├─ 3. Kueue scheduler
@@ -246,7 +246,52 @@ D5 用的是老模型：NVIDIA device plugin 把 GPU 暴露成 extended resource
 
 **面试一句话：** “D5 用 device plugin + extended resource，因为实验目标是配额和准入；DRA 是设备分配层的升级，解决 MIG、设备属性、拓扑，不解决队列和抢占。两者可以组合，Kueue 0.18+ 已经能按 DRA 设备计配额。”
 
-### 3.2 Kueue 对象模型
+### 3.2 Kueue 的工作原理与对象模型
+
+#### 3.2.1 控制循环：Kueue 是“准入控制器”，不是调度器
+
+Kueue 不创建 Pod、不选节点、不扩节点。它只做一件事：**决定一个 Workload 现在能不能开始，并替它把配额记在账上。**
+
+```text
+Job 创建（带 queue-name）
+  │
+  ├─ 1. Kueue 的 Job controller 看到 Job
+  │     按 Pod 模板生成一个 Workload：
+  │       podSets[]（几个 Pod、每个 Pod 要多少 GPU/CPU/内存）
+  │       priority（从 Pod priority 或 WorkloadPriorityClass 来）
+  │       queueName（来自 Job 的 label）
+  │
+  ├─ 2. Workload 进入 LocalQueue → ClusterQueue 的 pending 队列
+  │     排序：priority 高的先；同 priority 按 creationTimestamp
+  │
+  ├─ 3. Kueue 逐个尝试 admission
+  │     a. namespace 是否被 namespaceSelector 允许？
+  │     b. 某个 flavor 的 nominalQuota 够不够？
+  │        不够 → cohort 里有没有闲置配额？borrowingLimit 允不允许？
+  │     c. admissionChecks 是否通过？（本 lab 不配）
+  │     都通过 → QuotaReserved=True，选好 flavor
+  │
+  ├─ 4. Admitted=True
+  │     Kueue 把 Job 的 spec.suspend 改成 false
+  │
+  ├─ 5. Kubernetes Job controller 创建 Pod
+  │     kube-scheduler 按 nvidia.com/gpu 选节点
+  │     device plugin 分配 GPU
+  │
+  └─ 6. Job 完成 / 被删除 / 被抢占
+        Workload 释放配额，Kueue 重新评估 pending 队列
+```
+
+四个必须记住的不变量：
+
+1. **Kueue 只数 request，不看 util。** 一个 Job request 1 张卡、实际用 5%，仍然占 1 张卡的配额；只写 `limits` 时按 `limits` 算（Kubernetes 默认）。
+2. **Kueue admission ≠ Pod 调度成功。** 配额是逻辑账本；`nominalQuota` 可以大于真实 GPU 数，此时 Workload `Admitted`、Pod 却 `Pending`。这是本文 §0 第 3 条，也是单卡演示的核心。
+3. **一个 Job = 一个 Workload，原子准入。** 要么整个 Job 的所有 Pod 一起被放行，要么都不放；不会出现“半个 Job 在跑”。
+4. **配额跟着 Workload 生命周期走。** Workload 没结束，配额就一直占着；Job 完成或删除才释放（Deployment 是每个 Pod 一个 Workload，按 Pod 释放）。
+
+> 所以 Kueue 的本质是一个 **quota ledger（配额账本）**：admission 时记账，完成时销账，抢占时把账转给更高优先级的 Workload。它不测量、不优化、不扩节点。
+
+#### 3.2.2 对象模型
 
 | 对象 | 作用域 | 一句话 |
 |---|---|---|
@@ -255,7 +300,8 @@ D5 用的是老模型：NVIDIA device plugin 把 GPU 暴露成 extended resource
 | `LocalQueue` | Namespace | 团队入口，指向某个 `ClusterQueue` |
 | `Workload` | Namespace | Kueue 的调度单元，由 Job 自动生成；有 `QuotaReserved` / `Admitted` / `Evicted` 条件 |
 | `Cohort` | Cluster（字符串） | 一组可互相借配额的 `ClusterQueue` |
-| `PriorityClass` | Cluster | Kubernetes 优先级；Kueue 从 Pod template 继承为 Workload priority |
+| `PriorityClass` | Cluster | Kubernetes Pod 优先级；Kueue 从 Pod template 继承为 Workload priority |
+| `WorkloadPriorityClass` | Cluster | 只影响 Kueue 排队/抢占、不影响 Pod priority 的优先级 |
 
 关系：
 
@@ -267,37 +313,168 @@ Job (label queue-name=team-a)
         → node with nvidia.com/gpu=2
 ```
 
+> `LocalQueue` 是 namespace 级的“取号窗口”，`ClusterQueue` 是真正的“配额池”。用户只提交到 LocalQueue；改配额是平台管理员改 ClusterQueue。
+
 ### 3.3 配额、借用、抢占
 
-| 字段 | 含义 | D5 取值 |
+#### 3.3.1 nominalQuota：配额账本，不是物理容量
+
+`nominalQuota` 是**这个 ClusterQueue 在某个 flavor 上、不向 cohort 借用时，可以持有的资源量**。名字里的 “nominal” 就是在提醒你：它是配置出来的名义额度，不是节点上实测的容量。
+
+admission 的判定（没有 cohort 时）：
+
+```text
+sum(已 Admitted Workload 的 request) + 新 Workload 的 request
+  ≤ nominalQuota
+```
+
+有 cohort 时，条件放宽为“自己的 nominalQuota + 允许借的量”，见 §3.3.2。
+
+它不是什么：
+
+| 容易误解 | 实际 |
+|---|---|
+| 物理 GPU 数 | 逻辑额度；可以大于真实容量（然后 Pod Pending），也可以小于（然后 GPU 闲置） |
+| GPU 利用率上限 | 只看 request；用 5% 也算占满 1 张 |
+| 节点预留 | 不绑节点；真正绑定发生在 kube-scheduler |
+| 永久硬上限 | 加入 cohort 后可以借，借了就可能超过 nominalQuota |
+| 按 Pod 实时计费 | 按 Workload 占着；Job 结束才释放 |
+
+D5 的取值：team A / team B 各 `nominalQuota: 1`，集群正好 2 张卡。这样“配额”和“容量”一致，排队/抢占的因果关系最干净；单卡实验时故意让两者不一致，用来演示 §0 第 3 条。
+
+一个常见的排障 message：
+
+```text
+insufficient unused quota for nvidia.com/gpu in flavor gpu-3060, 1 more needed
+```
+
+翻成人话：**不是节点没卡，是这个 ClusterQueue 的账本上没额度了。** 先看 `kubectl get clusterqueue team-a-cq -o yaml` 的 `status.flavorsUsage`，再看 Pod 的 `Pending` 原因；两者不要混。
+
+#### 3.3.2 cohort：把多个 ClusterQueue 的闲置配额放进一个池子
+
+`cohort` 就是一个字符串名字。所有 `spec.cohortName` 相同的 ClusterQueue 属于同一个 cohort，可以在彼此**闲置**时借配额。
+
+```text
+cohort: research
+  team-a-cq   nominalQuota: 1   borrowingLimit: 1
+  team-b-cq   nominalQuota: 1
+```
+
+- team B 空闲时，team A 最多可以用 `1 + 1 = 2` 张卡（自己的 1 + 借来的 1）。
+- team B 一提交，team A 是否要让出，取决于 `reclaimWithinCohort`。
+- 没有 cohort（`cohortName` 为空）就是严格隔离：team A 只能用自己的 1 张，B 的卡空着也不能用。
+
+三个限制字段：
+
+| 字段 | 管谁 | 不设时 |
 |---|---|---|
-| `nominalQuota` | 这个 ClusterQueue 的硬上限 | team A/B 各 1 GPU |
-| `borrowingLimit` | 最多能从 cohort 里借多少 | 核心实验不设（严格隔离） |
-| `lendingLimit` | 最多能借给别人多少 | 核心实验不设 |
-| `cohortName` | 加入哪个借用组 | 核心实验不设 |
-| `preemption.withinClusterQueue` | 同队列内是否允许高优先级抢占 | `LowerPriority` |
-| `preemption.reclaimWithinCohort` | 是否回收别的队列超额借用的配额 | `Never`（核心） |
-| `preemption.borrowWithinCohort` | 借用时是否允许抢占 | `Never`（核心） |
+| `borrowingLimit` | 借方最多借多少 | 最多借到 cohort 所有 nominalQuota 之和 |
+| `lendingLimit` | 贷方最多借出多少 | 闲置的全都可以借出 |
+| `reclaimWithinCohort` | 贷方要收回时，能不能抢占借方 | `Never`（默认不抢） |
 
-**关键语义：**
+`borrowWithinCohort` 是另一个方向：**借方自己需要借配额时，能不能抢占 cohort 里其他低优先级的 Workload**。它只在 `reclaimWithinCohort != Never` 时生效，还可以用 `maxPriorityThreshold` 限制“只抢 priority ≤ N 的”。
 
-- `nominalQuota` 是**请求上限**，不是实际用量；Kueue 不看 GPU util，只看 Pod requests。
-- 没有 cohort 时，team A 不能借 team B 的空闲 GPU；这是“严格配额”。
-- 有 cohort + `borrowingLimit` 时，team A 可以在 team B 空闲时借卡；team B 一提交，是否回收取决于 `reclaimWithinCohort`。
-- 抢占是**驱逐 Workload**（Job 被 suspend、Pod 被删），不是“暂停容器”。
+最容易混的两点：
+
+- **cohort 不是 namespace，也不是节点池。** 它只影响配额记账，不影响 Pod 能调度到哪些节点；节点范围仍由 `ResourceFlavor` 的 label/taint 决定。
+- **cohort 不是“自动扩容”。** 借来的仍然是集群里已有的闲置配额，不会变出 GPU。
+
+D5 核心实验**不设 cohort**，先讲严格隔离；有余力再加 10 分钟可选实验：给两个 CQ 加同一个 cohort，观察 A 借到 B 的卡、B 提交后 A 被 reclaim。
+
+#### 3.3.3 priority：决定“谁先开始、谁被抢”
+
+Workload 的 `priority` 是一个整数，越大越优先。它影响两件事：
+
+1. **排队顺序**：pending 队列先按 priority 降序，再按 `creationTimestamp` 升序。
+2. **抢占资格**：高 priority 的 Workload 可以按策略驱逐低 priority 的 Workload。
+
+priority 有两个来源，别混：
+
+| 来源 | 怎么设 | 影响范围 |
+|---|---|---|
+| **Pod priority** | Job 的 `spec.template.spec.priorityClassName` | Kueue 继承为 Workload priority，**同时**影响 kube-scheduler 的 Pod 抢占 |
+| **WorkloadPriorityClass** | Job metadata 的 label `kueue.x-k8s.io/priority-class: <name>` | 只影响 Kueue 排队/抢占，不改变 Pod priority |
+
+```yaml
+# 方式 1：Pod priority（D5 用这个）
+spec:
+  template:
+    spec:
+      priorityClassName: gpu-high
+---
+# 方式 2：Workload priority（不想动 Pod priority 时）
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: team-a
+    kueue.x-k8s.io/priority-class: high-priority
+```
+
+队列策略（`spec.queueingStrategy`）：
+
+| 策略 | 行为 | 适合 |
+|---|---|---|
+| `StrictFIFO` | 前面的 Workload 进不来，后面的也不许插队 | 严格公平、可预测 |
+| `BestEffortFIFO`（默认） | 前面大的进不来，后面小的能塞就塞 | 提高利用率，避免队头阻塞 |
+
+**priority 不是配额。** 高优先级 Workload 也不能凭空超过 `nominalQuota`；它只是排到前面，或者在配额已满时按策略抢低优先级的额度。
+
+#### 3.3.4 preemption：三个边界
+
+Kueue 的抢占分三个边界，配置和语义都不同：
+
+| 边界 | 字段 | 回答的问题 |
+|---|---|---|
+| 同 ClusterQueue 内 | `preemption.withinClusterQueue` | 队列满了，高 priority 能不能抢同队列的低 priority？ |
+| cohort 内 reclaim | `preemption.reclaimWithinCohort` | 我把配额借给别人了，我要用时能不能收回？ |
+| cohort 内 borrow | `preemption.borrowWithinCohort` | 我要借配额，能不能抢别人正在用的？ |
+
+D5 只开第一个：
+
+```yaml
+preemption:
+  withinClusterQueue: LowerPriority
+```
+
+抢占的动作是**驱逐 Workload**：Workload 变为 `Evicted=True, reason=Preempted`，Job 被重新 `suspend`，Pod 被删；等配额空出来，高 priority 的 Workload 被 admit，Job 再恢复。不是“暂停容器”，也不是“把 Pod 挪走”。
 
 ### 3.4 Kueue vs HPA/KEDA
 
 | 维度 | Kueue | HPA / KEDA |
 |---|---|---|
-| 对象 | 批处理 Job / 训练 / 离线推理 | 长期运行的 Deployment / StatefulSet |
+| 对象 | 批处理 Job / 训练 / 离线推理；Deployment/StatefulSet 也能接，但按 **Pod 粒度** 管（见 §3.4.1） | 长期运行的 Deployment / StatefulSet |
 | 动作 | 准入、排队、挂起、抢占 | 增减副本数 |
 | 触发 | 配额、优先级、cohort | CPU/GPU/队列深度/自定义指标 |
 | 会加节点吗 | 不会 | 不会（要 Cluster Autoscaler / Karpenter） |
-| 典型问题 | “为什么我的 Job 一直 Pending？” | “为什么副本扩不出去？” |
+| 典型问题 | “为什么我的 Job 一直 Pending？” / “为什么 Deployment 只起来一部分 Pod？” | “为什么副本扩不出去？” |
 | 和 D3 的关系 | D5 管“谁能拿卡” | D3 的 KEDA 管“服务扩几个副本” |
 
 一句话：**Kueue 决定“能不能开始”，HPA/KEDA 决定“同时跑几个”。**
+
+#### 3.4.1 为什么 D5 用 Job，不用 D1–D4 的 Deployment
+
+D1–D4 的 Deployment 是 **serving 单元**：长期运行、滚动更新、HPA/KEDA 扩副本。D5 要演示的是**批处理队列**，Job 才是 Kueue 的一等公民：
+
+| 维度 | Job | Deployment |
+|---|---|---|
+| Kueue 管理粒度 | **整个 Job 一个 Workload**，所有 Pod 原子准入 | **每个 Pod 一个 Workload**，不是整个 Deployment |
+| 挂起/恢复 | `spec.suspend`；挂起后 Job controller 不建 Pod | 没有“挂起整个 Deployment”的字段；scale-out 的新 Pod 被 gate 住，旧 Pod 继续跑 |
+| 抢占 | 驱逐 Workload → Job suspend → 可恢复 | 驱逐一个 Pod → ReplicaSet 补一个，队列语义变成 Pod 级 |
+| 完成态 | 有 Succeeded/Failed，结束即释放配额 | 永远 Running，没有“做完释放配额” |
+| 和 HPA/KEDA | 不适用 | 副本数由 HPA/KEDA 管，和配额准入会互相干扰 |
+
+Kueue 的 Deployment integration 是 **Pod-based**，官方原话是 “Kueue does not yet support managing a Deployment as a single Workload”。所以用 Deployment 做 D5 会得到：
+
+- `kubectl get workloads` 里是 2 个 Pod Workload，不是 1 个 Job Workload；
+- 配额 1 时 Deployment 只起 1 个 Pod，另一个被 scheduling gate 挡住；
+- 抢占演示不再是“一个 Workload 被 Evicted”，而是“一个 Pod 被删、ReplicaSet 再补一个”。
+
+这不是说 Deployment 不能接 Kueue。生产上 serving + Kueue 的常见做法是：
+
+- 用 `lendingLimit` 给在线服务预留配额，避免训练把卡借光；
+- 或者 serving 走 `ResourceQuota` + `PriorityClass`，Kueue 只管 batch；
+- 真要 Pod 级配额，就给 Deployment 的 `metadata.labels` 加 `kueue.x-k8s.io/queue-name`，并接受“只起一部分副本”。
+
+D5 选 Job 还有实验原因：`pause` 镜像秒起，不下载模型；用 vLLM Deployment 每个样本要等 2–5 分钟 cold start，3h 里跑不了几轮，而且会把“配额排队”和“模型加载”混在一起。
 
 ### 3.5 为什么 Kueue 需要 Kyverno 补入口
 
@@ -1523,11 +1700,11 @@ results/d5/
 
 ### 12.4 验收清单
 
-- [ ] `nvidia.com/gpu=2`，Kueue/Kyverno 版本记录
+- [ ] `nvidia.com/gpu=2`（单卡为 `=1`），Kueue/Kyverno 版本记录
 - [ ] 两条 Kyverno 拒绝日志（缺 queue label、缺 priorityClass）
 - [ ] 无 label Job 绕过配额的证据（装 Kyverno 前）
 - [ ] team A 2 个 Job → 1 跑 1 pending；`QuotaReserved=False` 快照
-- [ ] team B 1 个 Job → 第二张卡，节点 `2/2`
+- [ ] team B 1 个 Job → 第二张卡，节点 `2/2`；单卡时改为 `Admitted` + Pod `Pending`，保存 `Insufficient nvidia.com/gpu`
 - [ ] 高优先级抢占：`Evicted=True, reason=Preempted`
 - [ ] `kueue_preempted_workloads_total` 或 event 证据
 - [ ] `results/d5/` 进 git
@@ -1535,7 +1712,7 @@ results/d5/
 
 ### 12.5 B 线简历 bullet
 
-> 用 Kueue `ClusterQueue` 给两个团队各 1 张 GPU 配额，Kyverno `ValidatingPolicy` 在 API 入口强制 GPU Job 带 queue label 和 priorityClass；演示了 team A 提交 2 个 Job 只能跑 1 个、team B 仍拿到第二张卡，以及高优先级抢占低优先级；留下 2 条拒绝日志和 1 条 `Preempted` condition。
+> 用 Kueue `ClusterQueue` 给两个团队各 1 张 GPU 配额，Kyverno `ValidatingPolicy` 在 API 入口强制 GPU Job 带 queue label 和 priorityClass；演示了 team A 提交 2 个 Job 只能跑 1 个、team B 仍能拿到另一张卡（单卡时验证 Kueue 放行、scheduler Pending），以及高优先级抢占低优先级；留下 2 条拒绝日志和 1 条 `Preempted` condition。
 
 ---
 
@@ -1602,6 +1779,10 @@ RBAC、NetworkPolicy、Pod Security Admission、镜像签名、节点隔离/tain
 
 - Kueue 安装（v0.20.7）：<https://kueue.sigs.k8s.io/docs/getting-started/installation/>
 - Kueue `ClusterQueue`：<https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/>
+- Kueue `Workload` 与 priority：<https://kueue.sigs.k8s.io/docs/concepts/workload/>
+- Kueue `WorkloadPriorityClass`：<https://kueue.sigs.k8s.io/docs/concepts/workload_priority_class/>
+- Kueue cohort：<https://kueue.sigs.k8s.io/docs/concepts/cohort/>
+- Kueue Deployment integration（Pod-based）：<https://kueue.sigs.k8s.io/docs/tasks/run/deployment/>
 - Kueue 抢占：<https://kueue.sigs.k8s.io/docs/concepts/preemption/>
 - Kueue v1beta2 API：<https://kueue.sigs.k8s.io/docs/reference/kueue.v1beta2/>
 - Kueue labels/annotations：<https://kueue.sigs.k8s.io/docs/reference/labels-and-annotations/>
