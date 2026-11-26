@@ -91,6 +91,7 @@
 | CEL 的 `all(c, ...)` / `has(...)` 怎么读？ | §3.6.3 |
 | CEL 的 `has` / `in` / `[]` 有什么区别？ | §3.6.4 |
 | `kubectl explain` 能查到的字段就用 `has` 吗？ | §3.6.4 |
+| 两个 `has` 是不是重复？ | §3.6.3 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | Inference platform 一定要用 Kueue 吗？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -851,6 +852,20 @@ object.spec.containers.all(c,
 | `'cpu' in c.resources.limits` | `cpu` 这个 key 存在 | map key 检查 |
 
 所以这三段不是重复，而是**逐层保护**：先确认父字段存在，再确认 map 字段存在，最后检查 map key。
+
+**这两个 `has` 也不是重复：**
+
+| 容器状态 | `has(c.resources)` | `has(c.resources.limits)` | 结果 |
+|---|---|---|---|
+| 没有 `resources` | `false` | 不应求值 | 第一个 `has` 挡住 |
+| `resources` 只有 `requests` | `true` | `false` | 第二个 `has` 挡住 |
+| `resources.limits` 有 `cpu` | `true` | `true` | 才检查 key |
+
+- `has(c.resources)` 为 `true` **不能推出** `has(c.resources.limits)` 为 `true`：`resources` 可以只有 `requests`，没有 `limits`。
+- `has(c.resources.limits)` 也不能替代 `has(c.resources)`：在 Kyverno 的 dynamic object 里，父字段不存在时直接读 `resources.limits` 不保证安全；不同 CEL 类型/实现下行为可能不同，显式 `has` 更稳。
+- 顺序不能反：`has(c.resources.limits) && has(c.resources)` 里，第二个 `has` 保护不了第一个。
+
+> 严格 CEL 对 typed protobuf message 可能允许省略父 `has`（未设置的 message 字段会求值为空 message）；但 D5 的 `object` 是动态对象，按 Kubernetes/Kyverno 的推荐显式写父检查，不依赖隐式默认值。
 
 旧 DSL 要靠 `foreach` + `pattern` + `deny.conditions` 一层层套。D5 的“GPU 在 limits **或** requests 里”也是同理。
 
