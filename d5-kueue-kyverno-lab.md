@@ -78,6 +78,7 @@
 | Kueue 的 Job 和 K8s 的 Job / Pod 是什么关系？ | §3.2.3 |
 | `ClusterQueue` 和 `team-a-cq` 是什么关系？ | §3.2.2 |
 | 为什么要有 `LocalQueue` 一层？ | §3.2.4 |
+| `queue-name` label 的值是 `LocalQueue` 名吗？ | §3.2.4 |
 | `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -424,6 +425,10 @@ D5 里说的 “Job” 就是 Kubernetes 的 `batch/v1 Job`，**不是 Kueue 自
 | **多入口 / 多租户** | 一个 namespace 可以有多个 `LocalQueue`（GPU 池、CPU 池、spot 池）；多个 namespace 也可以指向同一个 `ClusterQueue`。 |
 
 > `LocalQueue` 自己不持有配额，它只是一个指针；配额仍在 `ClusterQueue`。`LocalQueue` 的 status 只显示这个入口的 pending / admitted 情况。
+>
+> **`kueue.x-k8s.io/queue-name` 的值是 `LocalQueue` 的 name，不是 `ClusterQueue` 的 name。** Kueue 用 `Job 所在 namespace + label 值` 查找 LocalQueue，再通过 `LocalQueue.spec.clusterQueue` 找到真正的配额池。
+>
+> D5 里 `queue-name: team-a` → `LocalQueue team-a`（namespace `team-a`）→ `ClusterQueue team-a-cq`；不是 `queue-name: team-a-cq`。同一个 label 值在不同 namespace 指向不同的 LocalQueue，所以 Kyverno 才强制 `queue-name == namespace`，防止 team A 用 team B 的入口。
 
 生产上还可以在 namespace 里建一个名为 `default` 的 LocalQueue：Kueue 会给没有 `queue-name` label 的 Job 自动补上 `queue-name: default`（Kueue v0.17 起 stable）。D5 **故意不建**，否则 §7 的“无 label 绕过配额”实验就看不到了。
 
