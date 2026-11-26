@@ -866,7 +866,8 @@ raw,,,,
 
 ```bash
 kubectl -n kserve-test run bench --rm -it --restart=Never \
-  --image=vllm/vllm-openai:v0.34.0 -- \
+  --image=vllm/vllm-openai:v0.34.0 \
+  --command -- \
   vllm bench serve \
   --model qwen3-8b \
   --tokenizer Qwen/Qwen3-8B-AWQ \
@@ -881,6 +882,10 @@ kubectl -n kserve-test run bench --rm -it --restart=Never \
   --metric-percentiles 50,95,99 \
   --goodput ttft:2000 tpot:100
 ```
+
+> **必须加 `--command`。** `kubectl run` 的 `--` 默认只设置 container args，不覆盖 image entrypoint；vLLM 镜像的 entrypoint 是 `vllm serve`，不加会变成 `vllm serve vllm bench serve ...`，报 `vllm: error: unrecognized arguments`。
+>
+> 如果 bench Pod 下载 tokenizer 失败，改用 `kubectl -n kserve-test exec deploy/vllm-raw -- vllm bench serve ... --tokenizer /models --base-url http://127.0.0.1:8000`，避免访问 Hugging Face。
 
 保存 JSON 到 `results/d6/raw-bench.json`。
 
