@@ -1135,10 +1135,30 @@ kserve,,,,
 
 **canary 是在同一个 ISVC 下同时跑 stable 和 canary 两个 Deployment，把一小部分流量切给 canary，用指标决定 promote 还是 rollback。** 它不是模型评测本身，而是“新版本先接 10% 流量”的发布策略。
 
+#### 关键 API
+
+| API / 字段 | 作用 |
+|---|---|
+| `InferenceService.spec.canary[]` | canary 列表；`serving.kserve.io/v1beta1` |
+| `.predictor.name` | 必填；驱动 Deployment/Service 名：`{isvc}-{name}-predictor` |
+| `.trafficPercent` | 0–100；所有 canary 之和必须 ≤100；0 仍会创建 Deployment |
+| `.predictor.model` | canary 的镜像/runtime/storageUri/args，真正的版本差异放这里 |
+| `InferenceService.status.canaryStatuses[]` | `name`、`ready`、`trafficPercent`、`modelStatus` |
+| `HTTPRoute.spec.rules[].backendRefs[].weight` | 实际分流权重；stable = 100 - 所有 Ready canary 之和 |
+| Deployment/Service `{isvc}-{name}-predictor` | KServe 创建的底层对象 |
+| condition `CanaryPredictorReady` | canary 是否可接流量 |
+| `canaryTrafficPercent` | Knative/Serverless 字段；Standard mode 不生效 |
+
+> canary 使用固定副本，**不走 HPA**；`trafficPercent: 0` 是“只部署不分流”，但仍占 GPU。
+>
+> 只有 `status.canaryStatuses[].ready=true` 的 canary 才会计入 HTTPRoute 权重；没 Ready 时 stable 拿 100%。
+>
+> promote：把 stable 的 `spec.predictor.name` 改成 canary 的 name，并删掉 `spec.canary` 条目；rollback：删掉 `spec.canary` 条目后重新 apply。
+
 ```bash
 kubectl apply -f scripts/d6/40-canary.yaml
 kubectl -n kserve-test get inferenceservice qwen3-8b
-kubectl -n kserve-test get deploy
+kubectl -n kserve-test get deploy,svc
 ```
 
 > 本仓库 `40-canary.yaml` 用 `pvc://`，并且它是**替换整个 ISVC**（不是 patch）。单卡不要 apply；2 卡时先确认 stable 已经 `READY=True`，再 apply。canary 的 `--max-model-len=4096` 只是制造一个可区分的 variant；真实发布应换模型/镜像/量化版本。
@@ -1149,9 +1169,32 @@ kubectl -n kserve-test get deploy
 
 观察：
 
+```bash
+# spec 与 status：canary 配置 + Ready 状态
+kubectl -n kserve-test get isvc qwen3-8b -o json | jq '{
+  canary: .spec.canary,
+  canaryStatuses: .status.canaryStatuses
+}'
+
+# 两个 Deployment / Service
+kubectl -n kserve-test get deploy,svc \
+  -l serving.kserve.io/inferenceservice=qwen3-8b
+
+# 只有装了 Gateway API 才有 HTTPRoute
+kubectl get httproute -A
+kubectl get httproute -A -o json | jq '.items[] | {
+  name: .metadata.name,
+  backends: [.spec.rules[].backendRefs[] | {name, weight}]
+}'
+```
+
 - `spec.canary[].trafficPercent: 10`；
 - `qwen3-8b-predictor` 和 `qwen3-8b-canary-predictor` 两个 Deployment 都在；
-- 用 10–20 个请求看是否大约 1–2 个命中 canary（不要用 2 个请求下结论）。
+- 用 10–20 个请求看是否大约 1–2 个命中 canary（不要用 2 个请求下结论）；用 canary Pod 日志或 per-pod metrics 判断，不要看回复内容。
+
+> **没有 Gateway API/HTTPRoute 时，canary Deployment 可能被创建，但没有权重分流**；`kubectl get httproute` 为空就说明 90/10 不会生效。要验证分流，先装 Envoy Gateway/Gateway API。
+>
+> canary 只有 `status.canaryStatuses[].ready=true` 才会进入 HTTPRoute 的 backendRefs；没 Ready 时 stable 拿 100%。所以先看 status，再看权重。
 
 ### 8.5 HPA / 扩缩
 
@@ -1372,7 +1415,7 @@ kubectl -n kserve-test get deploy,svc,gateway,httproute,inferencepool
 | `ImagePullBackOff` | 镜像/网络/凭据 | `kubectl describe pod` |
 | `Insufficient nvidia.com/gpu` | 两张卡被占 | 顺序跑；删 raw/ISVC |
 | HPA 不扩 | metrics-server/CPU 指标/上限 | `kubectl describe hpa` |
-| canary 没流量 | 没有 canary entry / 比例太小 | 确认 `spec.canary` 已生效；多发请求；检查 HTTPRoute 权重 |
+| canary 没流量 | 没有 canary entry、比例太小、canary 未 Ready，或没有 HTTPRoute/Gateway | 看 `status.canaryStatuses`；确认 `kubectl get httproute -A` 有 backendRefs 权重 |
 | Gateway 502 | Envoy/Gateway 未 Ready / Host 错 | `kubectl -n kserve get gateway,svc` |
 | `kubectl -n kserve get svc` 没有 Envoy | 没装 Envoy Gateway，或 Gateway 在别的 namespace | 用 `kubectl get svc -A` 过滤 envoy；没有就直接 port-forward `qwen3-8b-predictor` |
 | `-bash: envoy-svc: No such file or directory` | 把 `<envoy-svc>` 占位符原样执行，bash 当成重定向 | 替换成实际 Service 名，去掉尖括号 |
