@@ -864,30 +864,49 @@ raw,,,,
 
 ### 7.2 benchmark
 
+> 先建结果目录。**bench 必须加 `--save-result` 才会写 JSON；只在终端看输出不算记录。**
+
 ```bash
-kubectl -n kserve-test run bench --rm -it --restart=Never \
-  --image=vllm/vllm-openai:v0.34.0 \
-  --command -- \
+cd /root
+mkdir -p results/d6
+
+POD=$(kubectl -n kserve-test get pod -l app=vllm-raw \
+  -o jsonpath='{.items[0].metadata.name}')
+
+kubectl -n kserve-test exec "$POD" -- bash -lc '
+  mkdir -p /tmp/bench &&
   vllm bench serve \
-  --model qwen3-8b \
-  --tokenizer Qwen/Qwen3-8B-AWQ \
-  --base-url http://vllm-raw.kserve-test.svc:8000 \
-  --dataset-name random \
-  --random-input-len 1024 \
-  --random-output-len 256 \
-  --num-prompts 100 \
-  --max-concurrency 16 \
-  --ignore-eos \
-  --percentile-metrics ttft,tpot,itl,e2el \
-  --metric-percentiles 50,95,99 \
-  --goodput ttft:2000 tpot:100
+    --model qwen3-8b \
+    --tokenizer /models \
+    --base-url http://127.0.0.1:8000 \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 256 \
+    --num-prompts 100 \
+    --max-concurrency 16 \
+    --ignore-eos \
+    --percentile-metrics ttft,tpot,itl,e2el \
+    --metric-percentiles 50,95,99 \
+    --goodput ttft:2000 tpot:100 \
+    --save-result \
+    --result-dir /tmp/bench \
+    --result-filename raw-bench.json
+' | tee results/d6/raw-bench.txt
+
+kubectl -n kserve-test cp "$POD":/tmp/bench/raw-bench.json \
+  results/d6/raw-bench.json
 ```
 
-> **必须加 `--command`。** `kubectl run` 的 `--` 默认只设置 container args，不覆盖 image entrypoint；vLLM 镜像的 entrypoint 是 `vllm serve`，不加会变成 `vllm serve vllm bench serve ...`，报 `vllm: error: unrecognized arguments`。
->
-> 如果 bench Pod 下载 tokenizer 失败，改用 `kubectl -n kserve-test exec deploy/vllm-raw -- vllm bench serve ... --tokenizer /models --base-url http://127.0.0.1:8000`，避免访问 Hugging Face。
+验证：
 
-保存 JSON 到 `results/d6/raw-bench.json`。
+```bash
+jq '{completed,failed,output_throughput,mean_ttft_ms,p99_ttft_ms,mean_tpot_ms,p99_tpot_ms}' \
+  results/d6/raw-bench.json
+```
+
+> `--save-result` 写在**容器内**的 `/tmp/bench`，不是宿主机。必须再 `kubectl cp` 出来；如果用 `kubectl run --rm`，Pod 一结束就被删，文件也会丢。
+>
+> 独立 bench Pod 也能用，但要去掉 `--rm`，先 `kubectl cp` 再 `kubectl delete pod bench`。注意 `kubectl run` 的 `--` 只设置 args，不覆盖 entrypoint，必须加 `--command`，否则会变成 `vllm serve vllm bench serve ...`。
 
 ---
 
