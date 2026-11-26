@@ -1,0 +1,28 @@
+# D6a treatment: the same model served through KServe InferenceService.
+# KServe adds the Deployment/Service/Ingress/HPA plumbing and revision tracking.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen3-8b
+  namespace: kserve-test
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: hpa
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 2
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: kserve-vllmserver-d6
+      storageUri: hf://Qwen/Qwen3-8B-AWQ
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: "24Gi"
+          nvidia.com/gpu: "1"

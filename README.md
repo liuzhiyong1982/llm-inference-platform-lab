@@ -202,4 +202,6 @@ D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，16Gi
 
 D5（B 线，3h）：Kueue 两团队 GPU 配额 + Kyverno CEL 准入；**2026-11-25 准备，尚未在 Vast 执行**；本地 kind 已用假 `nvidia.com/gpu=2` 验证配额/排队/抢占和 CEL 策略；文档见 [`d5-kueue-kyverno-lab.md`](./d5-kueue-kyverno-lab.md)，manifest 在 `scripts/d5/`；Kueue `v0.20.7`、Kyverno `1.20.0`，旧 `ClusterPolicy` 在 1.20 已停止执行。
 
-技术栈调研与 D1–D5 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/Argo CD/GPU Operator/安全/OpenCost；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线。
+D6（B 线，5–6h，两段）：**D6a KServe 服务抽象（3h）+ D6b 推理可观测性（2–3h）**，合并了原 D6/D7；**2026-11-26 准备，尚未在 Vast 执行**；同一模型 raw Deployment vs KServe `InferenceService`，加 DCGM/vLLM/OTel/Grafana/告警/game day，不重跑 D4；文档见 [`d6-kserve-observability.md`](./d6-kserve-observability.md)，manifest 在 `scripts/d6/`；KServe `v0.21.0`、vLLM `v0.34.0`、Qwen3-8B-AWQ；Standard mode 不支持 HTTP scale-to-zero。
+
+技术栈调研与 D1–D6 缺口见 [`market-stack-gap-analysis.md`](./market-stack-gap-analysis.md)（2026-11-24；2026-11-26 合并 D6）：A 线缺 SGLang/TP/DCGM+OTel，B 线缺 KServe/GPU Operator/安全/OpenCost（Argo CD 由日常工作覆盖）；按 P0/P1/P2 排了最小实验，补法不改变 D1–D5 主线，D6 为 B 线加挂。

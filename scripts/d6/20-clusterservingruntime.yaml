@@ -1,0 +1,82 @@
+# Same vLLM image as 10-raw-vllm.yaml, wrapped as a KServe ClusterServingRuntime.
+# Why a custom runtime: the built-in kserve-vllmserver in KServe v0.21.0 uses
+# vllm/vllm-openai:v0.21.0; using the same v0.34.0 image keeps the A/B comparison fair.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-vllmserver-d6
+  annotations:
+    serving.kserve.io/server-type: vllmserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+    - name: kserve-container
+      image: vllm/vllm-openai:v0.34.0
+      command:
+        - python
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --served-model-name={{.Name}}
+        - --model=/mnt/models
+        - --max-model-len=8192
+        - --gpu-memory-utilization=0.85
+        - --max-num-seqs=16
+        - --enable-prefix-caching
+      env:
+        - name: HF_HOME
+          value: /tmp
+        - name: VLLM_CONFIG_ROOT
+          value: /tmp
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: spawn
+      ports:
+        - name: http
+          containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /v1/models
+          port: 8080
+        failureThreshold: 3
+        periodSeconds: 10
+        successThreshold: 1
+        timeoutSeconds: 5
+      startupProbe:
+        httpGet:
+          path: /v1/models
+          port: 8080
+        failureThreshold: 60
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        successThreshold: 1
+        timeoutSeconds: 10
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: "24Gi"
+          nvidia.com/gpu: "1"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+      volumeMounts:
+        - name: devshm
+          mountPath: /dev/shm
+  supportedModelFormats:
+    - name: vLLM
+      version: "1"
+      autoSelect: true
+      priority: 1
+  volumes:
+    - name: devshm
+      emptyDir:
+        medium: Memory

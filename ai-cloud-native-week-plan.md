@@ -103,13 +103,15 @@ A-only 的最低作品集门槛更高：2 个深度项目 + 1 个开源贡献/�
 | 季度 | P0 | 关联的现有 artifact | 为什么放这里 | 验收 |
 |---|---|---|---|---|
 | Q1 | **P0-1 SGLang**（D2.5） | D2 | 引擎对照必须复用 D2 的同一模型、同一 workload、同一指标；隔一个季度再跑，控制变量会丢 | 1 张 vLLM vs SGLang 表 + 1 句选型结论 |
-| Q1 | **P0-3a DCGM + Grafana** | D1/D3 | D3 已经装了 Prometheus，补 exporter/dashboard 成本最低；这一半不需要 D4 | 1 张 GPU + vLLM dashboard |
-| Q1 | **P0-4 KServe**（D3.5） | D3 | 用 D3 的 raw Deployment 做 control，正好形成“裸 Deployment vs KServe”的 B 线基线 | 1 个 `InferenceService` + 冷启动/P99 对比 |
+| Q1 | **P0-3a DCGM + Grafana**（D6b-1） | D1/D3 | D3 已经装了 Prometheus，补 exporter/dashboard 成本最低；这一半不需要 D4 | 1 张 GPU + vLLM dashboard |
+| Q1 | **P0-4 KServe**（D6a） | D3 | 用 D3 的 raw Deployment 做 control，正好形成“裸 Deployment vs KServe”的 B 线基线 | 1 个 `InferenceService` + 冷启动/P99 对比 |
 | Q2 | **P0-2 TP=2**（D2.6） | D4.5 | 先有 TP 的通信/显存概念，再跑 2P+2D；否则 PD 的变量和 TP 混在一起，结论不干净 | TP=1 vs TP=2 表 |
-| Q2 | **P0-3b OTel + EPP trace**（D4.7） | D4 | 只有 D4 有 EPP/Envoy；trace 要覆盖“网关→EPP→vLLM”，放在 D4 之后才有对象 | 1 条 EPP→vLLM trace |
-| Q2 | **P0-5 Argo CD + OpenCost**（D3.6） | D3/D4 + chargeback | GitOps 要部署 D4 的 manifest；OpenCost 直接服务 Q2 的 chargeback，不另开一条线 | 1 次 GitOps 回滚 + namespace 成本表 |
+| Q2 | **P0-3b OTel + EPP trace**（D6b-2） | D4 | 只有 D4 有 EPP/Envoy；trace 要覆盖“网关→EPP→vLLM”，放在 D4 之后才有对象 | 1 条 EPP→vLLM trace |
+| Q2 | **P0-5 OpenCost**（D3.6） | D3/D4 + chargeback | Argo CD/GitOps 已由日常工作覆盖，不再排 lab；只补 namespace 成本表 | 1 张 `$/1M tokens` 成本表 |
 | Q3 | **P0-6 Vault/OPA/NetworkPolicy**（D5.5） | D5 | 安全策略要建在 Kueue/Kyverno 的 namespace/配额之上；先有配额，再谈准入和隔离 | 2 条拒绝日志 + 1 个 secret 注入 + 1 条 NetworkPolicy |
 
+> **D6 合并：** D6a（KServe）和 D6b（观测）在同一文档 `d6-kserve-observability.md`；D6b 复用 D4 manifest，不重跑 D4。P0-3a/P0-3b/P0-4 都落在 D6。
+>
 > **P1/P2 不排进 gate。** flow control、TensorRT-LLM/Triton、MLflow/Kubeflow slice、RAG/MCP 都是“有余力再加”的加分项；它们不改变上面 6 个 P0 的验收。不要为了 P1 把 P0 的季度挤掉。
 
 **季度 gate（不再按 12/14 周倒排）：**
@@ -369,8 +371,8 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 | **D3** | 3h | k3s + vLLM Deployment；**权重分发实测**：initContainer 现下 vs node-local 缓存，测冷启动秒数；KEDA 按 `vllm:num_requests_waiting` 扩缩 | 冷启动对比（秒）+ 扩容曲线；**B 线：GPU 平台交付链路 + 每副本成本** |
 | **D4** | 4h | **llm-d 日**：租 2×3060 12GB VM（instance 62540497；L4 VM 不可得）、模型 Qwen3-4B-AWQ，按 Well-Lit Path 跑 `precise-prefix-cache-routing`（或 optimized baseline）[13]；同一批"共享长前缀"的请求，对比普通 round-robin vs EPP 路由的 P99 | 一张 P99 对比图 + 命中率数字；**B 线：Gateway/InferencePool 运维图 + 路由故障表**。**2026-11-25 已跑**：TTFT P99 direct 4475ms / optimized 3459ms（−22.7%）/ precise 3969ms；图 `results/d4/d4-ttft.png` |
 | **D5** | 3h | Kueue `ClusterQueue` 两团队配额[9] + Kyverno 强制 GPU workload 带 priorityClass / quota label；跑"抢卡"演示 | 两条被拒 manifest 日志；**B 线：配额/准入/审计说明** |
-| **D6** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；**晚上**报名 NCA-AIIO（$125）[16]，把考试排在下一周 | 可发出去的链接 + 已预约考试；**B 线：500 字平台案例 + 2 条 B 线 bullet** |
-| **D7** | — | 休息。唯一动作：列 10 家目标公司 + 抄 3 个真实 JD。不碰终端 | 目标公司清单；**B 线：3 个本地 B 线 JD 映射** |
+| **D6** | 6h（D6a 3h + D6b 2–3h） | **KServe 服务抽象 + 推理可观测性**：`InferenceService` vs raw Deployment；canary/HPA；DCGM/vLLM/OTel/Grafana；**不重跑 D4** | 1 个 `InferenceService` + 冷启动表 + dashboard + trace + 告警；**B 线：serving/obs 案例** |
+| **D7（wrap-up）** | 3h | 1500 字 writeup + 10 分钟讲稿 + 简历两行；列 10 家目标公司 + 抄 3 个 JD；**晚上**报名 NCA-AIIO（$125）[16] | 可发出去的链接 + 已预约考试 + 目标公司清单 |
 
 > D3 的学习文档见 [`d3-k8s-vllm-learning.md`](./d3-k8s-vllm-learning.md)（2026-11-24 已执行：§7 冷启动、§8 KEDA/1→2、§9 驱逐；实付约 `$4.00`）；D3 直接用 Vast RTX VM（你已在上面跑过 k8s），租借命令见该文档 §5.0。执行后把三个数（冷启动、扩容曲线、驱逐）补进 README。
 >
@@ -381,15 +383,18 @@ NCP-AIO 的实操 lab 是三个场景：**在 BCM 里用 Slurm 排障、用 K8s 
 > **T0/T1 覆盖（按市场调研）：** T0 的 optimized baseline + EPP/`InferencePool` 和 T1-A precise 在 D4 主实验；T1-B PD 在 D4.5（本次 skipped/blocked）；T1-C tiered KV 在 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md)（**2026-11-25 已执行**，2×3060 12GB + Qwen3-4B-AWQ，16GiB CPU tier，3+3 轮，增量 ~$0.29）：P50 **1434→336ms（−77%）**、goodput **0.81→1.10 req/s（+36%）**、整体 P99 不变（冷启动主导），复用请求 P50 **1444→289ms（−80%）**。三个 lab 合起来覆盖 T0 + T1，不要求塞进同一个 4h。
 >
 > D5 的学习文档见 [`d5-kueue-kyverno-lab.md`](./d5-kueue-kyverno-lab.md)（**2026-11-25 准备，尚未在 Vast 执行**；本地 kind 已用假 `nvidia.com/gpu=2` 验证 Kueue 配额/排队/抢占 + Kyverno CEL）：3h、2×3060 12GB、约 `$0.9`；Kueue `v0.20.7`、Kyverno `1.20.0`、k3s `v1.37.2+k3s1`；manifest 在 `scripts/d5/`。**版本坑：Kueue 0.20 只服务 `kueue.x-k8s.io/v1beta2`；Kyverno 1.20 已停止执行 `kyverno.io/v1 ClusterPolicy`，策略统一用 `policies.kyverno.io/v1` 的 CEL 类型。** D5 是 B 线“配额/准入/审计”主证据；执行后把两条拒绝日志、配额表和抢占证据补进 README。
+>
+> D6 的学习文档见 [`d6-kserve-observability.md`](./d6-kserve-observability.md)（**2026-11-26 合并原 D6/D7，尚未在 Vast 执行**）：**D6a KServe 3h**（Standard、`InferenceService`、raw vs KServe、canary/HPA）+ **D6b 推理观测 2–3h**（DCGM/vLLM/OTel/Grafana/告警/game day）；5–6h、2×3060 或 1×4090、约 `$1.5–1.8`；KServe `v0.21.0`、vLLM `v0.34.0`、Qwen3-8B-AWQ；manifest 在 `scripts/d6/`。**不重跑 D4**；D6b 的 EPP trace 复用 D4 manifest。**版本坑：KServe Standard 不支持 HTTP scale-to-zero；`InferenceService` 是 v1beta1，`LLMInferenceService` 是 v1alpha2；v0.21 的 runtime 清单是 `kserve-cluster-resources.yaml`。**
 
-### D3 / D5 的 B 线讲法
+### D3 / D5 / D6 的 B 线讲法
 
-D3/D5 在 A 线作品集里是“平台支撑”，但在 B 线岗位面前要独立讲成两个案例，不能只说“我部署过 vLLM”：
+D3/D5/D6 在 A 线作品集里是“平台支撑”，但在 B 线岗位面前要独立讲成三个案例，不能只说“我部署过 vLLM”：
 
 - **D3（GPU 平台交付）**：“我把 vLLM 从裸机搬到单节点 k3s，量了 cold vs warm 冷启动的分阶段耗时（权重下载 __s / 模型加载+引擎 __s / 总 Ready __s），用 KEDA 按 `vllm:num_requests_waiting` 做 0→1 和 1→2 扩容；单卡 1→2 的 `Pending` 证明 GPU 整数分配是容量瓶颈，不是 HPA 算法问题。”
 - **D5（多租户配额与准入）**：“我用 Kueue `ClusterQueue` 给两个团队分 GPU 配额，Kyverno 强制 GPU workload 带 `priorityClass` 和 quota label，跑了一次抢卡演示并留下两条拒绝日志；这解决的是‘谁能拿卡、拿不到怎么排队’，不是副本数。”
+- **D6（Serving 抽象与观测）**：“我用 KServe `InferenceService` 把同一个 vLLM 模型和 raw Deployment 做对比，量了冷启动和 P99；再用 canary Deployment 做 10% 流量，DCGM + vLLM `/metrics` + OTel 把 TTFT/TPOT/KV/GPU 放到同一张 dashboard，并用一条 SLO 告警和一次 game day 证明它能被运维。”
 
-### B 线学习内容（D3–D7）
+### B 线学习内容（D3–D6 + wrap-up）
 
 D1/D2 是纯 A 线；从 D3 起每天至少留 30–45 分钟给 B 线，并把内容写进当天记录。B 线不是额外项目，而是同一套实验的另一个视角：
 
@@ -398,8 +403,8 @@ D1/D2 是纯 A 线；从 D3 起每天至少留 30–45 分钟给 B 线，并把�
 | D3 | GPU 平台交付链路（driver → toolkit → k3s → device plugin → RuntimeClass → Pod）；模型分发（hostPath/local PV vs 镜像内置）；KEDA/HPA；PDB/驱逐；每副本 `$/h`；namespace/label 规范 | GPU 怎么被调度？冷启动慢在哪？单卡为什么扩不出第二副本？怎么优雅驱逐？ |
 | D4 | Gateway API / `InferencePool` / EPP 的部署与健康检查；路由指标（命中率、P99、5xx）；多模型/多租户路由；故障模式（EPP 挂了、后端不健康、前缀不命中） | llm-d 和普通 Service 路由差在哪？EPP 挂了怎么办？多租户怎么隔离？ |
 | D5 | `ClusterQueue` 配额/优先级/抢占；Kyverno 准入与审计；GPU 节点池/容量规划；模型版本回滚 | Kueue 和 HPA 怎么分工？怎么防止一个团队抢光 GPU？模型回滚怎么做？ |
-| D6 | 把 D3/D4/D5 写成平台案例：SLO、成本、故障处置；B 线简历 bullet | 讲一个你交付过的 GPU 平台案例；怎么证明平台没被滥用？ |
-| D7 | B 线公司/JD 清单（Calgary 本地优先）；逐条映射 D3/D5/chargeback | 你的 K8s 经验怎么迁移到 ML platform？chargeback 怎么算？ |
+| D6 | KServe `InferenceService`/`LLMInferenceService`；raw vs KServe；canary Deployment；HPA/KEDA；TTFT/TPOT/KV/goodput；OTel/Grafana/告警/game day | KServe 和 raw Deployment 差在哪？为什么 LLM 不适合 scale-to-zero？TTFT 高怎么归因？ |
+| D7（wrap-up） | B 线公司/JD 清单（Calgary 本地优先）；writeup/简历 bullet；逐条映射 D3/D5/D6/chargeback | 你的 K8s 经验怎么迁移到 ML platform？chargeback 怎么算？ |
 
 **冲刺版验收（可选；只做 D1 不要用这张表）**
 - [ ] `make bench` 一键复现（尚未实现；做 D3 时补）
@@ -592,8 +597,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | | **k3s + Deployment + 权重缓存** | 1 天 | 你本来就熟，只是对象换成模型服务 |
 | | **llm-d（一条 Well-Lit Path）** | 1 天 | 推理感知路由的唯一可讲证据；KServe 底层就是它[13] |
 | **必修·W2–W9** | **Kueue** | 4h | 配额/排队/抢占的 k8s-sigs 原生答案[9] |
-| | **KServe `LLMInferenceService`** | 6h | 只学 GenAI 这一半：KV-cache 路由、PD 分离、token 限流[4]；传统 `InferenceService` 知道存在即可 |
-| | **DCGM + vLLM `/metrics` + OTel** | 4h | SLO 与成本归属的证据 |
+| | **KServe + 推理可观测性** | 6h | D6a `InferenceService`（raw vs KServe、canary、HPA）+ D6b TTFT/TPOT/KV/OTel/Grafana/告警；`LLMInferenceService` 只做概念/可选[4] |
 | **对症选修** | **Langfuse（+ OTel GenAI）** | 3h | 只对 **agentic infra 线** 有用：trace、单任务 token 成本、eval 回归[21]。接在你自己的 Hermes agent 上，产出一个"成本可归因"的案例 |
 | | **Argo Workflows** | 4h | 批处理 / eval 流水线的编排；与 Kueue 组合是标准答案（Kueue 有官方 Argo 集成文档）[22]。不做训练平台就别深挖 |
 | | **Gateway API Inference Extension** | 3h | `InferencePool` / EPP 契约；学它是为了不被 llm-d 的实现细节绑死 |
@@ -603,7 +607,7 @@ Volcano 是 CNCF Incubating 的高性能批处理调度器（2020 进沙箱、20
 | | **Kubeflow** | 0.5h | 今天的 Kubeflow ≈ Trainer + Pipelines + Katib + Model Registry，且 KFP v2 已与 Argo 解耦[23]；Katib 已被 Trainer 的 OptimizationJob 取代。**只要不说错话即可** |
 | | **KubeRay / Ray** | 0.5h | 定位：Ray Serve 是通用分布式 serving，链多个模型/Python 复杂编排才用；单一 LLM 的推理栈现在是 vLLM + llm-d |
 | | SGLang / Triton / Kthena / Slurm | 0 | 知道名字和适用边界即可 |
-| **跳过** | 传统 `InferenceService` 深挖、Kubeflow Pipelines 实操、MLflow/W&B 深挖 | — | 除非你转 MLOps 线（供给最过剩那条） |
+| **跳过** | `InferenceService` 的 explainer/transformer 全分支、Kubeflow Pipelines 实操、MLflow/W&B 深挖 | — | 除非你转 MLOps 线（供给最过剩那条） |
 
 **Q2（约第 6 个月）就开始投，不要等"准备好"。** 面试是最便宜的缺口检测；拿到 JD 反馈再决定 Q3 补什么。
 

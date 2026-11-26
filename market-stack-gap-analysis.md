@@ -1,8 +1,8 @@
-# 北美 A/B 线技术栈调研与 D1–D5 缺口分析
+# 北美 A/B 线技术栈调研与 D1–D6 缺口分析
 
-> 状态：**research snapshot（2026-11-24）**。样本是 8 份 A 线 JD + 8 份 B 线 JD + 6 份市场/项目报告，不是统计显著性调查，也不把 JD 当课程表。
+> 状态：**research snapshot（2026-11-24；2026-11-26 合并 D6）**。样本是 8 份 A 线 JD + 8 份 B 线 JD + 6 份市场/项目报告，不是统计显著性调查，也不把 JD 当课程表。
 >
-> 目的：回答两个问题——**北美招 A 线（Inference Platform）和 B 线（AI/ML Platform）时，实际在用什么栈？我们的 D1–D5 缺什么、先补什么？**
+> 目的：回答两个问题——**北美招 A 线（Inference Platform）和 B 线（AI/ML Platform）时，实际在用什么栈？我们的 D1–D6 缺什么、先补什么？**
 >
 > 结论先行：**D1–D5 的“硬核推理”覆盖高于市场平均；缺口不在 vLLM 调参，而在 A 线的引擎广度/多卡/可观测，和 B 线的企业平台层/交付/安全/成本。**
 
@@ -46,7 +46,7 @@
 | Kueue / Kyverno 配额准入 | 平台岗加分 | D5 已设计，未执行 | 🟡 待跑 |
 | **KServe / OpenShift AI** | **3/8 + 2/8** | **没有** | ❌ P0 |
 | **Kubeflow / Ray / MLflow** | **4/8、3/8、1/8** | **没有** | ❌ P0 |
-| **Argo CD / Flux / GitOps** | 3/8 | 只有 `helm install` 手敲 | ❌ P0 |
+| **Argo CD / Flux / GitOps** | 3/8 | 工作日常使用；补 1 条回滚证据 | ✅ 工作覆盖 |
 | **GPU Operator / NFD / MIG / DRA** | 大企业平台岗默认；样本 1/8 明写 | 手装 device plugin；MIG/DRA 只有概念 | ❌ P0 |
 | **Vault / OPA / mTLS / cosign** | 受监管企业必问 | 只有 Kyverno 计划 | ❌ P0 |
 | Terraform / IaC | 4/8 | 没有 | ❌ P1 |
@@ -63,7 +63,7 @@
 | 2 | **TP=2 / 多卡实验** | staff JD 明确要求 distributed inference；我们只有单卡 + PD | 2×L4 TP=1 vs TP=2 的 TTFT/TPOT/吞吐表 | 3h / 2×L4 / ~$3 |
 | 3 | **DCGM + Grafana + OTel** | 所有平台岗的“默认语言”；我们目前是 CSV + `nvidia-smi` | 1 张 GPU/推理 dashboard + 1 条 trace | 2–3h / 复用集群 / ~$1 |
 | 4 | **KServe（或 OpenShift AI）** | 企业 B 线最标准的 serving 抽象；llm-d 在 KServe 下面 | 同一模型 raw Deployment vs KServe `InferenceService` 对比 | 3h / 1×L4 / ~$2 |
-| 5 | **Argo CD + OpenCost** | B 线“交付 + 成本”两条主线，JD 高频 | GitOps 部署 D3/D4 栈 + namespace 成本表 | 3h / 复用集群 / ~$1 |
+| 5 | **OpenCost**（Argo CD 工作已覆盖） | 成本岗必问；GitOps 日常工作已有证据 | namespace 成本表 + `$/1M tokens` | 1.5h / 复用 ~$1 |
 | 6 | **Kyverno/OPA + Vault + NetworkPolicy** | 受监管企业的硬门槛；只会 Kueue 不够 | 2 条拒绝日志 + 1 个 secret 注入 + 1 条 NetworkPolicy | 3h / 复用集群 / ~$1 |
 
 > 6 件事合计约 **17–19h + $10**；可以拆进 Q1–Q3，不需要一次租 4 卡。按 §5.1.1 的依赖顺序分配，不要按“平均每季度两个”硬拆。
@@ -368,7 +368,7 @@ KServe LLMInferenceService
 **关键判断：**
 
 - **B 线的“高级感”不在装了什么，而在“怎么证明平台没被滥用”。** 配额、准入、审计、成本归属、回滚，这五件事能讲清，就比“我会 Kubeflow”强。
-- **Argo CD 是 B 线最值得补的单点。** 它把 D3/D4/D5 的所有 manifest 串成一个可回滚的交付链，面试时能讲“我怎么发布/回滚一个模型服务”。
+- **Argo CD/GitOps 已由日常工作覆盖，不再排 lab。** 用工作里的 1 条“发布→改坏→回滚”证据讲交付链即可；B 线真正要补的是 **OpenCost 成本归属**。
 - **Vault/OPA/cosign 不需要全跑。** 每个至少做一次最小实验，能讲清“解决什么、代价是什么”即可。
 
 ### 3.5 数据 / RAG / Agent 层
@@ -467,7 +467,7 @@ KServe LLMInferenceService
 | B15 | Feast / feature store | — | — | ❌ | — | — | — | — | 中 | ❌ P2 |
 | B16 | Airflow / Dagster | — | — | ❌ | — | — | — | — | 中 | ❌ P2 |
 | B17 | 模型 registry / artifact | — | — | 🟡 | — | — | — | — | 中高 | 🟡 |
-| B18 | Argo CD / Flux | — | — | ❌ | — | — | — | — | **高** | ❌ P0 |
+| B18 | Argo CD / Flux | — | — | ❌ | — | — | — | — | **高** | ✅ 工作覆盖 |
 | B19 | Helm / Kustomize | — | — | 🟡 | 🟡 | 🟡 | 🟡 | — | 高 | 🟡 |
 | B20 | Terraform / IaC | — | — | ❌ | — | — | — | — | 高 | ❌ P1 |
 | B21 | CI/CD for GPU workloads | — | — | ❌ | — | — | — | — | 中高 | ❌ P1 |
@@ -485,6 +485,8 @@ KServe LLMInferenceService
 | B33 | 模型回滚 | — | — | 🟡 | 🟡 | — | — | — | 中高 | 🟡 |
 | B34 | 多集群 / fleet | — | — | ❌ | — | — | — | — | 低 | ⚪ |
 | B35 | Slurm / HPC | — | — | — | — | — | — | — | 低（本地 C 线） | ⚪ |
+
+> 覆盖矩阵的列仍是 D1–D5；D6a/D6b 没有单独列。D6 覆盖 B11（KServe）、B27（observability），以及 A23/A29 的一部分；详见 §6.3/§6.4。
 
 ### 4.4 已经比市场平均强的地方
 
@@ -506,9 +508,9 @@ KServe LLMInferenceService
 |---|---|---|---|---|---|---|
 | P0-1 | **SGLang / RadixAttention** | 6/8 份 A 线 JD 明写 | 同一 32-session 共享前缀 workload，vLLM vs SGLang；记录 TTFT P99、output tok/s、hit rate | 3h | 1×L4 ~$2 | 新增 `d2.5-runtime-comparison.md` |
 | P0-2 | **TP=2 / 多卡** | DRW/Fluidstack/PhysicsX 明写 TP/PP/EP | 2×L4，Qwen3-8B-AWQ，TP=1 vs TP=2；记录 TTFT/TPOT/吞吐/显存/KV 分片 | 3h | 2×L4 ~$3 | 新增 `d2.6-tp2-lab.md`，或并进 D4.5 前置 |
-| P0-3 | **DCGM + Grafana + OTel** | 平台岗默认；DRW 明写 Nsight/DCGM/OTel | **拆两半：** Q1 在 D3 上做 DCGM exporter + Grafana；Q2 在 D4 上做 OTel + EPP/Envoy trace | 2–3h | 复用 ~$1 | `d4.7-observability.md`（D4.7a/D4.7b） |
-| P0-4 | **KServe / OpenShift AI** | B 线 3/8 + 2/8；Mechanics/Nutanix/UnitedHealth | 同一模型 raw Deployment vs KServe `InferenceService`；记录 CRD、scale-to-zero、canary | 3h | 1×L4 ~$2 | 新增 `d3.5-kserve.md`（B 线加挂） |
-| P0-5 | **Argo CD + OpenCost** | B 线 3/8 GitOps；成本岗必问 | 把 D3/D4 的 manifest 收进 Git，Argo CD 部署/回滚；OpenCost 出 namespace 成本表 | 3h | 复用 ~$1 | 新增 `d3.6-gitops-cost.md` |
+| P0-3 | **DCGM + Grafana + OTel** | 平台岗默认；DRW 明写 Nsight/DCGM/OTel | **拆两半：** Q1 在 D3 上做 DCGM exporter + Grafana；Q2 在 D4 上做 OTel + EPP/Envoy trace | 2–3h | 复用 ~$1 | `d6-kserve-observability.md`（D6b-1/D6b-2） |
+| P0-4 | **KServe / OpenShift AI** | B 线 3/8 + 2/8；Mechanics/Nutanix/UnitedHealth | 同一模型 raw Deployment vs KServe `InferenceService`；记录 CRD、scale-to-zero、canary | 3h | 2×3060 或 1×4090 ~$1–2 | 并入 `d6-kserve-observability.md`（D6a） |
+| P0-5 | **OpenCost**（Argo CD 工作已覆盖） | 成本岗必问；GitOps 有日常证据 | OpenCost 出 namespace 成本 + `$/1M tokens`；不再做 Argo CD lab | 1.5h | 复用 ~$1 | 新增 `d3.6-opencost.md` |
 | P0-6 | **Vault / OPA / NetworkPolicy** | 受监管企业（Mechanics/UnitedHealth） | Kyverno 拒绝 1 个无 label 的 GPU Pod；Vault/SealedSecret 注入 1 个 secret；1 条 NetworkPolicy | 3–4h | 复用 ~$1 | 并入 `d5.5-security.md` |
 
 > **级别/轨道差异：** P0-2（TP=2）对 staff/前沿 A 线是 P0，对 mid/senior 可以降到 P1，但至少要能讲清 TP 的通信/显存取舍。P0-4/5/6 是 **B 线就业**的 P0；如果只投 A 线，可以降到 P1。不要因为表里写了 P0 就六件事一起上。
@@ -520,11 +522,11 @@ KServe LLMInferenceService
 | 季度 | P0 | 关联/依赖 | 为什么是这个顺序 | 验收 |
 |---|---|---|---|---|
 | **Q1** | P0-1 SGLang（D2.5） | D2 | 必须复用 D2 的同一模型、同一 workload、同一指标；隔季度再跑，控制变量就丢了 | vLLM vs SGLang 对比表 |
-| **Q1** | P0-3a DCGM + Grafana | D1/D3 | D3 已装 Prometheus，补 exporter/dashboard 成本最低；这一半不依赖 D4 | GPU + vLLM dashboard |
-| **Q1** | P0-4 KServe（D3.5） | D3 | 用 D3 的 raw Deployment 做 control，形成“裸 Deployment vs KServe”的 B 线基线 | `InferenceService` + 冷启动/P99 对比 |
+| **Q1** | P0-3a DCGM + Grafana（D6b-1） | D1/D3 | D3 已装 Prometheus，补 exporter/dashboard 成本最低；这一半不依赖 D4 | GPU + vLLM dashboard |
+| **Q1** | P0-4 KServe（D6a） | D3 | 用 D3 的 raw Deployment 做 control，形成“裸 Deployment vs KServe”的 B 线基线 | `InferenceService` + 冷启动/P99 对比 |
 | **Q2** | P0-2 TP=2（D2.6） | D4.5 | 先有 TP 的通信/显存概念，再跑 2P+2D；否则 PD 和 TP 的变量混在一起 | TP=1 vs TP=2 表 |
-| **Q2** | P0-3b OTel + EPP trace（D4.7b） | D4 | 只有 D4 有 EPP/Envoy；trace 要覆盖“网关→EPP→vLLM” | 1 条 EPP→vLLM trace |
-| **Q2** | P0-5 Argo CD + OpenCost（D3.6） | D3/D4 + chargeback | GitOps 要部署 D4 的 manifest；OpenCost 直接服务 Q2 的 chargeback | 1 次回滚 + namespace 成本表 |
+| **Q2** | P0-3b OTel + EPP trace（D6b-2） | D4 | 只有 D4 有 EPP/Envoy；trace 要覆盖“网关→EPP→vLLM” | 1 条 EPP→vLLM trace |
+| **Q2** | P0-5 OpenCost（D3.6） | D3/D4 + chargeback | Argo CD 工作已覆盖；只补成本表 | namespace 成本表 |
 | **Q3** | P0-6 Vault/OPA/NetworkPolicy（D5.5） | D5 | 安全策略要建在 Kueue/Kyverno 的 namespace/配额之上；先有配额，再谈准入和隔离 | 2 条拒绝日志 + secret + NetworkPolicy |
 
 > **为什么不是平均每季度 2 个：** Q1 的 3 个 P0 都复用 D1–D3 的现成集群/模型/指标，边际成本低；Q2 的 3 个 P0 都依赖 D4/D4.5 或 chargeback，提前做会重复搭环境；Q3 只剩 1 个 P0，因为安全必须等 D5 的配额/namespace 先落地。
@@ -535,7 +537,7 @@ KServe LLMInferenceService
 
 - 它们不是“多学一个工具”，而是**面试官用来判断“你是在生产里做过，还是只会 demo”的分界线**。
 - 每一个都能在 2–4 小时内做出“可截图、可讲 10 分钟”的 artifact；投入产出比最高。
-- 它们互相复用：P0-3a 的 Grafana 可以看 P0-2 的 TP=2；P0-5 的 Argo CD 可以部署 P0-4 的 KServe；P0-6 的策略可以管 P0-5 的 namespace。
+- 它们互相复用：P0-3a 的 Grafana 可以看 P0-2 的 TP=2；P0-5 的 OpenCost 可以按 P0-4 的 KServe namespace 出成本；P0-6 的策略可以管 P0-5 的 namespace。
 
 ### 5.2 P1：补了明显加分
 
@@ -587,44 +589,44 @@ KServe LLMInferenceService
 | D2.5 | SGLang 对照实验（P0-1） | 3h | 1 张对比表 + 1 句选型结论 |
 | D2.6 | TP=2 实验（P0-2） | 3h | 1 张 TP=1 vs TP=2 表 |
 
-### 6.3 D3 的 B 线加挂（D3.5）
+### 6.3 D6a：KServe 服务抽象（3h）
 
-D3 已经是 3h 的“GPU 平台交付”核心；不要再塞。新增 **D3.5 “企业平台 vertical slice”**，拆成两个 3h lab（合起来 6h）：
+D6a 接过 D3 的 raw Deployment，**不重跑 D3**：同一模型（Qwen3-8B-AWQ）、同一 vLLM 镜像（v0.34.0），对比 raw Deployment 和 KServe `InferenceService`。
 
 ```text
-kind/k3s
-  → GPU Operator（替代手装 device plugin）
-  → KServe（InferenceService + vLLM runtime）
-  → Argo CD（GitOps 部署/回滚）
-  → OpenCost（namespace 成本）
-  → Grafana（DCGM + vLLM dashboard）
+D3 raw Deployment
+  → KServe Standard（cert-manager + Gateway API + Envoy）
+  → InferenceService + custom ClusterServingRuntime
+  → canary / revision / HPA
 ```
 
 验收：
 
-- [ ] 同一模型 raw Deployment vs KServe `InferenceService` 的 P99/冷启动对比；
-- [ ] Argo CD 把 KServe manifest 部署到集群，改 image tag 后 sync，再 rollback；
-- [ ] OpenCost 出 1 小时 namespace 成本表；
-- [ ] Grafana 有 1 张 GPU + 1 张 vLLM 图。
+- [ ] 同一模型 raw vs KServe 的冷启动分段（镜像/权重/引擎/Ready）；
+- [ ] 同一 workload 的 TTFT/TPOT/output tok/s；
+- [ ] canary 10% 或两个 revision；
+- [ ] HPA 1→2，或明确 Standard mode 的 HPA/scale-to-zero 限制；
+- [ ] 不装 Knative；需要 0→1 时另开 optional。
 
-> 如果只有 1 张 L4，KServe 和 raw Deployment 二选一跑；另一个用 D3 的现成结果做对照。不要为了“两个都跑”租 2 卡。
->
-> k3s 上用 KServe **RawDeployment** 模式，避免 Knative/Istio 全家桶；这样 3h 才够。没有 OpenShift 就做上游 KServe，OpenShift AI 用文档/截图补概念，不要为了一个 lab 去装 OpenShift。
->
-> OpenCost 在 Vast/k3s 上不会自动知道 GPU 单价；把 `$/GPU-hour` 作为 custom pricing 注入，或用 D1 的账单手工分摊，否则成本表只有 CPU/RAM。
->
-> D3.7（可选）：MLflow + Kubeflow/Ray + KServe 的 vertical slice，4–6h；依赖 D3.5。不要为了“ML 平台”把 Kubeflow 全家桶都装上。
+> k3s 上用 KServe **Standard/RawDeployment**，避免 Knative/Istio 全家桶；3h 才够。Vast 没有 L4 VM，用 2×3060 或 1×4090。OpenShift AI 用文档/截图补概念，不要为了一个 lab 去装 OpenShift。
 
-### 6.4 D4 的加挂（D4.7/D4.8）
+### 6.4 D6b：推理可观测性（2–3h）
 
-| 加挂 | 内容 | 时间 | 季度 | 产出 |
-|---|---|---|---|---|
-| D4.7a | DCGM exporter + Grafana；GPU util/power/mem + vLLM queue/KV | 1.5h | **Q1（D3 集群）** | 1 张 GPU + vLLM dashboard |
-| D4.7b | OTel collector + EPP/Envoy/vLLM 一条 trace | 1h | **Q2（D4 当天）** | 1 条 EPP→vLLM trace；D4 的 P99 有服务端归因 |
-| D4.8 | flow control：EPP `flowControl` + 两个 priority + token rate limit | 3h | P1/可选 | 高/低优先级请求的排队/拒绝表 |
-| D4.9 | 多模型 Gateway：2 个模型 × 2 副本 + HTTPRoute | 3h | P2/可选 | 多模型路由图 |
+D6b **不重跑 D4**；把 D4 的 EPP/vLLM manifest 或 D6a 的 KServe/vLLM 当作被观测对象，跑 10 分钟负载。
 
-> P0 只包括 D4.7a + D4.7b；D4.8/D4.9 是 P1/P2，不排进 Q1–Q3 的 P0 验收。D4.7a 在 D3 上先做，D4.7b 在 D4 主实验当天做，复用同一集群，边际成本最低。
+- **D6b-1（Q1，1.5h）**：DCGM exporter + Grafana；GPU util/power/mem + vLLM queue/KV；
+- **D6b-2（Q2，1–1.5h）**：OTel Collector + EPP/Envoy/vLLM 一条 trace；D4 的 P99 有服务端归因；
+- 一条 SLO 告警 + 一次 game day（kill pod/EPP）。
+
+验收：
+
+- [ ] 1 张 GPU + vLLM dashboard；
+- [ ] 1 条 `gateway→EPP→vLLM` 或 `gateway→vLLM` trace；
+- [ ] 1 条 TTFT P99 / KV 告警；
+- [ ] game day 时间线；
+- [ ] `summary.md` + `cost.txt`。
+
+> D4.8/D4.9（flow control、多模型 Gateway）仍是 P1/P2，不并入 D6。
 
 ### 6.5 D5 的加挂（D5.5）
 
@@ -645,21 +647,20 @@ D5 的 Kueue + Kyverno 只覆盖“谁能拿卡”。企业 B 线还会问“拿
 |---|---|---|---|---|
 | `d2.5-runtime-comparison.md` | vLLM vs SGLang；TRT-LLM/Triton 选型页 | 3h | ~$2 | D2 |
 | `d2.6-tp2-lab.md` | 2×L4 TP=1 vs TP=2 | 3h | ~$3 | D1/D2 |
-| `d3.5-kserve.md` | KServe/OpenShift AI + raw Deployment 对比 | 3h | ~$2 | D3 |
-| `d3.6-gitops-cost.md` | Argo CD + OpenCost + Grafana | 3h | ~$1 | D3 |
-| `d3.7-ml-platform-slice.md` | MLflow + Kubeflow/Ray + KServe | 4–6h | ~$2 | D3.5 |
-| `d4.7-observability.md` | D4.7a DCGM/Grafana + D4.7b OTel/EPP trace | 2–3h | ~$1 | D3（a）/ D4（b） |
+| `d6-kserve-observability.md` | D6a KServe + D6b DCGM/Grafana/OTel/EPP trace | 5–6h | ~$1.5–1.8 | D3/D4 |
+| `d3.6-opencost.md` | OpenCost + Grafana 成本面板 | 1.5h | ~$1 | D3/D4 |
+| `d3.7-ml-platform-slice.md` | MLflow + Kubeflow/Ray + KServe | 4–6h | ~$2 | D6a |
 | `d4.8-flow-control.md` | EPP flow control + token rate limit | 3h | ~$2 | D4 |
 | `d5.5-security.md` | Vault/OPA/NetworkPolicy/cosign | 4–6h | ~$1 | D5 |
 
-> 不要一次全写。P0 按 §5.1.1 的季度分配走：Q1 D2.5 + D4.7a + D3.5；Q2 D2.6 + D4.7b + D3.6；Q3 D5.5。P1（D4.8/D3.7/RAG）只在有余力时加，不改变 P0 验收。
+> 不要一次全写。P0 按 §5.1.1 的季度分配走：Q1 D2.5 + D6b-1 + D6a；Q2 D2.6 + D6b-2 + D3.6；Q3 D5.5。P1（D4.8/D3.7/RAG）只在有余力时加，不改变 P0 验收。
 
 ### 6.7 季度 gate 调整（只列 P0）
 
 | 季度 | 原 artifact | P0 加挂 | 验收 |
 |---|---|---|---|
-| Q1 | D1/D2 + D3 冷启动/KEDA | D2.5 SGLang + D4.7a DCGM/Grafana + D3.5 KServe | 1 张 vLLM/SGLang 对比表 + 1 张 Grafana 图 + 1 个 `InferenceService` |
-| Q2 | D4 路由 + KV 压力 + chargeback | D2.6 TP=2 + D4.7b OTel/EPP trace + D3.6 Argo CD/OpenCost | TP=1 vs TP=2 表 + 1 条 trace + GitOps 回滚 + 成本表 |
+| Q1 | D1/D2 + D3 冷启动/KEDA | D2.5 SGLang + D6b-1 DCGM/Grafana + D6a KServe | 1 张 vLLM/SGLang 对比表 + 1 张 Grafana 图 + 1 个 `InferenceService` |
+| Q2 | D4 路由 + KV 压力 + chargeback | D2.6 TP=2 + D6b-2 OTel/EPP trace + D3.6 OpenCost | TP=1 vs TP=2 表 + 1 条 trace + 成本表 |
 | Q3 | D5 配额 + 故障 + SLO | D5.5 安全 | 2 条拒绝日志 + secret 注入 + 1 条 NetworkPolicy |
 | Q4 | 简历/JD 映射 | 不新增大 lab；把 P0 结果写进 bullet | 3 个 A 线 + 3 个 B 线 JD 逐条映射 |
 
@@ -689,7 +690,7 @@ D5 的 Kueue + Kyverno 只覆盖“谁能拿卡”。企业 B 线还会问“拿
 | load-aware routing | D4 optimized arm | 跑 D4 |
 | flow control | D4 附录 A.4（D 档） | D4.8 |
 | K8s / KEDA / Kueue | D3 实测；D5 设计 | 跑 D5 |
-| DCGM / OTel / Grafana / Nsight | 只有 `nvidia-smi` + Prometheus | D4.7 + Nsight 概念 |
+| DCGM / OTel / Grafana / Nsight | 只有 `nvidia-smi` + Prometheus | D6b + Nsight 概念 |
 | SLO / goodput / P99 | D1/D2/D4 | 保持 |
 | `$/1M tokens` | D1 成本；Q2 chargeback | 跑 chargeback |
 | Python + Go/Rust/C++ | Python 为主 | 用 Go 写一个小 gateway/CLI（P2） |
@@ -699,21 +700,21 @@ D5 的 Kueue + Kyverno 只覆盖“谁能拿卡”。企业 B 线还会问“拿
 | 关键词 | 我们现在的证据 | 缺口动作 |
 |---|---|---|
 | Kubernetes | D3 实测 | 保持 |
-| OpenShift / OpenShift AI | 无 | D3.5（或至少 concept + screenshot） |
-| KServe | 无 | D3.5 |
+| OpenShift / OpenShift AI | 无 | D6a（或至少 concept + screenshot） |
+| KServe | 无 | D6a |
 | Kubeflow / MLflow / Ray | 无 | D3.7 vertical slice |
-| vLLM / Triton serving | vLLM 强；Triton 无 | D3.5 + P1-2 |
-| GPU Operator / NFD | 手装 device plugin | D3.5 |
+| vLLM / Triton serving | vLLM 强；Triton 无 | D6a + P1-2 |
+| GPU Operator / NFD | 手装 device plugin | Q3 GPU Operator/MIG lab（D6a 不覆盖） |
 | MIG / time-slicing / DRA | D3 概念 | 至少 1 次 time-slicing 或 MIG（有硬件时） |
 | Kueue | D5 设计 | 跑 D5 |
 | Kyverno / OPA | D5 设计 | 跑 D5 + D5.5 |
 | KEDA / HPA | D3 实测 | 保持 |
-| Argo CD / Flux | 无 | D3.6 |
+| Argo CD / Flux | 工作日常使用；补 1 条回滚证据 | 不排 lab；D3.6 只做 OpenCost |
 | Helm / Kustomize | 用 Helm 装过 | D3.6 自己写 chart |
 | Terraform / IaC | 无 | P1-11 |
 | Vault / mTLS / NetworkPolicy | 无 | D5.5 |
 | cosign / SBOM | 无 | P1-12 |
-| Prometheus / Grafana / OTel | Prometheus 有；Grafana 关；OTel 无 | D4.7 |
+| Prometheus / Grafana / OTel | Prometheus 有；Grafana 关；OTel 无 | D6b |
 | OpenCost / Kubecost | 无 | D3.6 |
 | RAG / vector DB / MCP | 无 | P1-9 |
 | SLO / on-call / DR | 零散故障表 | P1-10 |

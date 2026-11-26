@@ -1,0 +1,61 @@
+# Minimal inference SLO alerts. Metric names are version-dependent; check
+# `kubectl exec ... -- curl -s localhost:8080/metrics | grep vllm:` before applying.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: d6-inference-slo
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: d6-inference-slo
+      rules:
+        - alert: D6TTFTP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m]))
+            ) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM TTFT P99 > 2s for 10m"
+            description: "Check queue time, prefill time, KV cache usage, and EPP routing."
+
+        - alert: D6KVCacheHigh
+          expr: avg(vllm:gpu_cache_usage_perc) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM KV cache > 90% for 10m"
+            description: "Decode is KV-bound; expect queueing/preemption. Check max-num-seqs and concurrency."
+
+        - alert: D6QueueBacklog
+          expr: sum(vllm:num_requests_waiting) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM waiting queue > 10 for 5m"
+            description: "Check capacity, HPA/KEDA, and per-tenant traffic."
+
+        - alert: D6Preemptions
+          expr: sum(rate(vllm:num_preemptions_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM is preempting sequences"
+            description: "KV cache is under pressure; preempted requests are recomputed or swapped."
+
+        - alert: D6GPUXID
+          expr: max(DCGM_FI_DEV_XID_ERRORS) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "GPU XID error detected"
+            description: "Check dmesg, DCGM, and the node; XID often means a driver/hardware fault."

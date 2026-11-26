@@ -1,0 +1,78 @@
+# D6a control: raw Deployment + Service, same model and vLLM image as the KServe runtime.
+# This is the "before KServe" baseline: no CRD, no storage initializer, no canary/HPA abstraction.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-raw
+  namespace: kserve-test
+  labels:
+    app: vllm-raw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-raw
+  template:
+    metadata:
+      labels:
+        app: vllm-raw
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.34.0
+          args:
+            - --model=Qwen/Qwen3-8B-AWQ
+            - --served-model-name=qwen3-8b
+            - --host=0.0.0.0
+            - --port=8000
+            - --max-model-len=8192
+            - --gpu-memory-utilization=0.85
+            - --max-num-seqs=16
+            - --enable-prefix-caching
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: "24Gi"
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            failureThreshold: 60
+            periodSeconds: 10
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-raw
+  namespace: kserve-test
+  labels:
+    app: vllm-raw
+spec:
+  selector:
+    app: vllm-raw
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

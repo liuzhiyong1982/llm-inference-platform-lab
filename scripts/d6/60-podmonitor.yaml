@@ -1,0 +1,39 @@
+# Requires Prometheus Operator (kube-prometheus-stack) and a Prometheus instance
+# that selects PodMonitors in this namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vllm-raw
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - kserve-test
+  selector:
+    matchLabels:
+      app: vllm-raw
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kserve-qwen3-8b
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - kserve-test
+  selector:
+    matchLabels:
+      serving.kserve.io/inferenceservice: qwen3-8b
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

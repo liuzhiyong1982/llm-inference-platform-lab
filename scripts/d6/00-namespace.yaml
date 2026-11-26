@@ -1,0 +1,8 @@
+# D6 namespace. Do not deploy InferenceServices into the kserve control-plane namespace:
+# KServe skips storage-initializer injection in control-plane namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kserve-test
+  labels:
+    app.kubernetes.io/part-of: d6-kserve

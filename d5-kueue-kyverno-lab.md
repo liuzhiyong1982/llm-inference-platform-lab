@@ -1575,11 +1575,11 @@ RBAC、NetworkPolicy、Pod Security Admission、镜像签名、节点隔离/tain
 | `d3-k8s-vllm-learning.md` | VM/k3s/device plugin/驱逐；D5 复用其 §5.0–§5.4 |
 | `d4-llm-d-learning.md` | 多副本路由；D5 是“多团队配额”，不是路由 |
 | `d4.6-tiered-cache-lab.md` | KV 分层；和 D5 无关，但同属平台优化 |
-| D6 | 把 D3/D4/D5 写成平台案例：SLO、成本、故障处置 |
+| `d6-kserve-observability.md` | KServe 服务抽象 + 推理可观测性（D6a/D6b）；D5 的配额/准入发生在 serving 之前 |
 
 **一句话串起来：**
 
-> D3 证明“能把 vLLM 放进 K8s 并优雅扩缩”，D4 证明“多副本时路由能降 P99”，D5 证明“多团队时配额和准入能防止抢卡”；三者合起来才是“GPU 平台”，而不是“一个能跑的 Pod”。
+> D3 证明“能把 vLLM 放进 K8s 并优雅扩缩”，D4 证明“多副本时路由能降 P99”，D5 证明“多团队时配额和准入能防止抢卡”，D6 证明“服务抽象能交付、指标能解释故障”；四者合起来才是“GPU 平台”，而不是“一个能跑的 Pod”。
 
 ---
 
