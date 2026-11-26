@@ -85,6 +85,7 @@
 | Pod 的 priority 和 D5 的 `PriorityClass` 是一回事吗？ | §3.3.3 |
 | `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
+| 一个 Cohort 下面通常有几个 ClusterQueue？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
 | DRA 是替换 device plugin 吗？ | §3.1.1 |
@@ -550,6 +551,10 @@ insufficient unused quota for nvidia.com/gpu in flavor gpu-3060, 1 more needed
 > **中文怎么叫：** Kueue 官方中文文档不翻译这个词，直接写 “Cohort”；可以理解为“**配额共享组**”或“**同组队列**”。英文 cohort 本义是“有共同特征的一批人”（如 birth cohort、cohort study），在 Kueue 里特指“可以互相借闲置配额的一组 ClusterQueue”，不是业务团队，也不是 namespace。
 
 `cohort` 就是一个字符串名字。所有 `spec.cohortName` 相同的 ClusterQueue 属于同一个 cohort，可以在彼此**闲置**时借配额。
+
+> **一个 cohort 通常有多个 ClusterQueue，但不是必须。** `cohortName` 是单值：一个 CQ 最多属于一个 cohort；一个 cohort 可以有 1 个或多个 CQ。只有 1 个时没有借用对象，通常没有意义。D5 核心实验不设 cohort；可选实验才把 `team-a-cq` + `team-b-cq` 放进同一个 cohort。
+>
+> 口语说“Cohort 下面”可以，但基础模型里它不是 Kubernetes 的父子对象，只是 `cohortName` 相同的一组 CQ；v1beta2 的 `Cohort` CRD 支持分层（CohortTree），D5 不用。
 
 ```text
 cohort: research
