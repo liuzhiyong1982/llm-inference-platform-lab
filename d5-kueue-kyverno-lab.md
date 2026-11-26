@@ -81,6 +81,7 @@
 | `queue-name` label 的值是 `LocalQueue` 名吗？ | §3.2.4 |
 | 没有 `queue-name` label 会绕过 Kueue 吗？ | §3.5 |
 | Workload 怎么“控制” Job 的状态？ | §3.2.5 |
+| `QuotaReserved` 和 `Admitted` 等价吗？ | §3.2.5 |
 | `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -469,6 +470,21 @@ Job 创建（带 queue-name）
 | Job/Pod → Workload | Kueue job controller | 观察状态，更新 `PodsReady` / `Finished` 条件 |
 | Job status | Kubernetes Job controller | `Active` / `Succeeded` / `Failed` |
 | Workload status | Kueue scheduler / controller | `QuotaReserved` / `Admitted` / `Evicted` / `PodsReady` / `Finished` |
+
+**`QuotaReserved` 和 `Admitted` 不等价。** 它们是两个阶段：
+
+| 条件 | 含义 | 什么时候 True |
+|---|---|---|
+| `QuotaReserved` | 在某个 ClusterQueue / flavor 上预留了配额 | 配额账本扣减成功 |
+| `Admitted` | 通过了所有 admission checks，允许运行 | `QuotaReserved=True` + 所有 AdmissionCheck `Ready` |
+
+- 没有配置 AdmissionChecks 时（D5），两者通常同一轮变 `True`，看起来像等价；
+- 有 AdmissionChecks（如 `ProvisioningRequest` 等节点、`MultiKueue` 等远端集群）时，会先 `QuotaReserved=True`，再等 check；这期间 `Admitted=False`，Job 仍然 `suspend`；
+- AdmissionCheck 的状态可能是 `Pending` / `Ready` / `Retry` / `Rejected`，只有全部 `Ready` 才 `Admitted=True`；
+- `Admitted=True` 一定意味着 `QuotaReserved=True`；反过来不成立；
+- `Admitted=True` 也不等于 Pod 已经 Running；还要等 `PodsReady=True`。
+
+D5 没有 AdmissionChecks，所以 §9 的期望输出里两者一起出现；排障时仍然先看 `QuotaReserved` 再看 `Admitted`，不要合并成一个条件。
 
 所以准确说法是：**Workload 的 admission 结果决定 Kueue 是否放掉 Job 的 `suspend`；Job 的实际运行状态仍由 Kubernetes 管。** Kueue 和 Job controller 是协作关系，不是父子替代。
 
