@@ -1135,10 +1135,13 @@ kserve,,,,
 
 **canary 是在同一个 ISVC 下同时跑 stable 和 canary 两个 Deployment，把一小部分流量切给 canary，用指标决定 promote 还是 rollback。** 它不是模型评测本身，而是“新版本先接 10% 流量”的发布策略。
 
+> **KServe 没有 `spec.stable[]`。** stable 就是必填的 `spec.predictor`（单个）；`spec.canary[]` 是可选的变体列表。stable 的流量权重 = 100 - 所有 Ready canary 的 `trafficPercent` 之和。
+
 #### 关键 API
 
 | API / 字段 | 作用 |
 |---|---|
+| `InferenceService.spec.predictor` | stable 主版本，单个、必填；不是 `stable[]` |
 | `InferenceService.spec.canary[]` | canary 列表；`serving.kserve.io/v1beta1` |
 | `.predictor.name` | 必填；驱动 Deployment/Service 名：`{isvc}-{name}-predictor` |
 | `.trafficPercent` | 0–100；所有 canary 之和必须 ≤100；0 仍会创建 Deployment |
@@ -1216,6 +1219,185 @@ Standard mode 默认 HPA 按 CPU；LLM 更合理的是 KEDA/Prometheus 按 `vllm
 
 ### 8.7 可选：LocalModelCache
 
+**一句话：LocalModelCache 把“每个 Pod 启动时下载模型”改成“每个节点提前下载一次，之后 Pod 直接挂本地 PV”。**
+
+D6 单卡已经有手工 PVC，LocalModelCache 不是主线；它主要解决多节点/多租户下“每个节点、每个 Pod 重复下载模型”的问题。
+
+#### 8.7.1 原理
+
+```text
+LocalModelNodeGroup workers
+  ├─ 选择节点（PV nodeAffinity）
+  ├─ 定义 local PV / PVC / storageLimit
+  └─ 每个节点生成一个 LocalModelNode
+
+LocalModelCache qwen3-8b
+  ├─ sourceModelUri: hf://Qwen/Qwen3-8B-AWQ
+  ├─ modelSize: 10Gi
+  └─ nodeGroups: [workers]
+          │
+          ▼
+kserve-localmodelnode-agent（DaemonSet）
+  ├─ 在目标节点创建下载 Job
+  ├─ 用 storage-initializer 拉到本地盘
+  └─ 更新 LocalModelNode / LocalModelCache status
+
+InferenceService qwen3-8b
+  ├─ storageUri 与 LocalModelCache.sourceModelUri 匹配
+  ├─ defaulter 加 internal label/annotation
+  └─ Pod mutator 把 URI 改写成 pvc://<cache>-<nodegroup>/models/<hash>
+          │
+          ▼
+       Pod 直接挂本地 PVC，不再下载
+```
+
+关键对象：
+
+| 对象 | 作用域 | 作用 |
+|---|---|---|
+| `LocalModelNodeGroup` | Cluster | 定义节点组、本地存储路径、PV/PVC 模板、`storageLimit` |
+| `LocalModelCache` | Cluster | 声明“哪个模型、多大、缓存到哪些 nodeGroup” |
+| `LocalModelNode` | Cluster | 每个节点一条，记录该节点上模型的下载状态 |
+| `LocalModelNamespaceCache` | Namespace | 同上，但只对同 namespace 的 ISVC 可见 |
+| `kserve-localmodelnode-agent` | DaemonSet | 在目标节点执行下载、挂载、状态上报 |
+| 下载 Job | `kserve-localmodel-jobs` | 每个节点一个，跑 storage-initializer 下载模型 |
+
+状态流：
+
+```text
+LocalModelCache created
+  → controller 为 nodeGroup 中每个 Ready 节点创建 LocalModelNode
+  → agent 创建下载 Job
+  → Job 把模型写到本地盘 /mnt/models/<hash>
+  → LocalModelNode.status = NodeDownloaded
+  → LocalModelCache.status.copies.available = N
+  → ISVC 匹配 cache，Pod 直接挂 PVC
+```
+
+#### 8.7.2 使用条件
+
+| 条件 | 说明 |
+|---|---|
+| KServe `v0.21.0` + localmodel 组件 | 需要 `LocalModelCache` CRD、controller、`kserve-localmodelnode-agent` |
+| `localModel.enabled: true` | 默认关闭；在 `kserve/inferenceservice-config` 里启用 |
+| 节点 label | 默认 agent 需要 `kserve/localmodel=worker`，否则 DaemonSet 不覆盖该节点 |
+| 本地存储 | 需要支持 local volume 的 StorageClass（如 `local-storage`）和足够磁盘 |
+| hostPath 一致 | NodeGroup 的 `persistentVolumeSpec.local.path` 必须等于 agent 的 hostPath；Helm 默认 `/mnt/models`，Kustomize 可能是 `/models` |
+| 模型源可达 | `hf://`、`s3://`、`pvc://` 等；gated 模型需要 HF token/ServiceAccount |
+| `modelSize` ≤ `storageLimit` | 否则下载/绑定会失败 |
+| ISVC URI 匹配 | ISVC 的 `storageUri` 必须等于 `sourceModelUri` 或是其子目录 |
+| 调度到缓存节点 | Pod 必须调度到已缓存该模型的节点；否则 cache 不生效 |
+
+> LocalModelCache 不是分布式缓存：它是**节点本地盘**。多节点要每个节点各下一份；Pod 调度不到缓存节点就用不上。
+
+#### 8.7.3 安装与启用
+
+在已有 KServe Standard 上补装 localmodel 组件：
+
+```bash
+cd /root/kserve
+./hack/kserve-install.sh \
+  --kserve-version v0.21.0 \
+  --standard \
+  --type localmodel
+```
+
+确认 agent 和 CRD：
+
+```bash
+kubectl -n kserve get ds kserve-localmodelnode-agent
+kubectl get crd | grep -E 'localmodelcache|localmodelnodegroup|localmodelnode'
+```
+
+启用 localModel：
+
+```bash
+kubectl -n kserve edit cm inferenceservice-config
+# data.localModel 里把 "enabled": false 改成 true
+```
+
+如果 `localModel` 整段不存在，按官方格式补：
+
+```json
+{
+  "enabled": true,
+  "jobNamespace": "kserve-localmodel-jobs",
+  "defaultJobImage": "kserve/storage-initializer:v0.21.0",
+  "fsGroup": 1000,
+  "localModelAgentImage": "kserve/kserve-localmodelnode-agent:v0.21.0"
+}
+```
+
+检查 agent 的 hostPath：
+
+```bash
+kubectl -n kserve get ds kserve-localmodelnode-agent \
+  -o jsonpath='{.spec.template.spec.volumes[?(@.name=="models")].hostPath.path}{"\n"}'
+```
+
+这个路径必须和后面 NodeGroup 的 `persistentVolumeSpec.local.path` 一致。
+
+#### 8.7.4 创建 nodeGroup
+
+如果集群没有 `local-storage` StorageClass，先建一个静态 local volume 用的：
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+```
+
+给目标节点打 label：
+
+```bash
+kubectl label node <node-name> kserve/localmodel=worker
+```
+
+创建 `LocalModelNodeGroup`：
+
+```yaml
+apiVersion: serving.kserve.io/v1alpha1
+kind: LocalModelNodeGroup
+metadata:
+  name: workers
+spec:
+  storageLimit: 20Gi
+  persistentVolumeClaimSpec:
+    accessModes: ["ReadWriteOnce"]
+    volumeMode: Filesystem
+    storageClassName: local-storage
+    resources:
+      requests:
+        storage: 20Gi
+  persistentVolumeSpec:
+    accessModes: ["ReadWriteOnce"]
+    volumeMode: Filesystem
+    capacity:
+      storage: 20Gi
+    storageClassName: local-storage
+    local:
+      path: /mnt/models
+    nodeAffinity:
+      required:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: ["<node-name>"]
+```
+
+检查：
+
+```bash
+kubectl get localmodelnodegroup workers
+kubectl get localmodelnode
+```
+
+#### 8.7.5 创建 LocalModelCache
+
 ```yaml
 apiVersion: serving.kserve.io/v1alpha1
 kind: LocalModelCache
@@ -1224,18 +1406,121 @@ metadata:
 spec:
   sourceModelUri: hf://Qwen/Qwen3-8B-AWQ
   modelSize: 10Gi
-  nodeGroups: [workers]
+  nodeGroups: ["workers"]
 ```
 
-> `nodeGroups` 必须匹配已存在的 `LocalModelNodeGroup`；这是 optional，D6 核心不验收。没有 group 就跳过，别让 optional 卡住主线。
-
-需要 `localmodel` 组件：
+等待下载：
 
 ```bash
-./hack/kserve-install.sh --kserve-version v0.21.0 --standard --type localmodel
+kubectl get localmodelcache qwen3-8b -o yaml
+kubectl get localmodelnode <node-name> -o yaml
+kubectl -n kserve-localmodel-jobs get jobs,pvc
 ```
 
-对比“第二次 Pod 启动是否还下载模型”。D3 已做过 initContainer vs node-local PV；这里是 KServe 原生版。
+期望：
+
+```text
+LocalModelCache.status.copies.available: 1
+LocalModelCache.status.nodeStatus.<node>: NodeDownloaded
+LocalModelNode.status.modelStatus.qwen3-8b: NodeDownloaded
+Job: Complete
+```
+
+#### 8.7.6 用缓存部署 ISVC
+
+关键：**ISVC 的 `storageUri` 必须和 `LocalModelCache.sourceModelUri` 匹配**。
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen3-8b
+  namespace: kserve-test
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/nodegroup: workers   # 多 nodeGroup 时显式指定
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: kserve-vllmserver-d6
+      storageUri: hf://Qwen/Qwen3-8B-AWQ   # 必须匹配 cache
+      resources:
+        requests:
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+```
+
+KServe 的处理链：
+
+```text
+ISVC.storageUri 匹配 LocalModelCache.sourceModelUri
+  → defaulter 加 label: serving.kserve.io/localmodel=qwen3-8b
+  → 加 annotation: localmodel-sourceuri / localmodel-pvc-name
+  → Pod mutator 把 URI 改写成:
+     pvc://qwen3-8b-workers/models/<sha256(sourceModelUri)>/...
+  → kubelet 直接挂 PVC
+  → 不创建下载用的 storage-initializer
+```
+
+验证：
+
+```bash
+kubectl -n kserve-test get isvc qwen3-8b -o yaml | grep -E 'localmodel|nodegroup'
+kubectl -n kserve-test get pod -l serving.kserve.io/inferenceservice=qwen3-8b \
+  -o jsonpath='{.items[0].spec.initContainers[*].name}{"\n"}'
+```
+
+预期 `initContainers` 里没有 `storage-initializer`，模型直接从本地 PVC 挂到 `/mnt/models`。
+
+#### 8.7.7 和 PVC / storage-initializer 的对比
+
+| 方案 | 下载时机 | 存储 | 适用 |
+|---|---|---|---|
+| storage-initializer | 每个 Pod 启动时 | emptyDir | 简单、一次性、无本地盘 |
+| 手工 PVC（D6 当前） | 手动下一次 | hostPath/PV | 单节点 lab |
+| **LocalModelCache** | **每个节点一次** | 节点 local PV | 多节点、多 Pod、多租户 |
+| LocalModelNamespaceCache | 每个节点一次 | 节点 local PV | namespace 级隔离 |
+
+LocalModelCache 的收益：
+
+- 减少 HF/S3 重复下载和 egress；
+- 节点重启/Pod 重建不再下载；
+- 多 Pod 共享同一份本地权重；
+- 有 `LocalModelCache.status` 可观测下载状态。
+
+代价：
+
+- 需要 localmodel controller + agent + local StorageClass；
+- 每个节点占一份磁盘；
+- 多节点要保证 Pod 调度到已缓存节点；
+- `sourceModelUri` 不可变，换模型版本要新建 cache/清理旧 cache。
+
+#### 8.7.8 D6 单卡要不要做
+
+**D6 核心不需要。** 你现在的 `/workspace/models` + 手工 PVC 已经达到“模型只存一份、Pod 直接挂载”的效果；LocalModelCache 会再复制一份到 `/mnt/models`，还要装 agent/controller，收益很低。
+
+需要它的场景：
+
+- 多节点 GPU 集群，每个节点都要避免重复下载；
+- 同一节点上很多 ISVC/Pod 共享同一模型；
+- 希望用 KServe 原生 CRD 管理缓存生命周期，而不是手工 PV/PVC。
+
+#### 8.7.9 常见坑
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 没有 `LocalModelNode` | 节点没打 `kserve/localmodel=worker`，或 nodeAffinity 不匹配 | 打 label；检查 NodeGroup PV nodeAffinity |
+| 下载 Job 反复创建 | agent hostPath 和 NodeGroup `local.path` 不一致 | 用 `kubectl get ds ... jsonpath` 对齐 |
+| `LocalModelCache` 一直不 Ready | 模型太大、磁盘不足、凭据错误 | 看 Job/Pod 日志和 `nodeStatus` |
+| ISVC 仍走 storage-initializer | `storageUri` 和 `sourceModelUri` 不匹配 | 改成完全一致，或子目录 |
+| Pod 没用到缓存 | Pod 调度到了非缓存节点 | 加 nodeAffinity/nodeSelector，或扩大 nodeGroup |
+| 删除 cache 卡住 | 还有 ISVC 引用 | 先删/改 ISVC，`status.inferenceServices` 会列出引用 |
+| 换模型版本不生效 | `sourceModelUri` immutable | 新建 cache 名称，或清理旧 cache 后重建 |
+
+> LocalModelCache 是 optional，D6 核心验收不依赖它；没有 nodeGroup 就跳过，别让 optional 卡住主线。
 
 ---
 
@@ -1578,6 +1863,7 @@ results/d6/
 - KServe v0.17 LLM 发布说明：<https://kserve.github.io/website/blog/kserve-0.17-release>
 - KServe v0.18 多节点/llm-d：<https://kserve.github.io/website/blog/kserve-0.18-release>
 - vLLM KServe 集成：<https://docs.vllm.ai/en/stable/deployment/integrations/kserve>
+- KServe LocalModelCache 文档：<https://kserve.github.io/website/docs/model-serving/generative-inference/modelcache/localmodel>
 - KServe LocalModelCache 示例：<https://github.com/kserve/kserve/tree/v0.21.0/docs/samples/localmodelcache>
 - Gateway API Inference Extension：<https://gateway-api-inference-extension.sigs.k8s.io>
 - OTel GenAI semantic conventions：<https://opentelemetry.io/docs/specs/semconv/gen-ai/>
