@@ -78,7 +78,7 @@
 | Kueue 的 Job 和 K8s 的 Job / Pod 是什么关系？ | §3.2.3 |
 | `ClusterQueue` 和 `team-a-cq` 是什么关系？ | §3.2.2 |
 | 为什么要有 `LocalQueue` 一层？ | §3.2.4 |
-| `nominalQuota` 是什么？ | §3.3.1 |
+| `nominalQuota` 是什么、设在哪？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
 | Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
@@ -432,6 +432,25 @@ D5 里说的 “Job” 就是 Kubernetes 的 `batch/v1 Job`，**不是 Kueue 自
 #### 3.3.1 nominalQuota：配额账本，不是物理容量
 
 `nominalQuota` 是**这个 ClusterQueue 在某个 flavor 上、不向 cohort 借用时，可以持有的资源量**。名字里的 “nominal” 就是在提醒你：它是配置出来的名义额度，不是节点上实测的容量。
+
+**设在哪：** `nominalQuota` 在 `ClusterQueue` 上，但不在 `spec.nominalQuota`，而是嵌在 resource group → flavor → resource 里：
+
+```yaml
+spec:
+  resourceGroups:
+    - coveredResources: ["nvidia.com/gpu", "cpu", "memory"]
+      flavors:
+        - name: gpu-3060
+          resources:
+            - name: nvidia.com/gpu
+              nominalQuota: 1
+            - name: cpu
+              nominalQuota: 8
+            - name: memory
+              nominalQuota: 16Gi
+```
+
+路径是 `.spec.resourceGroups[*].flavors[*].resources[*].nominalQuota`。每个 flavor 的每个 resource 各有一个额度；`LocalQueue` 上没有这个字段，它只有 `spec.clusterQueue`。v1beta2 还允许在 `Cohort` 对象上定义 cohort 级共享额度，D5 不用。
 
 admission 的判定（没有 cohort 时）：
 
