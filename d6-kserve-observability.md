@@ -1389,6 +1389,13 @@ spec:
                 values: ["<node-name>"]
 ```
 
+> **为什么同时要 `persistentVolumeSpec` 和 `persistentVolumeClaimSpec`：**
+>
+> - `persistentVolumeSpec` 描述“盘在哪”：节点本地路径 `local.path`、容量、`nodeAffinity`；它是集群级的实际存储。
+> - `persistentVolumeClaimSpec` 描述“Pod 怎么申请”：容量、访问模式、StorageClass；它是 namespace 级、给下载 Job 和 ISVC Pod 挂载用的 claim。
+> - 本地盘没有动态 provisioner，KServe 必须自己创建**成对的 PV/PVC**：只给 PVC 不知道盘在哪个节点；只给 PV，Pod 又不能直接挂载。两者的容量、`accessModes`、`storageClassName` 必须匹配，否则 PVC 会一直 `Pending`。
+> - 下载 Job 用一套 PV/PVC；每个使用该缓存的 ISVC namespace 还会生成 serving 用的 PV/PVC，底层指向同一个 `local.path`。
+
 检查：
 
 ```bash
@@ -1429,6 +1436,10 @@ Job: Complete
 #### 8.7.6 用缓存部署 ISVC
 
 关键：**ISVC 的 `storageUri` 必须和 `LocalModelCache.sourceModelUri` 匹配**。
+
+> 这里写 `hf://` 不是“又下载一次”，而是把 `hf://` 当作 **cache 的匹配键**。KServe 匹配到 LocalModelCache 后，会把 URI 改写成 `pvc://<cache>-<nodegroup>/models/<hash>`，Pod 最终挂的是 PVC。
+>
+> 如果直接写 `pvc://...`，就绕过了 LocalModelCache 的匹配、节点组选择、缓存状态和生命周期，只是手工挂一个 PVC；那种写法对应 D6 当前的 `d6-models-pvc`，不是 LocalModelCache 模式。
 
 ```yaml
 apiVersion: serving.kserve.io/v1beta1
