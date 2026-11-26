@@ -1,0 +1,25 @@
+# D6 KServe ISVC cold start (PVC model, image cached)
+
+isvc: qwen3-8b
+pod: qwen3-8b-predictor-68448ccf4b-mg96h
+pod.created: 2026-11-26T20:45:21Z
+container.startedAt: 2026-11-26T20:45:24Z
+pod.Ready: 2026-11-26T20:47:53Z
+
+image_pull_s: 0        # image already present on node
+model_download_s: 0    # PVC mount, no storage-initializer
+engine_init_s: 149     # container start -> Ready
+total_ready_s: 152     # pod created -> Ready
+
+## Timeline (from vLLM logs)
+20:46:19  Loading weights took 2.60s
+20:46:23  Model loading took 9.55s
+20:47:06  [backbone] torch.compile took 39.89 s in total
+20:47:12  Available KV cache memory: 2.95 GiB
+20:47:29  Starting vLLM server on http://0.0.0.0:8080
+20:47:53  Pod Ready
+
+## Notes
+- Same cached image and PVC as raw; difference isolates KServe control/data path.
+- ISVC startupProbe periodSeconds=30, so Ready is delayed up to ~24s after API startup.
+- engine_init_s includes readiness-probe delay.

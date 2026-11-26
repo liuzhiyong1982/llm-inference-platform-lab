@@ -1,0 +1,17 @@
+D6 KServe benchmark
+date: 2026-11-26T20:49:00Z
+pod: qwen3-8b-predictor-68448ccf4b-mg96h
+command: kubectl -n kserve-test exec <pod> -c kserve-container -- vllm bench serve
+model: qwen3-8b
+tokenizer: /mnt/models (PVC; no HF download)
+base_url: http://127.0.0.1:8080
+dataset: random
+input_len: 1024
+output_len: 256
+num_prompts: 100
+max_concurrency: 16
+ignore_eos: true
+percentile_metrics: ttft,tpot,itl,e2el
+metric_percentiles: 50,95,99
+goodput: ttft:2000 tpot:100
+note: client ran inside the ISVC predictor pod; server and client share CPU.

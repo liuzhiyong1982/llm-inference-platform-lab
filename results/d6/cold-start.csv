@@ -1,2 +1,3 @@
 path,image_pull_s,model_download_s,engine_init_s,total_ready_s
 raw,0,0,129,132
+kserve,0,0,149,152
