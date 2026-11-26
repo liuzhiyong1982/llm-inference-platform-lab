@@ -76,6 +76,7 @@
 | D5 必须 2 张卡吗？ | §2.1（单卡主路径；quota vs capacity） |
 | 为什么 D5 用 Job，不用 D1–D4 的 Deployment？ | §3.4.1 |
 | Kueue 的 Job 和 K8s 的 Job / Pod 是什么关系？ | §3.2.3 |
+| `ClusterQueue` 和 `team-a-cq` 是什么关系？ | §3.2.2 |
 | `nominalQuota` 是什么？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -337,6 +338,17 @@ Job (label queue-name=team-a)
 ```
 
 > `LocalQueue` 是 namespace 级的“取号窗口”，`ClusterQueue` 是真正的“配额池”。用户只提交到 LocalQueue；改配额是平台管理员改 ClusterQueue。
+>
+> **命名别混：** `ClusterQueue` 是对象类型（kind），`team-a-cq` 是它的 `metadata.name`。`team-a-cq` 本身就是一个 ClusterQueue，不是“ClusterQueue 下面的子队列”。类似 `Pod` 是类型，`nginx-xxxx` 是 Pod 名。
+>
+> 箭头表示**引用**，不是父子包含：`LocalQueue.spec.clusterQueue` 指向 `team-a-cq`；`ClusterQueue` 的 flavor 指向 `gpu-3060`。
+
+| 写法 | 含义 |
+|---|---|
+| `ClusterQueue` | API 对象类型（kind） |
+| `team-a-cq` | 某个 ClusterQueue 的 `metadata.name` |
+| `LocalQueue team-a` | namespace `team-a` 的入口，`spec.clusterQueue` 指向 `team-a-cq` |
+| `team-b-cq` | 另一个独立的 ClusterQueue，和 `team-a-cq` 平级 |
 
 #### 3.2.3 Job、Workload、Pod 不是一回事
 
