@@ -200,7 +200,7 @@ D4.5（可选，Q2）：PD 分离 2P+2D，4×4090 VM（4×L4 VM 不可得）；*
 
 D4.6（可选，T1-C）：tiered KV cache，**2×3060 12GB + Qwen3-4B-AWQ，16GiB CPU tier，3+3 轮**；**2026-11-25 已执行**，P50 1434→336ms（−77%）、goodput 0.81→1.10 req/s（+36%）、整体 P99 不变（冷启动主导）；见 [`d4.6-tiered-cache-lab.md`](./d4.6-tiered-cache-lab.md) 与 `results/d4.6/`。
 
-D5（B 线，3h）：Kueue 两团队 GPU 配额 + Kyverno CEL 准入；**2026-11-25 准备，尚未在 Vast 执行**；本地 kind 已用假 `nvidia.com/gpu=2` 验证配额/排队/抢占和 CEL 策略；文档见 [`d5-kueue-kyverno-lab.md`](./d5-kueue-kyverno-lab.md)，manifest 在 `scripts/d5/`；Kueue `v0.20.7`、Kyverno `1.20.0`，旧 `ClusterPolicy` 在 1.20 已停止执行。
+D5（B 线，3h）：Kueue 两团队 GPU 配额 + Kyverno CEL 准入；**2026-11-26 按单卡 VM 重写，尚未在 Vast 执行**；单卡核心证据是 team B 的 Workload `Admitted` + Pod `Pending`，证明 quota 与 capacity 分离；本地 kind 已用假 `nvidia.com/gpu=2` 验证配额/排队/抢占和 CEL 策略（只验证机制）；文档见 [`d5-kueue-kyverno-lab.md`](./d5-kueue-kyverno-lab.md)，manifest 在 `scripts/d5/`；Kueue `v0.20.7`、Kyverno `1.20.0`，旧 `ClusterPolicy` 在 1.20 已停止执行。
 
 D6（B 线，5–6h，两段）：**D6a KServe 服务抽象（3h）+ D6b 推理可观测性（2–3h）**，合并了原 D6/D7；**2026-11-26 准备，尚未在 Vast 执行**；同一模型 raw Deployment vs KServe `InferenceService`，加 DCGM/vLLM/OTel/Grafana/告警/game day，不重跑 D4；文档见 [`d6-kserve-observability.md`](./d6-kserve-observability.md)，manifest 在 `scripts/d6/`；KServe `v0.21.0`、vLLM `v0.34.0`、Qwen3-8B-AWQ；Standard mode 不支持 HTTP scale-to-zero。
 

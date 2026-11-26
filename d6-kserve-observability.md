@@ -6,7 +6,7 @@
 >
 > 版本基线：**KServe `v0.21.0`**、k3s `v1.37.2+k3s1`、Kubernetes `v1.37`（KServe 要求 ≥1.32）、vLLM `v0.34.0`、Qwen3-8B-AWQ、OTel Collector `0.166.0`、DCGM exporter `4.9.0`。
 >
-> 机器：优先复用 **D5 的 2×RTX 3060 12GB VM**；新租也选 2×3060 或 1×RTX 4090 24GB。**不要按 L4 VM 租**：Vast 的 L4 只有容器，k3s 起不来。
+> 机器：优先复用 **D5 的单卡 VM（显存 ≥12GB 时）**；新租选 1×RTX 4090 24GB。**canary 需要 2 张卡；单卡改为 dark launch 或跳过**（见 §8.4）。**不要按 L4 VM 租**：Vast 的 L4 只有容器，k3s 起不来。
 >
 > 预算：2×3060 `$0.2615/h` × 5–6h ≈ **`$1.5–1.8`（含 buffer）**；实际账单写进 `results/d6/cost.txt`，不要用估算替代。
 
@@ -47,7 +47,7 @@
 
 | 时间 | 动作 | 判据 |
 |---|---|---|
-| 0:00–0:25 | 复用 D5 VM；确认 k3s/GPU/镜像 | `nvidia.com/gpu=2` |
+| 0:00–0:25 | 复用 D5 VM；确认 k3s/GPU/镜像 | `nvidia.com/gpu=1`；canary 另需 2 卡，按 §8.4 跳过或 dark launch |
 | 0:25–0:55 | 装 cert-manager/Gateway API/Envoy/KServe | `kserve` pod 全 Ready |
 | 0:55–1:35 | raw Deployment + benchmark | `/v1/models` 200；记录冷启动 |
 | 1:35–2:15 | `InferenceService` + benchmark | `READY=True`；同一 workload |
@@ -80,7 +80,7 @@
 
 | 方案 | 说明 |
 |---|---|
-| **复用 D5 2×3060** | 推荐；D5 只占位 GPU，D6 直接换模型；增量 5–6h |
+| **复用 D5 单卡 VM** | 推荐（显存 ≥12GB 时）；D5 只占位 GPU，D6 直接换模型；canary 改为 dark launch 或跳过；增量 5–6h |
 | 1×RTX 4090 24GB | 单卡更宽裕；按 Vast 实时价 |
 | 1×L4 VM | **不可行**：Vast L4 只有容器，k3s 需要 VM |
 

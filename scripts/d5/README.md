@@ -14,7 +14,7 @@ GPU 只是被 Job 占位，不需要下载模型或起 vLLM。
 | `jobs/team-a-low-1.yaml` | team A 低优先级，合法 Job，应被 Kueue 接纳 |
 | `jobs/team-a-low-2.yaml` | team A 第二个低优先级 Job，应因配额排队 |
 | `jobs/team-a-high.yaml` | team A 高优先级 Job，应抢占低优先级 |
-| `jobs/team-b-low-1.yaml` | team B 低优先级，合法 Job，应拿第二张卡 |
+| `jobs/team-b-low-1.yaml` | team B 低优先级，合法 Job，应被 Kueue 放行（`Admitted`）；单卡上 Pod 会 `Pending` |
 | `jobs/bypass-no-queue.yaml` | 故意不带 queue label；装 Kyverno 前会绕过配额运行，装后被拒 |
 | `jobs/invalid-no-priority.yaml` | 有 queue label、无 `priorityClassName`，应被 Kyverno 拒 |
 | `jobs/invalid-wrong-queue.yaml` | queue label 指向别的团队，应被 Kyverno 拒 |
@@ -23,12 +23,12 @@ GPU 只是被 Job 占位，不需要下载模型或起 vLLM。
 ## 执行顺序
 
 ```bash
-# 0. Kueue / Kyverno 已安装，namespace / quota 已创建
+# 0. Kueue 已安装，Kyverno 还没装；namespace / quota 已创建
 kubectl apply -f scripts/d5/00-namespaces.yaml
 kubectl apply -f scripts/d5/10-priorityclasses.yaml
 kubectl apply -f scripts/d5/20-kueue.yaml
 
-# 1. 先证明 Kueue 的盲区（装 Kyverno 前）
+# 1. 装 Kyverno 前，先证明 Kueue 的盲区
 kubectl apply -f scripts/d5/jobs/bypass-no-queue.yaml
 kubectl get pods -n team-a
 kubectl get workloads -n team-a
@@ -38,11 +38,14 @@ kubectl delete -f scripts/d5/jobs/bypass-no-queue.yaml
 kubectl apply -f scripts/d5/30-kyverno-policies.yaml
 kubectl get vpol,mpol
 
-# 3. 抢卡 / 排队 / 抢占
-kubectl apply -f scripts/d5/jobs/team-a-low-1.yaml
-kubectl apply -f scripts/d5/jobs/team-a-low-2.yaml
-kubectl apply -f scripts/d5/jobs/team-b-low-1.yaml
-kubectl apply -f scripts/d5/jobs/team-a-high.yaml
+# 3. 配额 / 排队 / 跨团队 / 抢占
+kubectl apply -f scripts/d5/jobs/team-a-low-1.yaml   # Running，占住唯一 GPU
+kubectl apply -f scripts/d5/jobs/team-a-low-2.yaml   # QuotaReserved=False
+kubectl apply -f scripts/d5/jobs/team-b-low-1.yaml   # Workload Admitted，但 Pod Pending
+kubectl get workloads -n team-b -o wide
+kubectl describe pod -n team-b -l job-name=team-b-low-1
+kubectl delete -f scripts/d5/jobs/team-b-low-1.yaml  # 先删 B，避免干扰抢占
+kubectl apply -f scripts/d5/jobs/team-a-high.yaml    # 抢占 team-a-low-1
 
 # 4. 两条拒绝日志
 kubectl apply -f scripts/d5/jobs/bypass-no-queue.yaml 2> results/d5/reject-no-queue.txt || true
@@ -51,6 +54,7 @@ kubectl apply -f scripts/d5/jobs/invalid-no-priority.yaml 2> results/d5/reject-n
 # 5. 快照
 kubectl get clusterqueue -o wide
 kubectl get workloads -A -o wide
+kubectl get pods -A -o wide
 kubectl describe node | sed -n '/Allocated resources:/,/Events:/p'
 ```
 
@@ -59,7 +63,7 @@ kubectl describe node | sed -n '/Allocated resources:/,/Events:/p'
 - Kubernetes ≥ 1.34（Kueue 0.20 与 Kyverno 1.20 的要求）
 - Kueue `v0.20.7`，API `kueue.x-k8s.io/v1beta2`
 - Kyverno `1.20.0`，API `policies.kyverno.io/v1`
-- 2 张 GPU（`nvidia.com/gpu=2`），或本地 kind 用假容量预演
+- 1 张 GPU（`nvidia.com/gpu=1`），或本地 kind 用假容量预演
 
 ## 本地 kind 预演（可选，零成本）
 
@@ -72,7 +76,7 @@ kubectl patch node d5-control-plane --subresource=status --type=merge \
 ```
 
 这只验证 Kueue/Kyverno 的 admission、quota、preemption 逻辑，**不能**证明真实 GPU 调度或性能。
-正式结果仍要在 Vast 2×RTX 3060 VM 上跑。
+正式结果仍要在 Vast 单卡 VM 上跑；单卡核心证据是 team B 的 `Admitted` + Pod `Pending`。
 
 ## 常见问题
 

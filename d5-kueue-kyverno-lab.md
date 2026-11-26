@@ -1,6 +1,6 @@
-# D5 学习文档：Kueue 多租户 GPU 配额 + Kyverno CEL 准入（2×RTX 3060 VM）
+# D5 学习文档：Kueue 多租户 GPU 配额 + Kyverno CEL 准入（单卡 Vast VM）
 
-> 状态：**planned（2026-11-25 准备；本地 kind smoke test 已验证机制）**。本文按 `ai-cloud-native-week-plan.md` 的 D5 行准备：**3h、Vast 2×RTX 3060 12GB VM、Kueue `ClusterQueue` 两团队配额 + Kyverno 强制 GPU workload 带 `priorityClass` / queue label；跑一次“抢卡”演示，留下两条被拒 manifest 日志**。**尚未在 Vast 上跑正式结果**；文中“实测”表是模板，执行后填。本地 kind（单节点、假 `nvidia.com/gpu=2`）已把 Kueue 配额/排队/抢占和 Kyverno CEL 策略跑通，见 §9.8。
+> 状态：**planned（2026-11-26 按实际单卡 VM 重写；本地 kind smoke test 已验证机制）**。本文按 `ai-cloud-native-week-plan.md` 的 D5 行准备：**3h、Vast 单卡 VM、Kueue `ClusterQueue` 两团队配额 + Kyverno 强制 GPU workload 带 `priorityClass` / queue label；跑一次“抢卡”演示，留下两条被拒 manifest 日志**。**尚未在 Vast 上跑正式结果**；文中“实测”表是模板，执行后填。本地 kind（单节点、假 `nvidia.com/gpu=2`）已把 Kueue 配额/排队/抢占和 Kyverno CEL 策略跑通，但那只验证机制，不代表 Vast 单卡容量，见 §9.8。
 >
 > 计划位置：`ai-cloud-native-week-plan.md` 的 **D5（3h）** 与 **B 线 D3–D7 学习表**；B 线讲法见该文件“D3 / D5 的 B 线讲法”。
 >
@@ -21,7 +21,7 @@
 5. **两条“拒绝”要分清口径：**
    - Kyverno：API 直接返回 `Forbidden`，对象没创建；
    - Kueue：对象创建成功，但 `Workload` 的 `QuotaReserved=False`，Job 处于 `Suspended`，这是**排队**不是 API 拒绝。
-6. **预期演示结果：** team A 提交 2 个 GPU Job，只跑 1 个；team B 仍能拿第二张卡；team A 高优先级 Job 可抢占同队列低优先级 Job。
+6. **预期演示结果：** team A 提交 2 个 GPU Job，只跑 1 个，另一个 `QuotaReserved=False`；team B 的 Workload 被 Kueue 放行（`Admitted=True`），但 Pod 因物理卡在 team A 手里而 `Pending: Insufficient nvidia.com/gpu`；team A 高优先级 Job 可抢占同队列低优先级 Job。**单卡不是缩水版**：它把“配额账本”和“调度容量”的边界讲得最清楚。
 
 ---
 
@@ -32,7 +32,7 @@
 | # | 证据 | 通过标准 |
 |---|---|---|
 | 1 | Kyverno 拒绝日志 ×2 | 缺 queue label、缺 priorityClass 各一条 `Forbidden`，保存 stderr |
-| 2 | Kueue 配额表 | 集群 2 GPU；team A 2 个 Job → 1 `Admitted` + 1 `QuotaReserved=False`；team B 1 个 → `Admitted`。单卡时 team B 只到 `Admitted` + Pod `Pending`，按 §2.1 口径记录 |
+| 2 | Kueue 配额表 | 集群 1 GPU；team A 2 个 Job → 1 `Admitted` / Running + 1 `QuotaReserved=False`；team B 1 个 → Workload `Admitted` + Pod `Pending: Insufficient nvidia.com/gpu`。B 的 `Admitted` 和 Pod `Pending` 必须同时记录，见 §9.3 |
 | 3 | 抢占证据 | team A 高优先级 Job 使低优先级 Workload 出现 `Evicted=True, reason=Preempted`，并且 `kueue_preempted_workloads_total` 增加 |
 
 ### 1.2 B 线：三个交付物
@@ -52,7 +52,7 @@
 
 | 时间 | 动作 | 必须落地 |
 |---|---|---|
-| 0:00–0:30 | 租 VM、装 toolkit/k3s/device plugin，确认 2 张卡 | `nvidia.com/gpu=2` |
+| 0:00–0:30 | 租 VM、装 toolkit/k3s/device plugin，确认 1 张卡 | `nvidia.com/gpu=1` |
 | 0:30–1:00 | 装 Kueue，建 `ResourceFlavor` / `ClusterQueue` / `LocalQueue` | `kubectl get clusterqueue` 正常 |
 | 1:00–1:20 | 跑“无 queue label 绕过配额”实验 | 1 个 Running Pod + 0 个 Workload |
 | 1:20–1:50 | 装 Kyverno，写/应用 CEL 策略，跑两条拒绝 | 2 条 `Forbidden` 日志 |
@@ -69,6 +69,20 @@
 - 不把 `nominalQuota` 当成“节点容量”。
 - 不在 UAT 集群上试任何策略。
 
+### 1.5 本 lab 回答的问题（索引）
+
+| 问题 | 答案位置 |
+|---|---|
+| D5 必须 2 张卡吗？ | §2.1（单卡主路径；quota vs capacity） |
+| 为什么 D5 用 Job，不用 D1–D4 的 Deployment？ | §3.4.1 |
+| `nominalQuota` 是什么？ | §3.3.1 |
+| `cohort` 是什么？ | §3.3.2 |
+| `priority` 是什么？ | §3.3.3 |
+| Kueue 和 HPA/KEDA 怎么分工？ | §3.4 |
+| DRA 是替换 device plugin 吗？ | §3.1.1 |
+
+> 这里只负责指路，不重复正文；每个问题在对应小节有完整答案。
+
 ---
 
 ## 2. 环境、版本、预算
@@ -77,15 +91,16 @@
 
 | 项 | 值 |
 |---|---|
-| 实例 | Vast.ai **2×RTX 3060 12GB VM**，on-demand，130GB disk |
-| host | 40 vCPU / 98GB RAM（与 D4 同档；2 卡足够两个团队各 1 张） |
-| 单价 | **`$0.26148/h`**（2026-11-25 D4 实例实际单价；库存会变） |
-| 3h 成本 | ≈ **`$0.78`**；加 0.5h 安装/排障 ≈ `$0.91` |
-| 系统 | Ubuntu 22.04 VM，driver 580.x，k3s `v1.37.2+k3s1` |
+| 实例 | Vast.ai **单卡 VM（1×GPU）**，on-demand，`vms_enabled=true`；磁盘按实际 offer，≥40GB 足够 |
+| GPU | **执行时填**：`nvidia-smi` 的型号 / 显存；不绑定型号 |
+| host | **执行时填**：vCPU / RAM；D4 的 40 vCPU / 98GB 只是参考，不是 D5 要求 |
+| 单价 | **执行时填**：Vast 实时价（不要沿用 D4 的旧单价） |
+| 3.5h 成本（3h 实验 + 0.5h buffer） | **执行时填**：单价 × 3.5h；实际账单写 `results/d5/cost.txt` |
+| 系统 | Ubuntu 22.04 VM；driver / k3s 版本执行时记录（基线 k3s `v1.37.2+k3s1`） |
 
-**为什么默认选 2 张卡：** 两个团队各 1 张配额，才能同时展示“team A 拿不到第二张、team B 仍能拿到另一张”。单卡只能演示排队，无法演示“另一个团队仍有卡”。
+**D5 对显存没有要求，1 张卡即可。** GPU 只被 `pause` 容器占位，不下载模型、不起 vLLM；D6 才需要 ≥12GB（1×RTX 4090 24GB 更宽裕）。
 
-**但 2 卡不是硬性前提。** D5 的机制（Kueue 配额/排队/抢占、Kyverno 准入）只数 `nvidia.com/gpu` request，不关心物理卡数；GPU 只被 `pause` 容器占位，不跑模型。单卡时按下面口径改：
+**单卡的代价：不能演示两个团队同时 `Running`。** 换来的是把 §0 第 3 条讲透：Kueue 的 `nominalQuota` 是配额账本，kube-scheduler 的 `nvidia.com/gpu` 才是物理容量。按下面的口径记录：
 
 | 验收项 | 单卡可做 | 口径变化 |
 |---|---|---|
@@ -94,11 +109,9 @@
 | 同队列高优先级抢占 | ✅ | 让低优先级先占住唯一一张卡 |
 | team B 拿到“另一张卡”并 `Running` | ❌ | 只能到 `Admitted` + Pod `Pending` |
 
-单卡的 team B 结果不是失败，而是本文 §0 第 3 条的最好证据：**`nominalQuota` 是请求上限，不等于节点容量**。写结果时把“B 仍能拿另一张卡”改成“B 被 Kueue 放行但 scheduler `Pending`”，并保存 `kubectl describe pod` 里的 `Insufficient nvidia.com/gpu`。
+单卡的 team B 结果不是失败，而是 §0 第 3 条的最好证据：**`nominalQuota` 是请求上限，不等于节点容量**。写结果时不要写“B 仍能拿到卡”，改成“B 被 Kueue 放行但 scheduler `Pending`”，并保存 `kubectl describe pod` 里的 `Insufficient nvidia.com/gpu`。
 
-**选机建议：** 2×3060 没库存时，不要为 D5 单独等或单独租两次。优先租 **1×RTX 4090 24GB**（D6 也能复用；D6 的 canary 改成 dark launch 或跳过），D5 按上表单卡口径跑；只有必须演示“两个团队同时 Running”时才坚持 2 卡。
-
-如果 2×3060 不可用且仍要双卡，备选 2×3090（约 `$0.94/h`，3h ≈ `$2.8`），结果里要改卡型，不能和 3060 混在一起。
+> **flavor 名：** `ResourceFlavor` 仍叫 `gpu-3060`，只是沿用脚本里的逻辑名；实际卡型以 `nvidia-smi` 为准，不影响配额语义。若要改名，必须同步 `scripts/d5/20-kueue.yaml`、`scripts/d5/README.md` 和本文所有期望输出/cleanup 命令。
 
 ### 2.2 版本矩阵
 
@@ -141,15 +154,13 @@ Job 上的 `kueue.x-k8s.io/queue-name` 不会自动出现在 Pod 上。Pod 策�
 
 | 项 | 金额 |
 |---|---|
-| VM 3h | `$0.78` |
-| 0.5h buffer | `$0.13` |
-| 合计 | **≈ `$0.91`** |
-| D4.6 后余额 | 约 `$13.3` |
-| D5 后余额 | 约 `$12.4` |
+| 单卡 VM 实时单价 | **执行时填**（`$____/h`） |
+| 3h 实验 + 0.5h buffer | **执行时填**（`$____`） |
+| 合计（约 3.5h） | **执行时填** |
 
 > 不在共享 UAT 集群上做，避免污染环境、触发 Coder→Reviewer SOP 和公司成本。
 >
-> 单卡/换卡型时按 Vast 实时单价重算，不要用 2×3060 的单价乘；实际账单写 `results/d5/cost.txt`。
+> 估算口径：**单卡实时价 × 3.5h**；实际账单写 `results/d5/cost.txt`。不要沿用 D4 的旧单价或旧余额，也不要把估算当成账单。
 
 ### 2.5 本地 kind 预演（可选，零成本）
 
@@ -164,7 +175,9 @@ kubectl patch node d5-control-plane --subresource=status --type=merge \
 然后按本文装 Kueue/Kyverno。**能验证：** 配额、排队、抢占、CEL 策略、admission 顺序。
 **不能验证：** 真实 GPU 调度、device plugin、Vast 成本、跨节点行为。正式结果仍要在 Vast 上跑。
 
-> kind 节点默认只有 2 CPU。Kueue + Kyverno + 占位 Job 可能把 CPU 吃满，导致 Kyverno admission Pod `Pending`，甚至被高优先级 Job 抢占。预演时先停掉占位 Job、给控制面加 `priorityClassName: system-cluster-critical`，或接受只验证部分步骤；Vast 的 40 vCPU 不会这么紧。
+> kind 节点默认只有 2 CPU。Kueue + Kyverno + 占位 Job 可能把 CPU 吃满，导致 Kyverno admission Pod `Pending`，甚至被高优先级 Job 抢占。预演时先停掉占位 Job、给控制面加 `priorityClassName: system-cluster-critical`，或接受只验证部分步骤；Vast 单卡 VM 通常不会这么紧，执行时按 `nproc` 记录实际 vCPU。
+>
+> kind 里 patch 出来的 `2` 是**假容量**，只为一次预演里同时观察配额/排队/抢占；Vast 正式实验只有 1 张卡，kind 结果不能当单卡容量证据。
 
 ---
 
@@ -211,7 +224,15 @@ kubectl apply Job
 
 ### 3.1.1 DRA 与 D5 的边界（为什么本 lab 不用 DRA）
 
+> **结论：DRA 替换的是 device plugin 的分配模型，不是驱动本身。DRA 仍然需要 DRA driver。**
+
 DRA（Dynamic Resource Allocation）是 Kubernetes 1.34 GA 的设备分配 API（`resource.k8s.io/v1`），解决的是“**Pod 要什么样的设备**”，不是“谁能拿到配额”。
+
+**旧模型：** Pod 写 `nvidia.com/gpu: 1`，device plugin 把卡暴露成 extended resource；kube-scheduler 只看到整数，调度后由 kubelet / device plugin 选卡。
+
+**DRA：** 用 `DeviceClass` / `ResourceSlice` / `ResourceClaim` 描述和申请设备；kube-scheduler 在**调度前**选中具体设备。它需要 NVIDIA DRA driver（如 `k8s-dra-driver-gpu`），不是“不用驱动”。
+
+**不替换：** 厂商驱动、GPU Operator / 容器运行时、Kueue 的 quota / queue / preemption 都还在；device plugin 仍受支持，简单整卡场景可以继续用。
 
 | 对象 | 作用 |
 |---|---|
@@ -220,21 +241,22 @@ DRA（Dynamic Resource Allocation）是 Kubernetes 1.34 GA 的设备分配 API�
 | `ResourceClaim` | Pod 的设备申请：要几张、什么属性 |
 | `ResourceClaimTemplate` | 每个 Pod 自动生成 claim，适合多副本 |
 
-D5 用的是老模型：NVIDIA device plugin 把 GPU 暴露成 extended resource `nvidia.com/gpu`，Pod 只写一个整数。两者差别：
+D5 用的是旧模型：NVIDIA device plugin 把 GPU 暴露成 extended resource `nvidia.com/gpu`，Pod 只写一个整数。两者差别：
 
 | 维度 | D5：device plugin | DRA |
 |---|---|---|
 | 资源声明 | `nvidia.com/gpu: 1` | `ResourceClaimTemplate` + `DeviceClass` |
+| 驱动 / 组件 | NVIDIA driver + device plugin | NVIDIA driver + NVIDIA DRA driver（如 `k8s-dra-driver-gpu`） |
 | 选卡依据 | 数量 + `nodeSelector` / affinity | 设备属性：显存、型号、MIG、拓扑 |
 | MIG / 共享 | 靠驱动暴露不同 resource name | 原生 partitionable devices、设备共享 |
 | 配额 | Kueue 按 `nvidia.com/gpu` 计数 | Kueue DRA 集成按设备数或 counter 计 |
-| Pod 调度 | kube-scheduler + device plugin | kube-scheduler 的 DRA 插件 |
+| Pod 调度 | kube-scheduler 只按数量调度；kubelet / device plugin 选卡 | kube-scheduler 在调度前选中具体设备（DRA 插件） |
 
 **为什么 D5 不用 DRA：**
 
 1. **时间盒只有 3h。** 装 NVIDIA DRA driver、确认 `ResourceSlice`、写 `ResourceClaimTemplate`，会挤掉配额、抢占和两条拒绝日志。
-2. **2×3060 不支持 MIG。** DRA 最有价值的“按显存/分区选卡”没有素材；两张同型号卡只能演示“申请一张整卡”。
-3. **问题正交。** D5 回答“谁能拿卡、拿不到怎么排队”；DRA 回答“拿哪张卡”。DRA 不提供 quota、queue、preemption。
+2. **本 lab 按消费级单卡准备（实际型号以 `nvidia-smi` 为准），没有 MIG 素材。** DRA 最有价值的“按显存/分区选卡”没有用武之地；D5 只申请整卡，设备属性不参与配额决策。
+3. **问题正交，lab 目标是配额/准入，不是设备选择。** D5 回答“谁能拿卡、拿不到怎么排队”；DRA 回答“拿哪张卡”。DRA 不提供 quota、queue、preemption。
 4. **版本不是障碍。** k3s 1.37 + Kueue 0.20.7 已支持 DRA（Kueue 0.18 起集成 beta，0.19 起相关 feature gate 默认开启），但“能跑”不等于“3h 内值得跑”。
 
 **最容易混的两个词：**
@@ -242,9 +264,9 @@ D5 用的是老模型：NVIDIA device plugin 把 GPU 暴露成 extended resource
 - Kueue `ResourceFlavor`：**配额维度**，按节点 label/taint 划分“这批配额对应哪些节点”，不是设备；
 - DRA `DeviceClass`：**设备类别**，描述“有哪些卡、什么属性”。
 
-**如果要把 D5 扩成 DRA 版：** 需要 K8s ≥1.34、NVIDIA DRA driver、`ResourceClaimTemplate`，并把 `20-kueue.yaml` 里按 `nvidia.com/gpu` 计的配额换成 DRA 设备计数或 counter；至少多 1.5–2h。建议单独做 Q3 的 GPU Operator/MIG lab，不要塞进 D5。
+**如果要把 D5 扩成 DRA 版：** 需要 K8s ≥1.34、NVIDIA DRA driver（如 `k8s-dra-driver-gpu`）、`ResourceClaimTemplate`，并把 `20-kueue.yaml` 里按 `nvidia.com/gpu` 计的配额换成 DRA 设备计数或 counter；至少多 1.5–2h。建议单独做 Q3 的 GPU Operator/MIG lab，不要塞进 D5。
 
-**面试一句话：** “D5 用 device plugin + extended resource，因为实验目标是配额和准入；DRA 是设备分配层的升级，解决 MIG、设备属性、拓扑，不解决队列和抢占。两者可以组合，Kueue 0.18+ 已经能按 DRA 设备计配额。”
+**面试一句话：** “DRA 是 device plugin 的替代模型，不是替代驱动；它把整数计数换成 ResourceClaim + ResourceSlice，让 scheduler 调度前选设备；配额/排队/抢占仍是 Kueue 的事。”
 
 ### 3.2 Kueue 的工作原理与对象模型
 
@@ -310,7 +332,7 @@ Job (label queue-name=team-a)
   → LocalQueue team-a (namespace team-a)
     → ClusterQueue team-a-cq (nominalQuota: 1 GPU)
       → ResourceFlavor gpu-3060
-        → node with nvidia.com/gpu=2
+        → node with nvidia.com/gpu=1
 ```
 
 > `LocalQueue` 是 namespace 级的“取号窗口”，`ClusterQueue` 是真正的“配额池”。用户只提交到 LocalQueue；改配额是平台管理员改 ClusterQueue。
@@ -340,7 +362,7 @@ sum(已 Admitted Workload 的 request) + 新 Workload 的 request
 | 永久硬上限 | 加入 cohort 后可以借，借了就可能超过 nominalQuota |
 | 按 Pod 实时计费 | 按 Workload 占着；Job 结束才释放 |
 
-D5 的取值：team A / team B 各 `nominalQuota: 1`，集群正好 2 张卡。这样“配额”和“容量”一致，排队/抢占的因果关系最干净；单卡实验时故意让两者不一致，用来演示 §0 第 3 条。
+D5 的取值：team A / team B 各 `nominalQuota: 1`，但集群只有 1 张物理卡，两个 CQ 合计 2 > 1。**这是故意的配额超卖**：team B 的 Workload 会被 Kueue 放行（`Admitted=True`），Pod 却因 `Insufficient nvidia.com/gpu` 留在 `Pending`——正好演示 §0 第 3 条。生产上应让 `nominalQuota` 不超过真实 allocatable；D5 反着配，是为了把账本和容量分开。
 
 一个常见的排障 message：
 
@@ -364,6 +386,8 @@ cohort: research
 - team B 一提交，team A 是否要让出，取决于 `reclaimWithinCohort`。
 - 没有 cohort（`cohortName` 为空）就是严格隔离：team A 只能用自己的 1 张，B 的卡空着也不能用。
 
+注意这是**配额账本**上的 2 张，不代表物理上多了一张卡。D5 只有 1 张物理卡，借到额度的第二个 Workload 会 `Admitted`，但 Pod 仍可能 `Pending`（§9.6）。
+
 三个限制字段：
 
 | 字段 | 管谁 | 不设时 |
@@ -379,7 +403,7 @@ cohort: research
 - **cohort 不是 namespace，也不是节点池。** 它只影响配额记账，不影响 Pod 能调度到哪些节点；节点范围仍由 `ResourceFlavor` 的 label/taint 决定。
 - **cohort 不是“自动扩容”。** 借来的仍然是集群里已有的闲置配额，不会变出 GPU。
 
-D5 核心实验**不设 cohort**，先讲严格隔离；有余力再加 10 分钟可选实验：给两个 CQ 加同一个 cohort，观察 A 借到 B 的卡、B 提交后 A 被 reclaim。
+D5 核心实验**不设 cohort**，先讲严格隔离；有余力再加 10 分钟可选实验：给两个 CQ 加同一个 cohort，观察 A 借到 B 的额度、B 提交后 A 被 reclaim。单卡上只能看到额度借用/回收，不能看到两个团队同时 `Running`。
 
 #### 3.3.3 priority：决定“谁先开始、谁被抢”
 
@@ -864,17 +888,25 @@ Kueue 的 mutating webhook 会把带 queue label 的 Job 的 `suspend` 改成 `t
                                   │
                     ┌─────────────┴─────────────┐
                     ▼                           ▼
-              RTX 3060 #1                  RTX 3060 #2
+            team-a-low-1 Pod              team-b-low-1 Pod
+              Running                       Pending
+                    │                 Insufficient nvidia.com/gpu
+                    ▼
+              唯一 1 张物理 GPU
+            （型号/显存以 nvidia-smi 为准）
 ```
+
+`nominalQuota` 合计 2 > 物理 1，是**故意超卖**：Kueue 的账本放行 team B，kube-scheduler 的容量拒绝它。
 
 **资源清单：**
 
 | 对象 | 数量 | 说明 |
 |---|---|---|
+| 物理 GPU | 1 | 型号 / 显存执行时记录；两个 CQ 的 `nominalQuota` 合计 2 > 1 |
 | Namespace | 2 | `team-a` / `team-b`，带 `gpu-pool: d5` |
 | PriorityClass | 2 | `gpu-high`（1000）/ `gpu-low`（100） |
-| ResourceFlavor | 1 | `gpu-3060`，空 spec 匹配所有节点 |
-| ClusterQueue | 2 | 各 1 GPU、8 CPU、16Gi |
+| ResourceFlavor | 1 | `gpu-3060`，空 spec 匹配所有节点；只是逻辑名 |
+| ClusterQueue | 2 | 各 1 GPU、8 CPU、16Gi；合计 2 > 物理 1，故意超卖 |
 | LocalQueue | 2 | 各指向自己的 ClusterQueue |
 | ValidatingPolicy | 2 | Job + Pod 两层 |
 | MutatingPolicy | 1 | 给 Pod 加 `cost-center` |
@@ -889,9 +921,11 @@ D5 复用 D3 的 Vast VM 路径。**必须用 `vms_enabled=true` 的 VM offer**�
 
 ```bash
 vastai search offers -n \
-  'num_gpus=2 gpu_name=RTX_3060 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=130 inet_down>=500 reliability>=0.98 cpu_ram>=64' \
-  -o 'dph' --storage 130 --limit 10
+  'num_gpus=1 rentable=true vms_enabled=true cuda_vers>=13.0 disk_space>=40 inet_down>=500 reliability>=0.98 cpu_ram>=64' \
+  -o 'dph' --storage 40 --limit 10
 ```
+
+不绑定 GPU 型号；选当时最便宜、满足 `vms_enabled=true` 的单卡 offer。D5 不需要 D4 的大磁盘，`40GB` 足够装 k3s/Kueue/Kyverno，实际按 offer 填。
 
 创建走 API，显式 `"vm": true`（CLI 的 `create instance` 不带 `vm` 字段，可能起成容器）：
 
@@ -899,11 +933,11 @@ vastai search offers -n \
 curl -s -X PUT "https://console.vast.ai/api/v0/asks/<OFFER_ID>/" \
   -H "Authorization: Bearer $(cat ~/.config/vastai/vast_api_key)" \
   -H "Content-Type: application/json" \
-  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":130,"runtype":"ssh_direct","label":"d5-kueue","cancel_unavail":true}' \
+  -d '{"template_hash_id":"2c18cabd8f2f0525c2ff8446f5d4e063","vm":true,"disk":40,"runtype":"ssh_direct","label":"d5-kueue","cancel_unavail":true}' \
   | python3 -m json.tool
 ```
 
-完整 VM 创建/SSH/排障见 D3 §5.0；模板 hash、磁盘、`vm:true` 不要改错。
+完整 VM 创建/SSH/排障见 D3 §5.0；模板 hash、`vm:true` 不要改错。`disk` 填 offer 的实际磁盘（≥40GB），D5 不需要 D4 那么大的磁盘；如果模板 hash 失效，选当前 Ubuntu VM 模板，但仍要保留 `"vm":true`。
 
 ### 5.1 安装 NVIDIA runtime + k3s + device plugin
 
@@ -939,12 +973,13 @@ kubectl -n kube-system rollout status ds/nvidia-device-plugin-daemonset --timeou
 
 > 详细排障（runtime 没被 k3s 识别、device plugin allocatable=0）见 D3 §5.2–§5.4。
 
-### 5.2 确认两张卡
+### 5.2 确认一张卡
 
 ```bash
 nvidia-smi -L
+nvidia-smi --query-gpu=name,memory.total --format=csv
 kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}{"\n"}'
-# 期望：2
+# 期望：1
 ```
 
 GPU smoke：
@@ -972,7 +1007,7 @@ kubectl logs gpu-smoke
 kubectl delete pod gpu-smoke
 ```
 
-看到两张 RTX 3060 和 `nvidia-smi` 输出，才继续。
+看到 `nvidia-smi` 只报告 1 张卡（型号 / 显存以实际输出为准）和 smoke Pod 成功，才继续。把型号、显存写进 `results/d5/machine.txt`。
 
 ### 5.3 安装 Helm 和 jq
 
@@ -986,12 +1021,15 @@ jq --version
 ### 5.4 记录版本
 
 ```bash
-k3s --version
-nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit --format=csv
-kubectl version
+mkdir -p results/d5
+{
+  k3s --version
+  nvidia-smi --query-gpu=name,memory.total,driver_version,power.limit --format=csv
+  kubectl version
+} | tee results/d5/machine.txt
 ```
 
-把版本写进 `results/d5/summary.md`；版本不同，Kueue/Kyverno 行为可能不同。
+把版本写进 `results/d5/machine.txt`（可同时摘进 `summary.md`）；版本不同，Kueue/Kyverno 行为可能不同。
 
 ---
 
@@ -1061,15 +1099,17 @@ Within Cluster Queue: LowerPriority
 |---|---|---|
 | `namespaceSelector` | `kubernetes.io/metadata.name: team-a` | 只允许 team-a 的 Workload 进入这个 CQ |
 | `coveredResources` | GPU/CPU/memory | 防止只卡 GPU、CPU/内存被吃光 |
-| `nominalQuota` | 1 GPU / 8 CPU / 16Gi | 两个团队各 1 张卡 |
+| `nominalQuota` | 1 GPU / 8 CPU / 16Gi | 两个 CQ 各 1，合计 2 > 物理 1；**故意超卖**，用来演示 quota ≠ capacity |
 | `preemption.withinClusterQueue` | `LowerPriority` | 允许同团队高优先级抢占低优先级 |
 | `reclaimWithinCohort` | 默认 `Never` | 核心实验严格隔离，不跨团队抢 |
 | `borrowWithinCohort` | 默认 `Never` | 同上 |
 | `queueingStrategy` | 默认 `BestEffortFIFO` | 后面的小 Job 可以绕过前面的大 Job，避免队头阻塞 |
 
+> `gpu-3060` 只是沿用脚本的 flavor 逻辑名；实际卡型以 `nvidia-smi` 为准，不影响配额语义。改名要同步 `scripts/d5/20-kueue.yaml`、`scripts/d5/README.md` 和本文的期望输出/cleanup 命令。
+
 ### 6.5 为什么核心实验不用 cohort
 
-- 用 cohort + borrowing，team A 可以在 team B 空闲时借第二张卡；演示更花哨，但会掩盖“配额硬上限”。
+- 用 cohort + borrowing，team A 可以在 team B 空闲时借额度（账本上多出 1 张）；但单卡集群不会因此多出物理卡，第二个 Workload 会 `Admitted` 但 Pod `Pending`。演示更花哨，但会掩盖“配额硬上限”。
 - 先把严格配额跑通，再在 §9.6 可选加 cohort，讲“借用/回收”。
 
 ---
@@ -1078,7 +1118,7 @@ Within Cluster Queue: LowerPriority
 
 ### 7.1 提交一个不带 queue label 的 GPU Job
 
-`scripts/d5/jobs/bypass-no-queue.yaml` 的特征：
+这一步在**装 Kueue 之后、装 Kyverno 之前**做：Kueue 已装，但默认不接管没有 queue label 的 Job。`scripts/d5/jobs/bypass-no-queue.yaml` 的特征：
 
 - 有 `nvidia.com/gpu: 1`；
 - **没有** `kueue.x-k8s.io/queue-name`；
@@ -1102,8 +1142,10 @@ No resources found in team-a namespace.   # 没有 Workload
 
 ```bash
 kubectl describe node | sed -n '/Allocated resources:/,/Events:/p'
-# nvidia.com/gpu  1
+# nvidia.com/gpu  1 (Requests 占满唯一一张卡)
 ```
+
+> 记录后立即按 §7.3 删除；它会占住唯一的 GPU，不能留到后面的 Kyverno 拒绝和抢占步骤。
 
 ### 7.2 结论
 
@@ -1308,6 +1350,13 @@ pod/team-a-low-1-xxxxx   Running
 workload/job-team-a-low-1-xxxxx   team-a   team-a-cq   True
 ```
 
+节点上唯一一张 GPU 已被占满：
+
+```bash
+kubectl describe node | sed -n '/Allocated resources:/,/Events:/p'
+# nvidia.com/gpu  Requests 为 1（容量 1，占满）
+```
+
 ### 9.2 team A 提交第二个 Job → 排队
 
 ```bash
@@ -1343,24 +1392,67 @@ insufficient unused quota for nvidia.com/gpu in flavor gpu-3060, 1 more needed"
 
 > 这是 **Kueue 排队**，不是 API 拒绝。对象已经创建，只是没有配额。
 
-### 9.3 team B 提交 → 拿第二张卡
+### 9.3 team B：配额放行，容量 Pending
 
 ```bash
 kubectl apply -f scripts/d5/jobs/team-b-low-1.yaml
 kubectl get jobs,pods -n team-b -o wide
-kubectl describe node | sed -n '/Allocated resources:/,/Events:/p'
+kubectl get workloads -n team-b -o wide
+kubectl describe pod -n team-b -l job-name=team-b-low-1 | sed -n '/Events:/,$p'
 ```
 
 期望：
 
 ```text
-team-b-low-1   Running
-nvidia.com/gpu  2
+job.batch/team-b-low-1   Running      # Job 已解除 suspend，Pod 已创建
+pod/team-b-low-1-xxxxx   Pending
+workload/job-team-b-low-1-xxxxx   team-b   team-b-cq   True
 ```
 
-这一步证明：**team A 提交 2 个 Job 并没有抢光两张卡，team B 仍能拿到自己的 1 张。**
+确认 `Admitted` 和 `QuotaReserved` 都为 `True`：
+
+```bash
+kubectl get workloads -n team-b -o json | \
+  jq '.items[] | {name: .metadata.name, conditions: [.status.conditions[] | {type, status, reason}]}'
+```
+
+```text
+Admitted=True, QuotaReserved=True
+```
+
+`describe pod` 的 Events 里应有：
+
+```text
+Warning  FailedScheduling  ...  0/1 nodes are available:
+1 Insufficient nvidia.com/gpu.
+```
+
+**这是单卡实验的核心证据：**
+
+- `Workload` 的 `QuotaReserved=True`、`Admitted=True`：Kueue 的配额账本认为 team B 有 1 张额度；
+- `Pod` 是 `Pending`：唯一一张物理卡在 `team-a-low-1` 手里，kube-scheduler 没有容量可分配；
+- 所以 **Kueue admission ≠ Pod 调度成功**。`nominalQuota` 是请求上限，不是节点容量。
+
+把三条输出存到 `results/d5/team-b-admitted-pod-pending.txt`：`kubectl get workloads -n team-b -o wide`、`kubectl get pods -n team-b -o wide`、`kubectl describe pod` 的 `FailedScheduling` 事件。
+
+> **口径：** team B 的 Workload 是 `Admitted`，不是 Kueue pending；`kueue_pending_workloads{cluster_queue="team-b-cq"}` 这时是 0。Pod `Pending` 是 kube-scheduler 的事实，不是 Kueue 排队。§10.2 的 metrics 和这里的 Pod 状态不要混。
+
+记录完立即删除，避免它和 §9.4 的高优先级抢占互相干扰；单卡上它也永远等不到卡：
+
+```bash
+kubectl delete -f scripts/d5/jobs/team-b-low-1.yaml
+kubectl get workloads -n team-b
+# 期望：No resources found
+```
 
 ### 9.4 team A 高优先级 Job → 抢占
+
+先确认 §9.3 的 `team-b-low-1` 已删除，避免它和高优先级抢占互相干扰：
+
+```bash
+kubectl get jobs,pods -n team-b
+# 期望：No resources found
+```
 
 ```bash
 kubectl apply -f scripts/d5/jobs/team-a-high.yaml
@@ -1406,11 +1498,29 @@ Warning FailedScheduling ... Insufficient nvidia.com/gpu
 ```bash
 kubectl delete job team-a-high -n team-a
 kubectl get workloads -n team-a -o wide
+kubectl get pods -n team-a -o wide
 ```
 
-期望：team-a-low-1 重新 `Admitted=True`，team-a-low-2 仍在 pending（因为配额只有 1）。
+期望：team-a-low-1 重新 `Admitted=True` 并 `Running`，team-a-low-2 仍在 pending（因为配额只有 1）。通常 `low-1` 先恢复（它先入队）；若实际顺序不同，记录实际顺序即可，不要为了预期改结果。
 
-### 9.6 可选：cohort 借用与回收
+**可选收尾：删掉 team-a 全部 Job，验证 team B 能真正 `Running`。**
+
+```bash
+kubectl delete jobs -n team-a --all
+kubectl apply -f scripts/d5/jobs/team-b-low-1.yaml
+kubectl get jobs,pods -n team-b -o wide
+```
+
+期望：`team-b-low-1` `Running`，唯一一张 GPU 被 B 占满。这一步证明**配额释放后能跨团队推进**，不是 B 抢了 A 的卡；单卡上仍然无法让两个团队同时 `Running`。
+
+### 9.6 可选：cohort 借用与回收（单卡只演示账本）
+
+先清空 §9.5 的可选收尾 Job，避免旧状态干扰：
+
+```bash
+kubectl delete jobs -n team-a --all --ignore-not-found
+kubectl delete jobs -n team-b --all --ignore-not-found
+```
 
 如果时间够，给两个 CQ 加 cohort：
 
@@ -1436,37 +1546,40 @@ preemption:
   reclaimWithinCohort: LowerPriority
 ```
 
-演示：
+单卡上的演示：
 
-1. team B 空闲，team A 提交 2 个 Job → 两个都跑（借了 team B 的 1 张）。
-2. team B 提交 1 个 Job → team B 回收自己的 nominal quota，team A 的一个 Job 被驱逐。
+1. team B 空闲，team A 提交 2 个 low Job → 两个 Workload 都 `Admitted`（第二个借了 team B 的额度），但只有一个 Pod `Running`，另一个 Pod `Pending: Insufficient nvidia.com/gpu`。
+2. team B 提交 1 个 low Job → B 的 Workload `Admitted`，Kueue 回收额度并驱逐 team A 的一个低优先级 Workload（通常是借额度那个）；但 A 自己的 Workload 仍可能占着唯一物理卡，B 的 Pod 也可能仍 `Pending`。按实际顺序记录。
 3. 记录 `kueue_preempted_workloads_total{reason="InCohortReclamation"}`。
 
-这一步讲的是“配额可以弹性，但不能被永久占死”。时间不够就跳过。
+**单卡上 cohort 只演示额度借用/回收，不能演示两个团队同时 `Running`。** 这一步讲的是“配额可以弹性，但不能被永久占死”；教学价值低于 §9.3 的 quota vs capacity。**时间不够直接跳过。**
 
 ### 9.7 记录模板
 
-| 场景 | team-a 运行 | team-b 运行 | pending | preempted | 证据 |
-|---|---:|---:|---:|---:|---|
-| A 提交 2 个 low | 1 | 0 | 1 | 0 | `cq-team-a.txt` |
-| B 提交 1 个 low | 1 | 1 | 1 | 0 | `node-allocated.txt` |
-| A 提交 high | 1（high） | 1 | 2 | 1 | `preemption.txt` |
-| 删除 high | 1（low-1） | 1 | 1 | 1 | `workloads-after.txt` |
+| 场景 | team-a Running | team-b Running | Kueue pending | Pod Pending | preempted | 证据 |
+|---|---:|---:|---:|---:|---:|---|
+| A 提交 2 个 low | 1 | 0 | 1（`team-a-low-2`） | 0 | 0 | `cq-team-a.txt` |
+| B 提交 1 个 low | 1 | 0 | 1（仍是 `team-a-low-2`） | 1（`team-b-low-1`） | 0 | `team-b-admitted-pod-pending.txt` |
+| 删除 B，A 提交 high | 1（high） | 0 | 1（`team-a-low-2`） | 0 | 1 | `preemption-events.txt` |
+| 删除 high | 1（low-1） | 0 | 1（`team-a-low-2`） | 0 | 1（累计） | `workloads-after.txt` |
+| 可选：删 A 全部，重提 B | 0 | 1 | 0 | 0 | 1（累计） | `team-b-after-release.txt` |
+
+> `Kueue pending` 只数 `QuotaReserved=False` 的 Workload；team B 的 Workload 是 `Admitted`，不计入这一列。team B 的 Pod `Pending` 单独一列，是 kube-scheduler 的事实。两列同时出现，才是单卡实验要的证据。
 
 ### 9.8 本地 kind 已观察到的行为（smoke test，非 Vast 正式结果）
 
-2026-11-25 在本地 kind（K8s 1.34、假 `nvidia.com/gpu=2`）验证：
+2026-11-25 在本地 kind（K8s 1.34、假 `nvidia.com/gpu=2`）验证的是**机制**；kind 的 2 是 patch 出来的假容量，不是 Vast 单卡结果，单卡正式口径见 §9.3。
 
 - 不带 queue label 的 Job：Pod `Running`，`kubectl get workloads -n team-a` 为空；
 - 合法 Job：Workload `QuotaReserved=True`，Job `Resumed`，Pod `Running`；
 - 第二个 Job：`QuotaReserved=False`，message 为 `insufficient unused quota for nvidia.com/gpu in flavor gpu-3060, 1 more needed`；
-- team B Job：第二张卡被占用，节点 `nvidia.com/gpu 2/2`；
+- team B Job：第二张卡被占用，节点 `nvidia.com/gpu 2/2`（kind 假 2 卡）；
 - 高优先级 Job：低优先级 Workload 出现 `Evicted=True, reason=Preempted`；
 - Kyverno Pod 策略最初误拒 Kueue 创建的 Pod，原因是只认 `queue-name`；改成同时接受 `local-queue-name` 后通过；
 - Pod 策略最初被 autogen 生成 Job 规则，导致合法 Job 被误拒；加 `spec.autogen.podControllers.controllers: []` 后解决；
 - `suspend: false` 的 Job 没有被 Kyverno 拒，因为 Kueue mutating webhook 先把它改成了 `true`。
 
-这些是**机制验证**，不是性能/容量结论；正式结果仍要在 Vast 上重跑并保存日志。
+这些是 **kind 机制验证**，不是 Vast 单卡结果，也不是性能/容量结论；正式结果仍要在 Vast 上重跑并保存日志。
 
 ---
 
@@ -1520,6 +1633,8 @@ kill $PF
 | `kueue_quota_reserved_wait_time_seconds` | 排队等了多久 |
 | `kueue_cluster_queue_resource_usage` | 可选，需要 `enableClusterQueueResources` |
 
+> §9.3 的 team B 是 `Admitted`，`kueue_pending_workloads` 不会把它算进去；它的 Pod `Pending` 只能从 `kubectl get pods` 和 `FailedScheduling` 事件看到。这是“配额账本”和“调度容量”的分界。
+
 ### 10.3 Kyverno metrics / PolicyReport
 
 ```bash
@@ -1549,17 +1664,19 @@ D5 的拒绝日志用 `kubectl apply 2> file` 保存，这是最直接的证据�
 ### 10.4 chargeback 公式
 
 ```text
-team_gpu_hours = Σ (workload_gpu_request × workload_runtime_hours)
+team_gpu_hours = Σ (pod_gpu_request × pod_runtime_hours)
 team_cost     = team_gpu_hours × $/GPU-hour
 ```
 
 数据来源：
 
-- `Workload.spec.podSets[].template.spec.containers[].resources.requests["nvidia.com/gpu"]`
-- `Workload.status.conditions` 的 admission/完成时间
+- `Workload.spec.podSets[].template.spec.containers[].resources.requests["nvidia.com/gpu"]`（与 Pod request 同源）
+- Pod 的实际 `status.startTime` / 完成时间（不是 Workload `Admitted` 的时间）
 - Pod 标签 `team`、`cost-center`、`kueue.x-k8s.io/local-queue-name`
 
 D5 只演示“标签 + 配额 + 审计”，不做真实账单；生产要接 OpenCost/Kubecost 或自建计量。
+
+特别注意：team B 的 Workload `Admitted` 但 Pod `Pending` 时，GPU-hours 是 **0**。chargeback 按实际 Pod 运行时长（或实际容器占用）算，不按 quota reservation；否则会把排队/等卡算成消费。
 
 ### 10.5 审计证据链
 
@@ -1569,7 +1686,7 @@ D5 只演示“标签 + 配额 + 审计”，不做真实账单；生产要接 O
 | 有没有被准入挡住？ | Kyverno `Forbidden` 响应 + `kyverno_validating_policy_results_total{result="fail"}` |
 | 有没有被 Kueue 排队？ | `Workload.status.conditions[QuotaReserved]` |
 | 有没有被抢占？ | `Evicted` / `Preempted` condition + `kueue_preempted_workloads_total` |
-| 用了多少 GPU 小时？ | Workload requests + 时间 + `team`/`cost-center` 标签 |
+| 用了多少 GPU 小时？ | Pod 实际运行时长 + request + `team`/`cost-center` 标签（不是 Workload `Admitted` 的时长） |
 
 ---
 
@@ -1583,7 +1700,7 @@ D5 只演示“标签 + 配额 + 审计”，不做真实账单；生产要接 O
 | Kueue webhook 挂了 | Job create 报 `InternalError` / webhook timeout | 恢复 controller；webhook 是 fail-closed |
 | Kyverno admission 挂了 | `failurePolicy: Fail` 时 GPU Job/Pod 创建被拒；已有负载不受影响 | 恢复 Kyverno；确保排除 `kube-system`/`kyverno` |
 | 策略写错 | 所有 GPU Job 被拒 | 先 `kyverno apply --explain` 离线测；回滚策略 |
-| `nominalQuota` > 实际 GPU | Kueue 放行，Pod `Pending: Insufficient nvidia.com/gpu` | 配额按真实 allocatable 配；配额不是容量 |
+| `nominalQuota` > 实际 GPU | Kueue 放行，Pod `Pending: Insufficient nvidia.com/gpu` | 配额按真实 allocatable 配；配额不是容量（D5 是故意超卖，见 §9.3） |
 | 抢占循环 | 低优先级 Job 反复被驱逐 | 调整 priority/队列；用 cohort 借用限制；避免同优先级互相抢 |
 | Pod 被 Pod 策略误拒 | Job 创建了但 Pod 创建失败 | 检查 Pod 策略是否接受 `local-queue-name`；关闭 autogen |
 | `ClusterQueue` 删不掉 | finalizer `resource-in-use` | 先删 Job/Workload，再删 LocalQueue/CQ |
@@ -1606,7 +1723,7 @@ D5 只演示“标签 + 配额 + 审计”，不做真实账单；生产要接 O
 - **RBAC**：团队只能在自身 namespace 创建 Job/Pod；不能改 ClusterQueue。
 - **Kyverno HA**：admission controller ≥2 副本；排除系统 namespace。
 - **Kueue HA**：leader election + 多副本；监控 webhook。
-- **配额**：`nominalQuota` 按真实 GPU 数配；给系统组件留余量。
+- **配额**：生产上 `nominalQuota` 按真实 GPU 数配，给系统组件留余量；D5 故意让两个 CQ 各 1、合计 2 > 物理 1，只为演示 quota ≠ capacity，不要照抄。
 - **审计**：开 API server audit log；保留 Kyverno/Kueue metrics；定期导出 Workload 快照。
 - **例外**：用 `PolicyException` 做 break-glass，设置过期时间和审批。
 - **控制面优先级**：给 Kyverno/Kueue 设置 `system-cluster-critical` 或专用高优先级。否则 GPU Job 的 `gpu-high` 可能抢占控制面 Pod，导致 webhook 短暂不可用（本地 kind 2 CPU 时实测过）。
@@ -1630,11 +1747,11 @@ D5 的配额层不关心模型版本，但回滚时容易踩两个坑：
 
 | 项 | 金额 |
 |---|---|
-| 2×3060 VM 3h | `$0.78` |
-| 0.5h buffer | `$0.13` |
-| 合计 | **≈ `$0.91`** |
+| 单卡 VM 实时单价 | **执行时填**（`$____/h`） |
+| 3h 实验 + 0.5h buffer | **执行时填**（`$____`） |
+| 合计（约 3.5h） | **执行时填** |
 
-执行后把 Vast 实际账单写进 `results/d5/cost.txt`；不要用估算替代实际账单。
+执行后把 Vast 实际账单写进 `results/d5/cost.txt`；不要用估算替代实际账单，也不要沿用 D4 的旧金额。
 
 ### 12.2 清理顺序
 
@@ -1684,6 +1801,7 @@ scp -i ~/.ssh/id_ed25519 -P <PORT> -r \
 ```text
 results/d5/
   summary.md
+  machine.txt                     # nvidia-smi 型号/显存、driver、k3s、kubectl 版本
   reject-no-queue.txt
   reject-no-priority.txt
   reject-wrong-queue.txt          # 可选
@@ -1692,7 +1810,9 @@ results/d5/
   workloads-team-a.txt
   workloads-team-b.txt
   node-allocated.txt
+  team-b-admitted-pod-pending.txt # Workload Admitted + Pod Pending 的三条证据
   preemption-events.txt
+  team-b-after-release.txt        # 可选：删 A 全部后 B Running
   kueue-metrics.txt
   kyverno-metrics.txt
   cost.txt
@@ -1700,19 +1820,21 @@ results/d5/
 
 ### 12.4 验收清单
 
-- [ ] `nvidia.com/gpu=2`（单卡为 `=1`），Kueue/Kyverno 版本记录
+- [ ] `nvidia.com/gpu=1`；`nvidia-smi` 型号/显存、Kueue/Kyverno/k3s 版本进 `machine.txt`
 - [ ] 两条 Kyverno 拒绝日志（缺 queue label、缺 priorityClass）
-- [ ] 无 label Job 绕过配额的证据（装 Kyverno 前）
-- [ ] team A 2 个 Job → 1 跑 1 pending；`QuotaReserved=False` 快照
-- [ ] team B 1 个 Job → 第二张卡，节点 `2/2`；单卡时改为 `Admitted` + Pod `Pending`，保存 `Insufficient nvidia.com/gpu`
-- [ ] 高优先级抢占：`Evicted=True, reason=Preempted`
-- [ ] `kueue_preempted_workloads_total` 或 event 证据
+- [ ] 无 label Job 绕过配额的证据（装 Kyverno 前）：Pod Running + 0 Workload
+- [ ] team A 2 个 Job → 1 Running + 1 `QuotaReserved=False`；保存 Workload 条件快照
+- [ ] team B 1 个 Job → Workload `Admitted=True` / `QuotaReserved=True` + Pod `Pending: Insufficient nvidia.com/gpu`；保存 `kubectl get workloads`、`kubectl get pods`、`FailedScheduling` 事件
+- [ ] 记录完 team B 后删除 `team-b-low-1`，再做抢占，避免干扰
+- [ ] 高优先级抢占：低优先级 Workload `Evicted=True, reason=Preempted`
+- [ ] 删除 high 后 `team-a-low-1` 重新 `Admitted` 并 Running；可选：删 team A 全部后 team B Running
+- [ ] `kueue_preempted_workloads_total` 或 event 证据（team B 的 Pod Pending 不计入 `kueue_pending_workloads`）
 - [ ] `results/d5/` 进 git
 - [ ] VM Destroy，成本记录
 
 ### 12.5 B 线简历 bullet
 
-> 用 Kueue `ClusterQueue` 给两个团队各 1 张 GPU 配额，Kyverno `ValidatingPolicy` 在 API 入口强制 GPU Job 带 queue label 和 priorityClass；演示了 team A 提交 2 个 Job 只能跑 1 个、team B 仍能拿到另一张卡（单卡时验证 Kueue 放行、scheduler Pending），以及高优先级抢占低优先级；留下 2 条拒绝日志和 1 条 `Preempted` condition。
+> 用 Kueue `ClusterQueue` 给两个团队各 1 张 GPU 配额（单卡集群上两个队列合计 2 > 物理 1，故意超卖），Kyverno `ValidatingPolicy` 在 API 入口强制 GPU Job 带 queue label 和 priorityClass；演示了 team A 提交 2 个 Job 只能跑 1 个、team B 被 Kueue 放行（`Admitted`）但 kube-scheduler 因 `Insufficient nvidia.com/gpu` 让 Pod `Pending`，证明 quota 与 capacity 分离；高优先级抢占低优先级并在释放后恢复；留下 2 条拒绝日志和 1 条 `Preempted` condition。
 
 ---
 
@@ -1736,7 +1858,7 @@ Kueue 管批处理 Job 的准入/排队/抢占，决定“能不能开始”；H
 
 **Q5：配额为什么不是容量？**
 
-Kueue 只看 Pod requests，不看节点实际 allocatable。`nominalQuota` 配成 4 GPU、集群只有 2 张时，Kueue 会放行 4 个 Workload，但 kube-scheduler 只能调度 2 个，剩下 `Pending`。配额是策略上限，容量是节点事实。
+Kueue 只看 Pod requests，不看节点实际 allocatable。D5 里两个 CQ 各 `nominalQuota: 1`、集群只有 1 张卡，Kueue 仍会放行 team B 的 Workload，但 kube-scheduler 只能让一个 Pod `Running`，另一个 `Pending: Insufficient nvidia.com/gpu`。配额是策略上限，容量是节点事实。
 
 **Q6：为什么 Kueue 默认管不到不带 label 的 Job？**
 
@@ -1758,6 +1880,19 @@ Deployment 用 `kubectl rollout undo`；回滚前确认新 Pod template 仍带 q
 
 RBAC、NetworkPolicy、Pod Security Admission、镜像签名、节点隔离/taint、审计日志、配额外的成本监控。D5 只覆盖“配额 + 准入 + 审计”这一层。
 
+**Q11：只有一张卡，怎么证明多团队配额？**
+
+一张卡反而把问题讲得更干净，因为配额和容量被迫分开：
+
+1. **配额是账本**：两个 ClusterQueue 各 `nominalQuota: 1`，合计 2 > 物理 1。Kueue 按账本放行，不按 `nvidia-smi` 的卡数放行。
+2. **team A 的边界**：team A 提交 2 个 Job，只有 1 个 `Admitted` / Running，另一个 `QuotaReserved=False`，说明同一团队的配额上限生效。
+3. **team B 的 `Admitted` + Pod `Pending`**：team B 提交 1 个 Job，Workload `Admitted=True` / `QuotaReserved=True`，但 Pod `Pending: Insufficient nvidia.com/gpu`。这同时证明两件事：B 的配额没有被 A 吃掉；Kueue 的 admission 不等于 kube-scheduler 的容量。
+4. **抢占**：team A 高优先级 Job 让低优先级 Workload 出现 `Evicted=True, reason=Preempted`，高优先级 Running；删掉 high 后 low-1 重新 `Admitted`。
+5. **释放后跨团队**：删掉 team A 全部 Job 再提交 B，B 真正 Running，证明配额和物理卡都能回收。
+6. **边界**：单卡不能证明两个团队同时 Running，那需要 2 张物理卡；但“B 被 Kueue 放行、Pod 仍 Pending”恰好是 quota vs capacity 最有说服力的证据，比每个团队各跑一个更能说明 Kueue 管什么、不管什么。
+
+如果追问“这是不是配置错误”：D5 是**故意超卖**；生产上 `nominalQuota` 总和不应超过 allocatable，或者用 cohort/borrowing 明确借用上限。
+
 ---
 
 ## 14. 与 D3/D4/D6 的衔接
@@ -1771,7 +1906,7 @@ RBAC、NetworkPolicy、Pod Security Admission、镜像签名、节点隔离/tain
 
 **一句话串起来：**
 
-> D3 证明“能把 vLLM 放进 K8s 并优雅扩缩”，D4 证明“多副本时路由能降 P99”，D5 证明“多团队时配额和准入能防止抢卡”，D6 证明“服务抽象能交付、指标能解释故障”；四者合起来才是“GPU 平台”，而不是“一个能跑的 Pod”。
+> D3 证明“能把 vLLM 放进 K8s 并优雅扩缩”，D4 证明“多副本时路由能降 P99”，D5 证明“多团队时配额和准入能防止抢卡，而且配额不等于物理容量”，D6 证明“服务抽象能交付、指标能解释故障”；四者合起来才是“GPU 平台”，而不是“一个能跑的 Pod”。
 
 ---
 
