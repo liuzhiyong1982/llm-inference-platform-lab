@@ -1,0 +1,11 @@
+# D6 Vast.ai cost
+
+- instance: `62709623`
+- GPU: `1× RTX 3060 12GB`
+- rate: `$0.1488888889/hr` (`dph_total`, includes disk)
+- duration at destroy: `6.20 h`
+- estimated cost: `$0.92`
+- date: `2026-11-26`
+
+> 数据来自 destroy 前的 `vastai show instances --raw`；最终账单可能有少量差异。
+> VM 直接 destroy，没有 Stop 后的存储计费。
