@@ -75,6 +75,7 @@
 |---|---|
 | D5 必须 2 张卡吗？ | §2.1（单卡主路径；quota vs capacity） |
 | 为什么 D5 用 Job，不用 D1–D4 的 Deployment？ | §3.4.1 |
+| Kueue 的 Job 和 K8s 的 Job / Pod 是什么关系？ | §3.2.3 |
 | `nominalQuota` 是什么？ | §3.3.1 |
 | `cohort` 是什么？ | §3.3.2 |
 | `priority` 是什么？ | §3.3.3 |
@@ -336,6 +337,52 @@ Job (label queue-name=team-a)
 ```
 
 > `LocalQueue` 是 namespace 级的“取号窗口”，`ClusterQueue` 是真正的“配额池”。用户只提交到 LocalQueue；改配额是平台管理员改 ClusterQueue。
+
+#### 3.2.3 Job、Workload、Pod 不是一回事
+
+D5 里说的 “Job” 就是 Kubernetes 的 `batch/v1 Job`，**不是 Kueue 自己的 Job 类型**。Kueue 没有 `Job` CRD；它为 Job 创建的是 `Workload`。
+
+```text
+你提交：batch/v1 Job（parallelism: 4）
+  │
+  ├─ 1. Kueue mutating webhook：把 Job.spec.suspend 改成 true
+  │
+  ├─ 2. Kueue 的 Job integration controller：创建 1 个 Workload
+  │      spec.podSets:
+  │        - name: main
+  │          count: 4
+  │          template: <Pod 模板>
+  │      spec.queueName: team-a
+  │      spec.priority: 100
+  │
+  ├─ 3. Kueue 只对 Workload 做 admission（配额/队列/优先级）
+  │
+  └─ 4. Admitted 后：Job.spec.suspend=false
+         → Kubernetes Job controller 创建 4 个 Pod
+         → kube-scheduler 绑定节点
+```
+
+| 对象 | 归谁 | 作用 |
+|---|---|---|
+| `batch/v1 Job` | Kubernetes | 工作负载控制器：创建 Pod、重试、跟踪 `completions` |
+| `Workload` | Kueue | 配额/排队/抢占的单元；描述“几个 Pod、每个要多少资源” |
+| `Pod` | Kubernetes | 实际运行单元 |
+
+所以：
+
+- **`Workload` 不是 Pod 的封装。** 它是“资源需求快照 + 配额账本条目”；一个 Workload 可以代表 4 个 Pod（Job `parallelism: 4`），也可以代表 1 个 Pod（裸 Pod）。
+- **Kueue 不创建 Pod。** 它只把 Job 的 `spec.suspend` 改成 `false`；Pod 由 Kubernetes Job controller 创建。
+- **Kueue 不替代 Job controller。** Job 的重试、`completions`、`backoffLimit` 仍然由 Kubernetes 管。
+
+什么时候看起来像 “Pod 的封装”：
+
+| 你提交的对象 | Kueue 创建几个 Workload | `podSets` 里是什么 |
+|---|---|---|
+| `batch/v1 Job`（`parallelism: 4`） | **1 个** | 1 个 podSet，`count: 4` |
+| 裸 `Pod` | **1 个** | 1 个 podSet，`count: 1` |
+| `Deployment`（`replicas: 3`） | **3 个**（每个 Pod 一个） | 每个 Workload 1 个 podSet，`count: 1` |
+
+> 一句话：**Job 是 Kubernetes 的工作负载对象，Workload 是 Kueue 的准入对象，Pod 是实际运行对象。** 三者是三层，不是同一个东西。
 
 ### 3.3 配额、借用、抢占
 
