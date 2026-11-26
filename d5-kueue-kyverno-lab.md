@@ -1177,6 +1177,18 @@ Kueue 的 mutating webhook 会把带 queue label 的 Job 的 `suspend` 改成 `t
 - **类型要匹配**：validation 返回 `bool`；mutation 返回对象或 `JSONPatch` 列表。
 - **可读性**：超过几行的表达式拆变量，用 `messageExpression` 输出具体原因。
 
+**“CEL 好啰嗦”是设计代价，不是偶然。** 简单 label 校验确实比旧 DSL 长；换来的是：
+
+- 每个可能为空的层级都显式写出来，排障时知道是哪一层缺失；
+- 无副作用、可静态类型检查、和 Kubernetes VAP 用同一套语言；
+- 复杂 OR / 集合条件比旧 `foreach` + `pattern` 清楚。
+
+写生产策略时可以少写一点：
+
+- 用 `variables` 抽公共路径（D5 的 `containers` / `labels` / `isGPU` 已经这样做）；
+- 用 `.?` / `.orValue()` 可选语法替代部分 `has` 链，但以当前 Kyverno / K8s CEL 版本为准；
+- 一条策略只做一件事，别把所有校验塞进一个表达式。
+
 ### 3.7 审计与 chargeback 的数据从哪来
 
 | 数据源 | 能回答什么 | 注意 |
