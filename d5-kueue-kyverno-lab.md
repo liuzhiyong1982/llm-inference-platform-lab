@@ -904,6 +904,24 @@ c.resources.limits['cpu']        // 取出 cpu 的值；要先确认 key 存在
 
 > `has` 不是“对象”，`in` 也不是只用于 key：`in` 还可以判断元素是否在 list 里；`[]` 是访问器，不是值本身。`map['missing']` 在 CEL 里会报错，所以先用 `in` 或 `has` 保护。
 
+**`has` 和 `in` 的区别，用对象结构看：**
+
+```text
+Container（有 schema）
+  ├─ resources: 字段        ← has 能查
+  │    └─ limits: 字段      ← has 能查
+  │         └─ "cpu": key   ← in 能查
+  └─ image: 字段            ← has 能查
+```
+
+| `limits` 的状态 | `has(c.resources.limits)` | `'cpu' in c.resources.limits` |
+|---|---|---|
+| 字段不存在 | `false` | 需要先保护，不能直接求值 |
+| 字段存在但是空 map `{}` | `true` | `false` |
+| `{"cpu": "1"}` | `true` | `true` |
+
+空 map 是最好的反例：字段在（`has=true`），但 key 不在（`in=false`）。所以 `has` 只接受字段选择，不接受 map key；`in` 只接受集合，不接受对象字段。
+
 **布尔语义：** `ValidatingPolicy` 的 `expression` 返回 `true` = 通过，`false` = 违反策略。
 
 #### 3.6.5 逐行读懂 D5 的 CEL
