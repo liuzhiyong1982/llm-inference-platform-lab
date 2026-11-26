@@ -717,6 +717,119 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' | jq
 ```
 
+#### 7.0.1 PV、PVC、StorageClass 是什么关系
+
+```text
+宿主机目录
+/workspace/models/Qwen3-8B-AWQ
+        │
+        ▼
+PV  d6-models-pv              # 集群级存储资源，hostPath 指向宿主机目录
+        │
+        ▼
+PVC d6-models-pvc             # namespace 级申请，在 kserve-test 里
+        │
+        ├─ raw Deployment：mount /models，subPath Qwen3-8B-AWQ
+        └─ ISVC：pvc://d6-models-pvc/Qwen3-8B-AWQ → /mnt/models
+```
+
+| 对象 | 作用 |
+|---|---|
+| **PV** | 代表一块实际存储；这里是 `hostPath: /workspace/models`，容量声明 20Gi |
+| **PVC** | Pod 对 PV 的申请；Pod 只认 PVC，不直接写 hostPath |
+| **StorageClass** | 这里是静态 `d6-local`，不自动创建存储 |
+| **Pod volumeMount** | 把 PVC 挂进容器，变成 `/models` 或 `/mnt/models` |
+
+`20Gi` 是 PV 的声明容量；`hostPath` 不会真的限制目录大小，生产要用 CSI/配额来管。
+
+#### 7.0.2 raw 和 ISVC 怎么挂这份模型
+
+raw Deployment：
+
+```yaml
+volumeMounts:
+  - name: models
+    mountPath: /models
+    subPath: Qwen3-8B-AWQ
+    readOnly: true
+volumes:
+  - name: models
+    persistentVolumeClaim:
+      claimName: d6-models-pvc
+      readOnly: true
+```
+
+vLLM 参数：
+
+```text
+--model=/models
+```
+
+InferenceService：
+
+```yaml
+storageUri: pvc://d6-models-pvc/Qwen3-8B-AWQ
+```
+
+KServe 解析 `pvc://` 后，把 PVC 的 `Qwen3-8B-AWQ` subPath 挂到 `/mnt/models`，**不会创建 storage-initializer，也不会复制模型**。所以 runtime 仍然是：
+
+```text
+--model=/mnt/models
+```
+
+#### 7.0.3 为什么不用 `hf://`
+
+| | `hf://Qwen/Qwen3-8B-AWQ` | `pvc://d6-models-pvc/Qwen3-8B-AWQ` |
+|---|---|---|
+| 模型来源 | 每个 Pod 从 Hugging Face 下载 | 宿主机本地盘，只下载一次 |
+| 冷启动 | 受网络影响，raw/ISVC 各下一次 | 只挂载，`model_download_s` 接近 0 |
+| 失败模式 | HF 限流/断网、storage-initializer OOM | PVC 未 Bound、hostPath 不存在 |
+| 磁盘 | 每个 Pod 的 emptyDir 各一份 | 全节点共用一份 |
+| 适用 | 一次性 smoke test、无本地盘 | 本 lab 的 raw vs ISVC 对比 |
+
+KServe 默认给 storage-initializer 的 `memoryLimit` 只有 1Gi，下载 Qwen3-8B 容易 `OOMKilled`。用 PVC 可以避开这个坑，也让 raw 和 ISVC 的冷启动对比不被“下载时间”污染。
+
+#### 7.0.4 hostPath 的边界
+
+这个 PVC 是**单机 lab 方案**：
+
+- `hostPath` 只存在于当前 VM；多节点调度到别的节点会看不到模型；
+- `ReadWriteOnce` 只适合单节点挂载；多副本跨节点要共享存储；
+- 不是生产存储：生产用 S3/NFS/CephFS/CSI PVC，或 KServe `LocalModelCache` 做节点级缓存；
+- `persistentVolumeReclaimPolicy: Retain`：删 PVC 不会删宿主机模型文件；但旧 PV 可能变成 `Released`，再次 apply 前要先清理。
+
+#### 7.0.5 验证与排障
+
+```bash
+kubectl -n kserve-test get pv,pvc
+kubectl -n kserve-test describe pvc d6-models-pvc
+kubectl -n kserve-test exec deploy/vllm-raw -- ls -la /models/config.json
+```
+
+期望：
+
+```text
+NAME             STATUS   VOLUME         CAPACITY   ...
+d6-models-pvc    Bound    d6-models-pv   20Gi       ...
+```
+
+常见问题：
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| PVC `Pending` | hostPath 不存在 / PV `Released` | 确认 `/workspace/models`；删旧 PV 后重新 apply `05` |
+| Pod `ContainerCreating` | PVC 未 Bound | `kubectl describe pod`，先修 PVC |
+| `/models/config.json` 不存在 | `subPath` 写错 | 确认 `subPath: Qwen3-8B-AWQ` |
+| `namespaces "kserve-test" not found` | 没 apply `00` | `kubectl apply -f scripts/d6/00-namespace.yaml` |
+| `persistentvolumeclaim not found` | 没 apply `05` | `kubectl apply -f scripts/d6/05-models-pvc.yaml` |
+
+如果 PV 处于 `Released`：
+
+```bash
+kubectl delete pv d6-models-pv
+kubectl apply -f scripts/d6/05-models-pvc.yaml
+```
+
 ### 7.1 冷启动分解
 
 ```bash
@@ -1083,6 +1196,8 @@ kubectl -n kserve-test get deploy,svc,gateway,httproute,inferencepool
 |---|---|---|
 | `namespaces "kserve-test" not found` | 忘了创建业务 namespace | `kubectl apply -f scripts/d6/00-namespace.yaml` |
 | `persistentvolumeclaim "d6-models-pvc" not found` | 跳过 PVC 步骤 | `kubectl apply -f scripts/d6/05-models-pvc.yaml`，确认 PVC `Bound` |
+| PVC `Pending` / PV `Released` | hostPath 不存在或旧 PV 未清理 | 确认 `/workspace/models`；删旧 PV 后重新 apply `05` |
+| `/models/config.json` 不存在 | `subPath` 写错或模型未下载 | 检查 `subPath: Qwen3-8B-AWQ` 和 `/workspace/models/Qwen3-8B-AWQ/config.json` |
 | `InferenceService` READY=False | cert-manager/Gateway/storage initializer | `kubectl describe isvc`，看 Events |
 | `/mnt/models` 不存在 | 建在 `kserve` 控制面 namespace | 换 `kserve-test` |
 | 401 / gated model | HF token 未配 | `hf-secret` + `ClusterStorageContainer` |
